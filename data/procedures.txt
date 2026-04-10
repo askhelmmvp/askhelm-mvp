@@ -1,0 +1,56 @@
+OWS DISCHARGE PROCEDURE
+
+1. Confirm vessel is en route and outside restricted area
+2. Check bilge tank levels
+3. Verify OWS and OCM operational
+4. Confirm correct valve lineup
+5. Start OWS and monitor ppm continuously
+6. Stop immediately if ppm fluctuates
+7. Record discharge in Oil Record Book
+
+NOTES:
+- Never bypass OCM
+- Always verify overboard valve physically
+
+---
+
+FIRE MAIN LOW PRESSURE CHECK
+
+1. Verify fire pump is running correctly
+2. Check suction valves fully open
+3. Check sea chest and strainers for blockage
+4. Inspect system for leaks
+5. Confirm correct pump selected (main vs emergency)
+6. Check pressure at multiple hydrants
+
+NOTES:
+- Air in system can reduce pressure
+- Blocked strainers common after yard periods
+
+---
+
+EMERGENCY FIRE PUMP TEST
+
+1. Stop main fire pump
+2. Start emergency fire pump
+3. Verify independent operation
+4. Check pressure at hydrants
+5. Confirm suction supply available
+
+NOTES:
+- Must work with engine room unavailable
+- Test under realistic conditions
+
+---
+
+GARBAGE MANAGEMENT PROCEDURE
+
+1. Segregate waste (plastics, food, general)
+2. Store plastics for shore disposal
+3. Confirm vessel position before discharge
+4. Discharge food waste only within limits
+5. Record in Garbage Record Book
+
+NOTES:
+- Double-check no plastics mixed
+- Special areas stricter rules apply

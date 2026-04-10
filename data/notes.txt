@@ -1,0 +1,10 @@
+- Crew unclear on special area boundaries
+- OCM calibration previously overdue (high risk)
+- Garbage segregation inconsistent during busy periods
+- Garbage Record Book entries sometimes incomplete
+- Fire pump tests not always logged properly
+- Emergency fire pump rarely tested under real conditions
+- Fuel changeover logs not consistently completed
+- Some confusion onboard about "en route" definition
+- PSC inspections previously focused heavily on documentation
+- Engineers overloaded during yard periods, checks sometimes rushed

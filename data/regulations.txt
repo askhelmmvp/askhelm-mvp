@@ -1,0 +1,67 @@
+MARPOL Annex I – Oily Water Discharge
+
+ALLOWED:
+- Oil content < 15 ppm
+- Vessel en route
+- Approved OWS and OCM operational
+- Outside special areas
+
+NOT ALLOWED:
+- Discharge in special areas unless strict additional conditions are met
+- If OWS or OCM malfunctioning
+- If ppm readings unstable
+
+KEY RISKS:
+- Incorrect OCM calibration
+- Misidentifying special area boundaries
+- Incorrect valve lineup
+
+---
+
+MARPOL Annex V – Garbage Disposal
+
+ALLOWED:
+- Food waste:
+  - >12 nm if untreated
+  - >3 nm if comminuted or ground
+
+NOT ALLOWED:
+- Plastics NEVER to sea
+- Mixed waste containing plastics
+- Discharge in special areas (strict limitations)
+
+KEY RISKS:
+- Poor segregation onboard
+- Crew misunderstanding discharge distances
+- Incorrect Garbage Record Book entries
+
+---
+
+MARPOL Annex VI – Air Emissions
+
+REQUIREMENTS:
+- Use compliant fuel sulphur content (global ≤0.50%)
+- ECA areas require ≤0.10% sulphur
+- Maintain fuel changeover procedures and logs
+
+KEY RISKS:
+- Incorrect fuel changeover timing
+- Missing or incomplete records
+- Non-compliant fuel use in ECAs
+
+---
+
+SOLAS – Fire Main System
+
+REQUIREMENTS:
+- Fire pumps must deliver required pressure
+- Must supply at least two jets simultaneously
+
+EMERGENCY FIRE PUMP:
+- Independently driven
+- Located outside main machinery space
+- Must function if engine room is lost
+
+KEY RISKS:
+- Loss of main pump in fire
+- Poor maintenance leading to pressure loss
