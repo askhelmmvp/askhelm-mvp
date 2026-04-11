@@ -129,6 +129,7 @@ def load_budget_data() -> pd.DataFrame:
 def classify_question(question: str) -> str:
     q = question.lower()
 
+    # --- HARD RULES FIRST (fast + reliable) ---
     if any(term in q for term in [
         "budget", "remaining", "over budget", "overbudget", "overspend", "overrun",
         "committed", "spent", "cost", "costs", "change order",
@@ -140,7 +141,7 @@ def classify_question(question: str) -> str:
         "psc", "inspection", "weakness", "deficiency",
         "compliance risk", "compliance risks",
         "documentation", "document", "records", "logs", "paperwork",
-        "exposure from documentation"
+        "exposure"
     ]):
         return "psc"
 
@@ -159,8 +160,8 @@ def classify_question(question: str) -> str:
     ]):
         return "garbage"
 
-    return "general"
-
+    # --- LLM FALLBACK ---
+    return llm_interpret_general_question(question)
 
 def get_note_lines() -> list[str]:
     notes = load_text_file("notes.txt")
