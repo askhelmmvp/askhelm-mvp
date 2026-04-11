@@ -1,10 +1,102 @@
 from typing import Optional
+import os
 import re
 from pathlib import Path
 import pandas as pd
+from openai import OpenAI
+
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 DATA_DIR = Path("data")
 
+def llm_rephrase_why(context: str) -> str:
+    try:
+        response = client.responses.create(
+            model="gpt-5",
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are AskHelm. Rewrite the explanation into one short, practical sentence. "
+                        "Do not add facts. Keep it under 18 words."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": f"Rewrite this explanation: {context}",
+                },
+            ],
+        )
+        text = getattr(response, "output_text", "").strip()
+        return text or context
+    except Exception:
+        return context
+
+
+def llm_interpret_budget_question(question: str) -> str:
+    try:
+        response = client.responses.create(
+            model="gpt-5",
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify the yacht budget question into exactly one label:\n"
+                        "over_budget_items\n"
+                        "remaining_by_category\n"
+                        "committed_by_category\n"
+                        "categories_at_risk\n"
+                        "biggest_budget_concern\n"
+                        "overall_budget\n"
+                        "unknown\n\n"
+                        "Return only the label."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": question,
+                },
+            ],
+        )
+        label = getattr(response, "output_text", "").strip().lower()
+        allowed = {
+            "over_budget_items",
+            "remaining_by_category",
+            "committed_by_category",
+            "categories_at_risk",
+            "biggest_budget_concern",
+            "overall_budget",
+            "unknown",
+        }
+        return label if label in allowed else "unknown"
+    except Exception:
+        return "unknown"
+
+
+def llm_interpret_general_question(question: str) -> str:
+    try:
+        response = client.responses.create(
+            model="gpt-5",
+            input=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Classify the yacht operations question into exactly one label:\n"
+                        "budget\npsc\nows\nfire\ngarbage\ngeneral\n\n"
+                        "Return only the label."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": question,
+                },
+            ],
+        )
+        label = getattr(response, "output_text", "").strip().lower()
+        allowed = {"budget", "psc", "ows", "fire", "garbage", "general"}
+        return label if label in allowed else "general"
+    except Exception:
+        return "general"
 
 def load_text_file(filename: str) -> str:
     path = DATA_DIR / filename

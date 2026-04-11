@@ -10,7 +10,7 @@ def whatsapp_reply():
     incoming = request.form.get("Body", "").strip()
 
     if incoming.lower() in ["hi", "hello", "start"]:
-        answer = """AskHelm ready.
+        answer = """Ready.
 
 Send your question."""
     else:
