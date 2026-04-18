@@ -828,6 +828,44 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
     return build_three_way_comparison_response(ranked), state
 
 
+def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
+    extracted = extract_commercial_document_from_images([file_path])
+
+    if not isinstance(extracted, dict):
+        raise ValueError("Image extraction did not return a JSON object")
+
+    extracted = normalise_doc_type(extracted)
+    doc_record = make_document_record(extracted, file_path)
+
+    supplier = doc_record["supplier_name"] or "Unknown supplier"
+    total = doc_record["total"]
+    currency = doc_record["currency"]
+    line_count = len(doc_record["line_items"])
+    doc_type = doc_record["doc_type"]
+
+    logger.info("Image extracted: type=%s supplier=%s total=%s %s", doc_type, supplier, total, currency)
+
+    if doc_type == "quote":
+        return _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+
+    if doc_type == "invoice":
+        return _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+
+    state, _ = create_pending_session(doc_record, state)
+    return _make_response(
+        decision="IMAGE PROCESSED",
+        why=(
+            f"Document image extracted from {os.path.basename(file_path)}. "
+            f"Supplier: {supplier}. {line_count} line items found. "
+            f"Could not classify as quote or invoice."
+        ),
+        actions=[
+            "Ask: show extraction",
+            "Upload another document to compare",
+        ],
+    ), state
+
+
 def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
     text = extract_pdf_text(file_path)
     if not text.strip():
@@ -963,13 +1001,14 @@ def whatsapp_reply():
 
             if media_type == "application/pdf":
                 answer, state = _handle_pdf_upload(file_path, state)
+            elif media_type in ("image/jpeg", "image/png"):
+                answer, state = _handle_image_upload(file_path, state)
             else:
                 answer = _make_response(
                     decision="FILE RECEIVED",
                     why=f"Document saved as {os.path.basename(file_path)}.",
                     actions=[
-                        "PDF reading is enabled",
-                        "Image reading comes next",
+                        "PDF and image (JPEG, PNG) reading is enabled",
                         "Upload another document for comparison",
                     ],
                 )

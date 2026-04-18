@@ -6,6 +6,7 @@ Run with:  python -m pytest tests/test_sessions.py -v
 import sys
 import os
 import unittest
+from unittest.mock import patch, MagicMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
@@ -552,6 +553,159 @@ class TestExtractionView(unittest.TestCase):
     def test_extraction_does_not_break_comparison_routing(self):
         self.assertNotEqual(classify_text("show extraction"), "quote_compare")
         self.assertNotEqual(classify_text("show extraction"), "new_session")
+
+
+# ---------------------------------------------------------------------------
+# Image extraction
+# ---------------------------------------------------------------------------
+
+_QUOTE_EXTRACTION = {
+    "doc_type": "quote",
+    "supplier_name": "Pacific Marine Supplies",
+    "document_number": "Q-2024-099",
+    "document_date": "2024-04-01",
+    "currency": "USD",
+    "subtotal": 8200.0,
+    "tax": 820.0,
+    "total": 9020.0,
+    "exclusions": [],
+    "assumptions": [],
+    "line_items": [
+        {"description": "Anchor chain 10mm x 50m", "quantity": 1, "unit": None, "unit_rate": 4500.0, "line_total": 4500.0},
+        {"description": "Windlass service kit", "quantity": 1, "unit": None, "unit_rate": 3700.0, "line_total": 3700.0},
+    ],
+}
+
+_INVOICE_EXTRACTION = {
+    "doc_type": "invoice",
+    "supplier_name": "Pacific Marine Supplies",
+    "document_number": "INV-2024-099",
+    "document_date": "2024-04-15",
+    "currency": "USD",
+    "subtotal": 8200.0,
+    "tax": 820.0,
+    "total": 9020.0,
+    "exclusions": [],
+    "assumptions": [],
+    "line_items": [
+        {"description": "Anchor chain 10mm x 50m", "quantity": 1, "unit": None, "unit_rate": 4500.0, "line_total": 4500.0},
+        {"description": "Windlass service kit", "quantity": 1, "unit": None, "unit_rate": 3700.0, "line_total": 3700.0},
+    ],
+}
+
+_UNKNOWN_EXTRACTION = {
+    "doc_type": None,
+    "supplier_name": "Unknown Co",
+    "document_number": None,
+    "document_date": None,
+    "currency": "EUR",
+    "subtotal": None,
+    "tax": None,
+    "total": 500.0,
+    "exclusions": [],
+    "assumptions": [],
+    "line_items": [
+        {"description": "Misc parts", "quantity": 1, "unit": None, "unit_rate": 500.0, "line_total": 500.0},
+    ],
+}
+
+
+class TestImageExtraction(unittest.TestCase):
+
+    def _empty_state(self):
+        return {"user_id": "test_user", "active_session_id": None, "sessions": [], "documents": []}
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_jpeg_quote_returns_quote_received(self, mock_vision):
+        mock_vision.return_value = _QUOTE_EXTRACTION
+        from whatsapp_app import _handle_image_upload
+        answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
+
+        self.assertIn("QUOTE RECEIVED", answer)
+        self.assertIn("Pacific Marine Supplies", answer)
+        self.assertIn("9020.0", answer)
+        mock_vision.assert_called_once_with(["data/test_doc.jpg"])
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_png_quote_returns_quote_received(self, mock_vision):
+        mock_vision.return_value = _QUOTE_EXTRACTION
+        from whatsapp_app import _handle_image_upload
+        answer, state = _handle_image_upload("data/test_doc.png", self._empty_state())
+
+        self.assertIn("QUOTE RECEIVED", answer)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_image_invoice_returns_invoice_result(self, mock_vision):
+        mock_vision.return_value = _INVOICE_EXTRACTION
+        from whatsapp_app import _handle_image_upload
+        answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
+
+        # No matching quote — returns INVOICE RECEIVED NO MATCHING QUOTE
+        self.assertIn("INVOICE RECEIVED", answer)
+        self.assertIn("Pacific Marine Supplies", answer)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_image_stored_in_state_documents(self, mock_vision):
+        mock_vision.return_value = _QUOTE_EXTRACTION
+        from whatsapp_app import _handle_image_upload
+        _, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
+
+        self.assertEqual(len(state["documents"]), 1)
+        doc = state["documents"][0]
+        self.assertEqual(doc["supplier_name"], "Pacific Marine Supplies")
+        self.assertEqual(doc["total"], 9020.0)
+        self.assertEqual(doc["currency"], "USD")
+        self.assertEqual(len(doc["line_items"]), 2)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_image_quote_then_show_extraction(self, mock_vision):
+        mock_vision.return_value = _QUOTE_EXTRACTION
+        from whatsapp_app import _handle_image_upload, _handle_text_message
+
+        _, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
+        answer, _ = _handle_text_message("show extraction", state)
+
+        self.assertIn("EXTRACTION VIEW", answer)
+        self.assertIn("Pacific Marine Supplies", answer)
+        self.assertIn("9020.0", answer)
+        self.assertIn("Anchor chain", answer)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_unknown_doc_type_returns_image_processed(self, mock_vision):
+        mock_vision.return_value = _UNKNOWN_EXTRACTION
+        from whatsapp_app import _handle_image_upload
+        answer, _ = _handle_image_upload("data/test_doc.jpg", self._empty_state())
+
+        self.assertIn("IMAGE PROCESSED", answer)
+        self.assertIn("show extraction", answer)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_image_quote_then_invoice_triggers_comparison(self, mock_vision):
+        """Image quote followed by matching image invoice auto-compares."""
+        from whatsapp_app import _handle_image_upload
+
+        mock_vision.return_value = _QUOTE_EXTRACTION
+        _, state = _handle_image_upload("data/quote.jpg", self._empty_state())
+
+        mock_vision.return_value = _INVOICE_EXTRACTION
+        answer, state = _handle_image_upload("data/invoice.jpg", state)
+
+        # Same supplier, same total → auto-match → comparison result
+        self.assertIn("DECISION:", answer)
+        self.assertNotIn("IMAGE PROCESSED", answer)
+        self.assertEqual(len(state["documents"]), 2)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_pdf_flow_unaffected_by_image_handler(self, mock_vision):
+        """PDF handler must not call the vision service."""
+        from whatsapp_app import _handle_pdf_upload
+        with patch("whatsapp_app.extract_commercial_document_with_claude") as mock_text_llm, \
+             patch("whatsapp_app.extract_pdf_text") as mock_text:
+            mock_text.return_value = "some text content"
+            mock_text_llm.return_value = _QUOTE_EXTRACTION
+            _handle_pdf_upload("data/test.pdf", self._empty_state())
+
+        mock_vision.assert_not_called()
 
 
 if __name__ == "__main__":
