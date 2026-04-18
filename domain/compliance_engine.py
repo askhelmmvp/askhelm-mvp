@@ -31,8 +31,8 @@ def answer_compliance_query(question: str) -> str:
 
 
 def answer_compliance_followup(topic: str) -> str:
-    """Re-retrieves context from the original compliance topic, answers 'what should I do'."""
-    from services.anthropic_service import answer_compliance_question, NOT_COVERED_FALLBACK
+    """Re-retrieves context for the original topic; returns action-focused follow-up only."""
+    from services.anthropic_service import answer_compliance_followup_question, NOT_COVERED_FALLBACK
 
     try:
         retriever = _get_retriever()
@@ -40,13 +40,11 @@ def answer_compliance_followup(topic: str) -> str:
     except Exception:
         return (
             "DECISION: Cannot confirm — knowledge base unavailable.\n"
-            "WHY: Compliance index failed to load.\n"
-            "SOURCE: N/A\n"
-            "ACTIONS: Check the knowledge base index file and restart the service."
+            "WHY:\nCompliance index failed to load.\n"
+            "ACTIONS:\n• Check the knowledge base index file and restart the service."
         )
 
     if not chunks:
         return NOT_COVERED_FALLBACK
 
-    followup_q = f"What actions are required regarding: {topic}"
-    return answer_compliance_question(followup_q, chunks)
+    return answer_compliance_followup_question(topic, chunks)

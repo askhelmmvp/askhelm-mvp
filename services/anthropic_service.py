@@ -138,3 +138,61 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
     )
 
     return response.content[0].text.strip()
+
+
+def answer_compliance_followup_question(topic: str, chunks: List[Dict[str, Any]]) -> str:
+    """Action-focused follow-up to a compliance answer — no definition, no SOURCE, max 4 bullets."""
+    if not chunks:
+        return NOT_COVERED_FALLBACK
+
+    context_blocks = []
+    for c in chunks:
+        context_blocks.append(
+            f"[{c.get('source_reference', 'unknown')}]\n{c.get('content', '')}"
+        )
+    context = "\n\n---\n\n".join(context_blocks)
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=300,
+        system=(
+            "You are a Chief Engineer giving an action brief to the crew.\n"
+            "The crew already knows the regulation and the decision. They want to know what to DO.\n"
+            "\n"
+            "STRICT RULES — NO EXCEPTIONS:\n"
+            "1. Use ONLY the provided regulation excerpts. No external knowledge.\n"
+            "2. Do NOT repeat or re-explain the regulation definition.\n"
+            "3. Do NOT repeat the compliance decision they already received.\n"
+            "4. Do NOT include a SOURCE line.\n"
+            "5. Maximum 4 bullet points in ACTIONS — immediate, onboard actions only.\n"
+            "6. If the excerpts give no actionable guidance, say so in DECISION and stop.\n"
+            "\n"
+            "Respond in this exact format — nothing before, nothing after:\n"
+            "DECISION: <short action statement — what needs to happen next>\n"
+            "\n"
+            "WHY:\n"
+            "<one line — practical reason, not a definition>\n"
+            "\n"
+            "ACTIONS:\n"
+            "• <action 1>\n"
+            "• <action 2>\n"
+            "• <action 3>\n"
+            "• <action 4 — only if needed>"
+        ),
+        messages=[
+            {
+                "role": "user",
+                "content": (
+                    "Regulation excerpts:\n\n"
+                    + context
+                    + "\n\n---\n\n"
+                    + f"The crew has just received a compliance answer about: {topic}\n\n"
+                    + "What should they do now? "
+                    + "Give immediate, practical, onboard actions only. "
+                    + "Do not re-explain the regulation."
+                ),
+            }
+        ],
+    )
+
+    return response.content[0].text.strip()

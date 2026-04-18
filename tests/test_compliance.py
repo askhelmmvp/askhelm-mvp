@@ -230,20 +230,26 @@ class TestComplianceFollowUp(unittest.TestCase):
 
     # --- scenario: compliance Q then "what should I do" ---
     @patch("domain.compliance_engine._get_retriever")
-    @patch("services.anthropic_service.answer_compliance_question")
+    @patch("services.anthropic_service.answer_compliance_followup_question")
     def test_what_should_i_do_routes_to_compliance_when_last_context_is_compliance(
-        self, mock_llm, mock_retriever_getter
+        self, mock_followup, mock_retriever_getter
     ):
         mock_retriever = MagicMock()
         mock_retriever.search.return_value = [
             {"source_reference": "ISM Code Chapter 9", "content": "Non-conformities must be documented and corrected."}
         ]
         mock_retriever_getter.return_value = mock_retriever
-        mock_llm.return_value = (
-            "DECISION: Yes — overdue fire pump testing is a non-conformity under ISM.\n"
-            "WHY: ISM Code requires periodic testing; failure to test is a non-conformity.\n"
-            "SOURCE: ISM Code Chapter 9\n"
-            "ACTIONS: • Raise a non-conformity report\n• Schedule and complete the overdue test\n• Update the SMS records."
+        mock_followup.return_value = (
+            "DECISION: Raise and close the non-conformity.\n"
+            "\n"
+            "WHY:\n"
+            "Overdue testing is an open non-conformity until documented and corrected.\n"
+            "\n"
+            "ACTIONS:\n"
+            "• Raise a non-conformity report in the SMS\n"
+            "• Schedule and complete the overdue fire pump test\n"
+            "• Record test results in the planned maintenance log\n"
+            "• Close the NC once evidence is filed"
         )
 
         # State simulates: compliance question was just answered
@@ -258,12 +264,13 @@ class TestComplianceFollowUp(unittest.TestCase):
         }
 
         from whatsapp_app import _handle_text_message
-        answer, updated_state = _handle_text_message("what should i do", state)
+        answer, _ = _handle_text_message("what should i do", state)
 
         self.assertIn("DECISION:", answer)
         self.assertIn("ACTIONS:", answer)
         self.assertNotIn("NO ACTIVE COMPARISON", answer)
-        mock_llm.assert_called_once()
+        # Must call the action-focused function, NOT the full explanation function
+        mock_followup.assert_called_once()
 
     # --- scenario: "what should I do" with no compliance context falls through to commercial ---
     def test_what_should_i_do_goes_commercial_when_no_compliance_context(self):
@@ -331,6 +338,128 @@ class TestComplianceFollowUp(unittest.TestCase):
         _, updated_state = _handle_text_message("new comparison", state)
 
         self.assertNotIn("last_context", updated_state)
+
+
+class TestComplianceFollowUpBehaviour(unittest.TestCase):
+    """Follow-up response must be action-focused and must not repeat the original answer."""
+
+    @patch("services.anthropic_service.client")
+    def test_followup_system_prompt_forbids_repetition(self, mock_client):
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=(
+            "DECISION: Raise and close the non-conformity.\n"
+            "\n"
+            "WHY:\n"
+            "Overdue testing is an open non-conformity until corrected.\n"
+            "\n"
+            "ACTIONS:\n"
+            "• Raise an NC report\n"
+            "• Complete the overdue test\n"
+            "• Record results\n"
+            "• Close the NC"
+        ))]
+        mock_client.messages.create.return_value = mock_response
+
+        from services.anthropic_service import answer_compliance_followup_question
+        chunks = [{"source_reference": "ISM Code Ch 9", "content": "Non-conformities must be corrected."}]
+        answer_compliance_followup_question("is overdue fire pump testing a non-conformity?", chunks)
+
+        call_kwargs = mock_client.messages.create.call_args[1]
+        system_prompt = call_kwargs["system"]
+
+        # Must instruct not to repeat the decision or definition
+        self.assertIn("Do NOT repeat", system_prompt)
+        self.assertIn("re-explain", system_prompt)
+        # Must not include a SOURCE line
+        self.assertNotIn("SOURCE:", system_prompt.split("RULES")[0] if "RULES" in system_prompt else "")
+        # Must cap at 4 bullets
+        self.assertIn("Maximum 4", system_prompt)
+        # Must use shorter max_tokens than the full explanation
+        self.assertLessEqual(call_kwargs["max_tokens"], 400)
+
+    @patch("services.anthropic_service.client")
+    def test_followup_response_has_no_source_line(self, mock_client):
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=(
+            "DECISION: Complete the overdue test immediately.\n"
+            "\n"
+            "WHY:\n"
+            "An open non-conformity must be corrected before the next audit.\n"
+            "\n"
+            "ACTIONS:\n"
+            "• Raise NC report in the SMS\n"
+            "• Run and record the fire pump test\n"
+            "• Close NC with evidence attached"
+        ))]
+        mock_client.messages.create.return_value = mock_response
+
+        from services.anthropic_service import answer_compliance_followup_question
+        chunks = [{"source_reference": "ISM Code Ch 9", "content": "Non-conformities must be corrected."}]
+        result = answer_compliance_followup_question(
+            "is overdue fire pump testing a non-conformity?", chunks
+        )
+
+        # Follow-up format must NOT include SOURCE
+        self.assertNotIn("SOURCE:", result)
+        # Must have the action format
+        self.assertIn("DECISION:", result)
+        self.assertIn("WHY:", result)
+        self.assertIn("ACTIONS:", result)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_followup_question")
+    def test_full_scenario_fire_pump_nc_then_what_to_do(self, mock_followup, mock_retriever_getter):
+        """
+        Scenario: user asks about NC, then asks 'what should I do'.
+        Second response must be shorter and action-focused.
+        """
+        TOPIC = "is overdue fire pump testing a non-conformity?"
+        FIRST_ANSWER = (
+            "DECISION: Yes — overdue fire pump testing is a non-conformity under the ISM Code.\n"
+            "WHY: ISM Code Chapter 10 requires periodic testing of safety equipment; "
+            "any overdue item constitutes a non-conformity against the SMS.\n"
+            "SOURCE: ISM Code Chapter 10, Section 10.3\n"
+            "ACTIONS: • Document the overdue test\n• Raise a non-conformity report\n• Schedule the test"
+        )
+        FOLLOWUP_ANSWER = (
+            "DECISION: Close the non-conformity by completing the test.\n"
+            "\n"
+            "WHY:\n"
+            "The NC remains open until the fire pump test is done and recorded.\n"
+            "\n"
+            "ACTIONS:\n"
+            "• Raise NC report in the SMS now\n"
+            "• Run and record the fire pump test\n"
+            "• Attach evidence to the NC\n"
+            "• Close NC before next internal audit"
+        )
+
+        mock_retriever = MagicMock()
+        mock_retriever.search.return_value = [
+            {"source_reference": "ISM Code Ch 10", "content": "Safety equipment must be tested periodically."}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_followup.return_value = FOLLOWUP_ANSWER
+
+        state = {
+            "sessions": [],
+            "documents": [],
+            "active_session_id": None,
+            "last_context": {"type": "compliance", "topic": TOPIC},
+        }
+
+        from whatsapp_app import _handle_text_message
+        answer, _ = _handle_text_message("what should i do", state)
+
+        # Follow-up must be action-focused
+        self.assertIn("ACTIONS:", answer)
+        self.assertNotIn("NO ACTIVE COMPARISON", answer)
+        # Follow-up must not repeat the full explanation from the first answer
+        self.assertNotIn("SOURCE:", answer)
+        # Follow-up must be shorter than or equal to what would be a full repeat
+        self.assertLess(len(answer), len(FIRST_ANSWER))
+        # The engine must have called the action-focused function, not the full one
+        mock_followup.assert_called_once()
 
 
 class TestComplianceGrounding(unittest.TestCase):
