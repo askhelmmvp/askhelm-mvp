@@ -441,5 +441,118 @@ class TestSessionReset(unittest.TestCase):
         self.assertEqual(len(state["documents"]), 1, "Documents are preserved after reset")
 
 
+# ---------------------------------------------------------------------------
+# Extraction view command
+# ---------------------------------------------------------------------------
+
+class TestExtractionView(unittest.TestCase):
+
+    def _state_with_doc(self, supplier="Marine Parts Ltd", total=4500.0, currency="EUR",
+                        doc_type="quote", items=None):
+        if items is None:
+            items = [
+                {"description": "Fire pump overhaul", "quantity": 1, "unit_rate": 2000.0, "line_total": 2000.0},
+                {"description": "Gasket kit", "quantity": 2, "unit_rate": 150.0, "line_total": 300.0},
+                {"description": "Labour", "quantity": 8, "unit_rate": 275.0, "line_total": 2200.0},
+            ]
+        doc = make_document_record(
+            {
+                "doc_type": doc_type,
+                "supplier_name": supplier,
+                "document_number": "Q-2024-042",
+                "document_date": "2024-03-10",
+                "currency": currency,
+                "total": total,
+                "subtotal": total,
+                "tax": 0,
+                "line_items": items,
+                "exclusions": [],
+                "assumptions": [],
+            },
+            "data/test_quote.pdf",
+        )
+        state = {"user_id": "test_user", "active_session_id": None, "sessions": [], "documents": [doc]}
+        return state, doc
+
+    def test_show_extraction_intent_classified(self):
+        self.assertEqual(classify_text("show extraction"), "show_extraction")
+        self.assertEqual(classify_text("show extracted data"), "show_extraction")
+        self.assertEqual(classify_text("what did you extract"), "show_extraction")
+
+    def test_show_extraction_returns_structured_output(self):
+        from whatsapp_app import _handle_text_message
+        state, doc = self._state_with_doc()
+        answer, _ = _handle_text_message("show extraction", state)
+
+        self.assertIn("EXTRACTION VIEW", answer)
+        self.assertIn("Marine Parts Ltd", answer)
+        self.assertIn("4500.0", answer)
+        self.assertIn("EUR", answer)
+        self.assertIn("Fire pump overhaul", answer)
+
+    def test_show_extracted_data_alias(self):
+        from whatsapp_app import _handle_text_message
+        state, _ = self._state_with_doc()
+        answer, _ = _handle_text_message("show extracted data", state)
+        self.assertIn("EXTRACTION VIEW", answer)
+
+    def test_what_did_you_extract_alias(self):
+        from whatsapp_app import _handle_text_message
+        state, _ = self._state_with_doc()
+        answer, _ = _handle_text_message("what did you extract", state)
+        self.assertIn("EXTRACTION VIEW", answer)
+
+    def test_no_document_returns_helpful_message(self):
+        from whatsapp_app import _handle_text_message
+        state = {"user_id": "test_user", "active_session_id": None, "sessions": [], "documents": []}
+        answer, _ = _handle_text_message("show extraction", state)
+        self.assertIn("No document available", answer)
+
+    def test_shows_last_uploaded_document(self):
+        from whatsapp_app import _handle_text_message
+        state = {"user_id": "test_user", "active_session_id": None, "sessions": [], "documents": []}
+        doc_a = make_document_record(
+            {"doc_type": "quote", "supplier_name": "First Supplier", "currency": "EUR",
+             "total": 1000.0, "subtotal": 1000.0, "tax": 0,
+             "line_items": [], "exclusions": [], "assumptions": [],
+             "document_number": None, "document_date": None},
+            "data/first.pdf",
+        )
+        doc_b = make_document_record(
+            {"doc_type": "invoice", "supplier_name": "Last Supplier", "currency": "GBP",
+             "total": 2500.0, "subtotal": 2500.0, "tax": 0,
+             "line_items": [], "exclusions": [], "assumptions": [],
+             "document_number": None, "document_date": None},
+            "data/last.pdf",
+        )
+        state["documents"] = [doc_a, doc_b]
+        answer, _ = _handle_text_message("show extraction", state)
+
+        self.assertIn("Last Supplier", answer)
+        self.assertNotIn("First Supplier", answer)
+
+    def test_line_items_capped_at_five(self):
+        from whatsapp_app import _handle_text_message
+        items = [
+            {"description": f"Item {i}", "quantity": 1, "unit_rate": 100.0, "line_total": 100.0}
+            for i in range(8)
+        ]
+        state, _ = self._state_with_doc(items=items)
+        answer, _ = _handle_text_message("show extraction", state)
+
+        self.assertIn("Item 0", answer)
+        self.assertIn("Item 4", answer)
+        self.assertNotIn("Item 5", answer)
+        self.assertIn("3 more", answer)
+
+    def test_extraction_does_not_break_compliance_routing(self):
+        self.assertNotEqual(classify_text("show extraction"), "compliance_question")
+        self.assertNotEqual(classify_text("show extracted data"), "compliance_question")
+
+    def test_extraction_does_not_break_comparison_routing(self):
+        self.assertNotEqual(classify_text("show extraction"), "quote_compare")
+        self.assertNotEqual(classify_text("show extraction"), "new_session")
+
+
 if __name__ == "__main__":
     unittest.main()

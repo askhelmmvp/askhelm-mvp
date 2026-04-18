@@ -653,6 +653,45 @@ def build_new_session_response() -> str:
     )
 
 
+def build_extraction_view_response(state: dict) -> str:
+    docs = state.get("documents", [])
+    if not docs:
+        return "No document available for extraction"
+
+    doc = docs[-1]
+
+    supplier = (doc.get("supplier_name") or "Unknown").strip() or "Unknown"
+    total = doc.get("total")
+    currency = (doc.get("currency") or "").strip().upper()
+    doc_type = (doc.get("doc_type") or "unknown").strip().capitalize()
+    line_items = doc.get("line_items") or []
+
+    total_str = f"{total} {currency}".strip() if total is not None else "Unknown"
+
+    item_lines = []
+    for item in line_items[:5]:
+        desc = (item.get("description") or "Unnamed item").strip()
+        line_total = item.get("line_total")
+        if line_total is not None:
+            item_lines.append(f"• {desc} ({line_total} {currency})")
+        else:
+            item_lines.append(f"• {desc}")
+
+    if len(line_items) > 5:
+        item_lines.append(f"• + {len(line_items) - 5} more items")
+
+    items_section = "\n".join(item_lines) if item_lines else "• No line items extracted"
+
+    return (
+        f"DECISION:\nEXTRACTION VIEW\n\n"
+        f"DATA:\n"
+        f"Type: {doc_type}\n"
+        f"Supplier: {supplier}\n"
+        f"Total: {total_str}\n\n"
+        f"Items:\n{items_section}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # Upload handling
 # ---------------------------------------------------------------------------
@@ -874,6 +913,9 @@ def _handle_text_message(incoming: str, state: dict) -> Tuple[str, dict]:
 
     if intent == "show_missing":
         return build_missing_items_response(comparison_data), state
+
+    if intent == "show_extraction":
+        return build_extraction_view_response(state), state
 
     if intent == "what_to_do":
         return build_what_should_i_do_response(comparison_data), state

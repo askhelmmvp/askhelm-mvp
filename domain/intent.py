@@ -38,6 +38,9 @@ _FOLLOW_UPS = {
     "show added items": "show_added",
     "show missing items": "show_missing",
     "what should i do": "what_to_do",
+    "show extraction": "show_extraction",
+    "show extracted data": "show_extraction",
+    "what did you extract": "show_extraction",
 }
 
 # Phrases that request follow-up actions/clarification after a compliance answer.
