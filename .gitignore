@@ -1,3 +1,23 @@
+# Secrets
 .env
+.env.*
+.env.save
+readme.txt
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# Runtime user data (stored on persistent disk in production, not in git)
+data/upload_*.pdf
+data/parsed/*
+data/rendered/*
+data/users/*
+
+# data/knowledge_base/ is intentionally committed — static KB files belong in the repo
+CLAUDE.md

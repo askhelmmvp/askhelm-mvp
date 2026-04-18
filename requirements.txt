@@ -1,5 +1,11 @@
+anthropic
 flask
-twilio
+gunicorn
 openai
 pandas
+PyMuPDF
+pypdf
 python-dotenv
+requests
+scikit-learn
+twilio

@@ -1,0 +1,30 @@
+services:
+  - type: web
+    name: askhelm-mvp
+    env: python
+    region: frankfurt
+    plan: starter
+
+    buildCommand: pip install -r requirements.txt
+
+    # Single worker avoids race conditions on file-based session state.
+    # Upgrade to workers 2+ only after migrating sessions to a database or
+    # adding file locking (see NOTES in session_store.py).
+    startCommand: gunicorn whatsapp_app:app --workers 1 --threads 4 --bind 0.0.0.0:$PORT --timeout 120
+
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+      - key: STORAGE_DIR
+        value: /var/data/askhelm
+      - key: ANTHROPIC_API_KEY
+        sync: false          # set in Render dashboard
+      - key: TWILIO_ACCOUNT_SID
+        sync: false          # set in Render dashboard
+      - key: TWILIO_AUTH_TOKEN
+        sync: false          # set in Render dashboard
+
+    disk:
+      name: askhelm-storage
+      mountPath: /var/data/askhelm
+      sizeGB: 5

@@ -6,7 +6,10 @@ python3 app.py
 
 python3 whatsapp_app.py
 
-Twilio verification code:
-QHC3A33SBRT2EBKENGE551T6
+-> new tab
+ngrok http 10000
 
-ngrok http 5001
+->
+
+pkill -f whatsapp_app.py
+python3 whatsapp_app.py

@@ -1,0 +1,328 @@
+import os
+import json
+import requests
+from dotenv import load_dotenv
+from flask import Flask, request
+from twilio.twiml.messaging_response import MessagingResponse
+
+from domain.extraction import extract_pdf_text, render_pdf_pages_to_images
+from services.anthropic_service import extract_commercial_document_with_claude
+from services.anthropic_vision_service import extract_commercial_document_from_images
+from domain.compare import compare_documents
+
+load_dotenv(dotenv_path=".env")
+
+TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+
+BASE_CURRENCY = "EUR"
+
+FX_RATES = {
+    ("GBP", "EUR"): 1.1483,
+    ("EUR", "GBP"): 1 / 1.1483,
+}
+
+app = Flask(__name__)
+
+
+def download_file(url: str, content_type: str) -> str:
+    ext_map = {
+        "application/pdf": ".pdf",
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/webp": ".webp",
+    }
+    ext = ext_map.get(content_type, ".bin")
+
+    os.makedirs("data", exist_ok=True)
+    filename = f"upload_{abs(hash(url))}{ext}"
+    filepath = os.path.join("data", filename)
+
+    r = requests.get(
+        url,
+        auth=(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN),
+        timeout=30,
+    )
+    r.raise_for_status()
+
+    with open(filepath, "wb") as f:
+        f.write(r.content)
+
+    return filepath
+
+
+def get_saved_docs() -> list[str]:
+    saved_dir = "data/parsed"
+    os.makedirs(saved_dir, exist_ok=True)
+
+    files = [
+        os.path.join(saved_dir, f)
+        for f in os.listdir(saved_dir)
+        if f.endswith(".json")
+    ]
+    files.sort(key=os.path.getmtime)
+    return files
+
+
+def convert_currency(amount, from_cur, to_cur):
+    if amount is None or not from_cur or not to_cur:
+        return amount
+
+    from_cur = from_cur.strip().upper()
+    to_cur = to_cur.strip().upper()
+
+    if from_cur == to_cur:
+        return amount
+
+    rate = FX_RATES.get((from_cur, to_cur))
+    if rate is None:
+        return None
+
+    return round(amount * rate, 2)
+
+
+def build_comparison_response(doc_a, doc_b, comparison):
+    supplier_a = (doc_a.get("supplier_name") or "first supplier").strip()
+    supplier_b = (doc_b.get("supplier_name") or "second supplier").strip()
+
+    currency_a = (doc_a.get("currency") or "").strip().upper()
+    currency_b = (doc_b.get("currency") or "").strip().upper()
+
+    total_a = comparison.get("total_a")
+    total_b = comparison.get("total_b")
+    added_items = comparison.get("added_items") or []
+    missing_items = comparison.get("missing_items") or []
+
+    total_a_converted = convert_currency(total_a, currency_a, BASE_CURRENCY)
+    total_b_converted = convert_currency(total_b, currency_b, BASE_CURRENCY)
+
+    delta = None
+    delta_percent = None
+    if (
+        total_a_converted is not None
+        and total_b_converted is not None
+        and total_a_converted != 0
+    ):
+        delta = round(total_b_converted - total_a_converted, 2)
+        delta_percent = (delta / total_a_converted) * 100
+
+    def get_item_names(items, limit=2):
+        names = []
+        for item in items[:limit]:
+            name = (item.get("description") or "Unnamed item").strip()
+            if name:
+                names.append(name)
+
+        extra_count = max(0, len(items) - limit)
+        if extra_count > 0:
+            names.append(f"+ {extra_count} more")
+
+        return names
+
+    added_names = get_item_names(added_items)
+    missing_names = get_item_names(missing_items)
+
+    if (
+        currency_a
+        and currency_b
+        and currency_a != currency_b
+        and (total_a_converted is None or total_b_converted is None)
+    ):
+        risks = []
+        if added_names:
+            risks.append(f"Additional items: {', '.join(added_names)}")
+        if missing_names:
+            risks.append(f"Missing items: {', '.join(missing_names)}")
+        risks.append("Totals are not directly comparable across different currencies")
+
+        actions = [
+            f"Convert both quotations into {BASE_CURRENCY} before deciding",
+            "Check scope differences first",
+            "Use the same exchange-rate date for both offers",
+        ]
+
+        risks_text = "\n- ".join(risks)
+        actions_text = "\n- ".join(actions)
+
+        return f"""DECISION: CURRENCY MISMATCH
+
+WHY: {supplier_a} is in {currency_a} and {supplier_b} is in {currency_b}, so the totals are not yet directly comparable.
+
+RISKS:
+- {risks_text}
+
+ACTIONS:
+- {actions_text}"""
+
+    if delta is None:
+        decision = "QUOTATION COMPARISON COMPLETE"
+        why = "Both quotations were read, but the totals could not be compared confidently."
+    elif delta > 0:
+        decision = f"ALTERNATIVE QUOTATION FROM {supplier_b.upper()} IS HIGHER"
+        why = (
+            f"{supplier_a}: {total_a} {currency_a} = {total_a_converted} {BASE_CURRENCY}. "
+            f"{supplier_b}: {total_b} {currency_b} = {total_b_converted} {BASE_CURRENCY}. "
+            f"The second quotation is {delta_percent:.1f}% higher."
+        )
+    elif delta < 0:
+        decision = f"ALTERNATIVE QUOTATION FROM {supplier_b.upper()} IS LOWER"
+        why = (
+            f"{supplier_a}: {total_a} {currency_a} = {total_a_converted} {BASE_CURRENCY}. "
+            f"{supplier_b}: {total_b} {currency_b} = {total_b_converted} {BASE_CURRENCY}. "
+            f"The second quotation is {abs(delta_percent):.1f}% lower."
+        )
+    else:
+        decision = "QUOTATIONS MATCH IN EUR"
+        why = (
+            f"{supplier_a}: {total_a} {currency_a} = {total_a_converted} {BASE_CURRENCY}. "
+            f"{supplier_b}: {total_b} {currency_b} = {total_b_converted} {BASE_CURRENCY}. "
+            f"Both quotations align on price."
+        )
+
+    risks = []
+    if added_names:
+        risks.append(f"Additional items in {supplier_b}: {', '.join(added_names)}")
+    if missing_names:
+        risks.append(f"Items not carried over from {supplier_a}: {', '.join(missing_names)}")
+    if delta is not None and delta > 0:
+        risks.append("Higher price may reflect scope growth, uplift, or poorer value")
+
+    if not risks:
+        risks.append("No obvious commercial risks detected from totals and listed items")
+
+    if delta is not None and delta > 0:
+        actions = [
+            f"Challenge {supplier_b} on the price gap against {supplier_a}",
+            "Check whether the added items are genuinely required",
+            "Decide whether the higher offer brings better value or just higher cost",
+        ]
+    elif delta is not None and delta < 0:
+        actions = [
+            f"Check why {supplier_b} is cheaper than {supplier_a}",
+            "Confirm nothing important has been omitted from scope",
+            "Use the lower price only if scope and quality still meet requirement",
+        ]
+    else:
+        actions = [
+            "Choose on lead time, delivery confidence, and quality",
+            "Check exclusions and assumptions before placing the order",
+            "Use supplier reliability as the tie-breaker",
+        ]
+
+    risks_text = "\n- ".join(risks)
+    actions_text = "\n- ".join(actions)
+
+    return f"""DECISION: {decision}
+
+WHY: {why}
+
+RISKS:
+- {risks_text}
+
+ACTIONS:
+- {actions_text}"""
+
+
+@app.route("/health", methods=["GET"])
+def health():
+    return "ok", 200
+
+
+@app.route("/whatsapp", methods=["POST"])
+def whatsapp_reply():
+    try:
+        incoming = request.form.get("Body", "").strip()
+        num_media = int(request.form.get("NumMedia") or 0)
+
+        if num_media > 0:
+            media_url = request.form.get("MediaUrl0")
+            media_type = request.form.get("MediaContentType0", "")
+
+            file_path = download_file(media_url, media_type)
+
+            if media_type == "application/pdf":
+                text = extract_pdf_text(file_path)
+
+                if not text.strip():
+                    image_paths = render_pdf_pages_to_images(file_path)
+                    doc = extract_commercial_document_from_images(image_paths)
+                else:
+                    doc = extract_commercial_document_with_claude(text)
+
+                if not isinstance(doc, dict):
+                    raise ValueError("Document extraction did not return a JSON object")
+
+                os.makedirs("data/parsed", exist_ok=True)
+                saved_path = os.path.join(
+                    "data/parsed",
+                    f"{os.path.basename(file_path)}.json"
+                )
+
+                with open(saved_path, "w", encoding="utf-8") as f:
+                    json.dump(doc, f, indent=2)
+
+                saved_docs = get_saved_docs()
+
+                if len(saved_docs) >= 2:
+                    with open(saved_docs[-2], "r", encoding="utf-8") as f:
+                        doc_a = json.load(f)
+                    with open(saved_docs[-1], "r", encoding="utf-8") as f:
+                        doc_b = json.load(f)
+
+                    comparison = compare_documents(doc_a, doc_b)
+                    answer = build_comparison_response(doc_a, doc_b, comparison)
+                else:
+                    supplier = doc.get("supplier_name") or "Unknown supplier"
+                    total = doc.get("total")
+                    currency = (doc.get("currency") or "").strip().upper()
+                    doc_type = doc.get("doc_type") or "document"
+                    line_count = len(doc.get("line_items", []))
+
+                    answer = f"""DECISION: DOCUMENT EXTRACTED
+
+WHY: Read {doc_type} from {supplier} with {line_count} line items and total {total} {currency}.
+
+ACTIONS:
+- Upload a second quote or invoice for comparison
+- Review extracted totals and scope
+- Return a decision"""
+            else:
+                answer = f"""DECISION: FILE RECEIVED
+
+WHY: Document saved as {os.path.basename(file_path)}.
+
+ACTIONS:
+- PDF reading is enabled
+- Image reading comes next
+- Upload another document for comparison"""
+
+        elif incoming.lower() in ["hi", "hello", "start"]:
+            answer = """Ready.
+
+Send your question or upload a document."""
+        else:
+            answer = """DECISION: TEXT RECEIVED
+
+WHY: No file was attached.
+
+ACTIONS:
+- Send a PDF, JPG, or PNG
+- Or upload two documents for comparison"""
+
+    except Exception as e:
+        answer = f"""DECISION: FILE ERROR
+
+WHY: AskHelm could not process the uploaded file: {e}
+
+ACTIONS:
+- Try sending the file again
+- Use PDF first for testing
+- Check extraction setup"""
+
+    resp = MessagingResponse()
+    resp.message(f"AskHelm\n\n{answer}")
+    return str(resp)
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=10000, debug=False)
