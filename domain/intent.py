@@ -121,12 +121,119 @@ _COMPLIANCE_QUESTION_PATTERNS = [
     r"\bdo we (need|have) to\b.{1,40}\bregulat",
 ]
 
+# Natural operational language patterns — detect compliance meaning without
+# requiring specific regulation terminology.
+_COMPLIANCE_NATURAL_PATTERNS = [
+    r"\bis (this|that|it) (ok|okay|acceptable|fine)\b",
+    r"\bis (this|that|it) (a problem|an issue|a concern|a violation|a deficiency)\b",
+    r"\bcan we (operate|continue|sail|discharge|proceed|run)\b",
+    r"\bwhat happens if\b",
+    r"\bis this against\b",
+    r"\bare we (ok|okay|fine|in trouble|at risk)\b",
+    r"\bis (this|it) (safe|unsafe|dangerous|an? (risk|hazard))\b",
+    r"\bis (this|that|it) (a )?(breach|offence|offense|violation)\b",
+]
+
+# ---------------------------------------------------------------------------
+# Heuristic: maintenance/operational state + safety equipment
+# ---------------------------------------------------------------------------
+
+# Indicates that something is overdue, missed, or needs attention.
+# Only triggers compliance classification when combined with safety equipment.
+_MAINTENANCE_STATE = [
+    "overdue",
+    "not done",
+    "not completed",
+    "hasn't been",
+    "have not",
+    "haven't",
+    "has not been",
+    "missed",
+    "behind on",
+    "failed to",
+    "out of date",
+    "expired",
+    "past due",
+    "not tested",
+    "not inspected",
+    "not serviced",
+    "test",         # only fires when combined with safety equipment below
+    "maintenance",
+    "inspection",
+    "service",
+]
+
+# Onboard safety equipment and systems whose status is compliance-relevant.
+_SAFETY_EQUIPMENT = [
+    "fire pump",
+    "fire main",
+    "fire alarm",
+    "fire extinguisher",
+    "fire detection",
+    "co2 system",
+    "lifeboat",
+    "life boat",
+    "rescue boat",
+    "immersion suit",
+    "lifejacket",
+    "life jacket",
+    "epirb",
+    "sart",
+    "smoke detector",
+    "smoke alarm",
+    "bilge pump",
+    "bilge alarm",
+    "emergency generator",
+    "emergency lighting",
+    "muster station",
+    "watertight door",
+    "fire damper",
+]
+
+# ---------------------------------------------------------------------------
+# Question fallback guard
+# ---------------------------------------------------------------------------
+
+# If a message looks like a question but contains these commercial/document
+# keywords, do NOT fall back to compliance — leave it for other routing.
+_COMMERCIAL_GUARD = {
+    "price",
+    "quote",
+    "invoice",
+    "cost",
+    "budget",
+    "comparison",
+    "cheaper",
+    "expensive",
+    "offer",
+    "payment",
+    "billing",
+    "charge",
+    "upload",
+    "pdf",
+    "file",
+    "document",
+    "attachment",
+}
+
+# Message starters that indicate an open question.
+_QUESTION_STARTERS = (
+    "is ", "are ", "does ", "do ", "can ", "will ", "should ",
+    "was ", "were ", "has ", "have ", "had ",
+    "what ", "why ", "how ", "when ", "where ",
+)
+
+
+def _is_open_question(t: str) -> bool:
+    return t.endswith("?") or t.startswith(_QUESTION_STARTERS)
+
 
 def classify_text(text: str) -> str:
     """
     Returns one of:
       new_session | quote_compare | why_higher | show_added |
-      show_missing | what_to_do | compliance_question | greeting | unknown
+      show_missing | what_to_do | compliance_followup |
+      compliance_question | greeting | unknown
     """
     t = text.strip().lower()
 
@@ -156,7 +263,25 @@ def classify_text(text: str) -> str:
         if re.search(pattern, t):
             return "compliance_question"
 
+    # Natural compliance language patterns
+    for pattern in _COMPLIANCE_NATURAL_PATTERNS:
+        if re.search(pattern, t):
+            return "compliance_question"
+
+    # Heuristic: maintenance/operational state AND safety equipment present
+    if (
+        any(m in t for m in _MAINTENANCE_STATE)
+        and any(s in t for s in _SAFETY_EQUIPMENT)
+    ):
+        return "compliance_question"
+
     if t in _GREETINGS:
         return "greeting"
+
+    # Question fallback: open question, not clearly commercial/document-related
+    # Routes unknown questions to the compliance engine (returns "not covered"
+    # if irrelevant) rather than the generic "TEXT RECEIVED" response.
+    if _is_open_question(t) and not any(g in t for g in _COMMERCIAL_GUARD):
+        return "compliance_question"
 
     return "unknown"

@@ -80,6 +80,28 @@ class TestComplianceIntent(unittest.TestCase):
     def test_are_we_allowed_pattern(self):
         self.assertEqual(self._cls("are we allowed to discharge bilge here"), COMPLIANCE)
 
+    # --- natural language patterns ---
+    def test_fire_pump_overdue_natural_language(self):
+        self.assertEqual(self._cls("my monthly fire pump test is overdue, is that ok?"), COMPLIANCE)
+
+    def test_overdue_fire_pump_question(self):
+        self.assertEqual(self._cls("is an overdue fire pump test ok?"), COMPLIANCE)
+
+    def test_is_this_ok_pattern(self):
+        self.assertEqual(self._cls("is this ok?"), COMPLIANCE)
+
+    def test_is_this_a_problem(self):
+        self.assertEqual(self._cls("is this a problem?"), COMPLIANCE)
+
+    def test_can_we_operate(self):
+        self.assertEqual(self._cls("can we operate like this?"), COMPLIANCE)
+
+    def test_what_happens_if(self):
+        self.assertEqual(self._cls("what happens if we skip the test?"), COMPLIANCE)
+
+    def test_commercial_guard_blocks_fallback(self):
+        self.assertNotEqual(self._cls("is this price ok?"), COMPLIANCE)
+
     # --- commercial intents still win ---
     def test_new_session_beats_compliance(self):
         self.assertEqual(self._cls("new quote"), "new_session")

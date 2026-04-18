@@ -365,7 +365,7 @@ class TestIntentClassification(unittest.TestCase):
             self.assertEqual(classify_text(phrase), "greeting", f"Failed: '{phrase}'")
 
     def test_unknown(self):
-        self.assertEqual(classify_text("what is the weather"), "unknown")
+        self.assertEqual(classify_text("send me the schedule"), "unknown")
 
 
 # ---------------------------------------------------------------------------
