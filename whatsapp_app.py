@@ -9,7 +9,10 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 from domain.extraction import extract_pdf_text, render_pdf_pages_to_images
 from services.anthropic_service import extract_commercial_document_with_claude
-from services.anthropic_vision_service import extract_commercial_document_from_images
+from services.anthropic_vision_service import (
+    extract_commercial_document_from_images,
+    summarise_operational_note_from_image,
+)
 from domain.compare import compare_documents
 from domain.session_store import user_id_from_phone, load_user_state, save_user_state
 from domain.session_manager import (
@@ -828,11 +831,27 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
     return build_three_way_comparison_response(ranked), state
 
 
+def _is_operational_note(extracted: dict) -> bool:
+    """Return True when an extraction has no commercial structure — no supplier, no totals, no pricing."""
+    has_supplier = bool((extracted.get("supplier_name") or "").strip())
+    has_total = extracted.get("total") is not None
+    has_subtotal = extracted.get("subtotal") is not None
+    has_priced_items = any(
+        item.get("unit_rate") is not None or item.get("line_total") is not None
+        for item in (extracted.get("line_items") or [])
+    )
+    return not (has_supplier or has_total or has_subtotal or has_priced_items)
+
+
 def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
     extracted = extract_commercial_document_from_images([file_path])
 
     if not isinstance(extracted, dict):
         raise ValueError("Image extraction did not return a JSON object")
+
+    if _is_operational_note(extracted):
+        logger.info("Image classified as operational note: %s", os.path.basename(file_path))
+        return summarise_operational_note_from_image(file_path), state
 
     extracted = normalise_doc_type(extracted)
     doc_record = make_document_record(extracted, file_path)

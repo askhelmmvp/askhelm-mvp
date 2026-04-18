@@ -708,5 +708,158 @@ class TestImageExtraction(unittest.TestCase):
         mock_vision.assert_not_called()
 
 
+# ---------------------------------------------------------------------------
+# Operational note detection and summarisation
+# ---------------------------------------------------------------------------
+
+_OPERATIONAL_EXTRACTION = {
+    "doc_type": None,
+    "supplier_name": None,
+    "document_number": None,
+    "document_date": None,
+    "currency": None,
+    "subtotal": None,
+    "tax": None,
+    "total": None,
+    "exclusions": [],
+    "assumptions": [],
+    "line_items": [],
+}
+
+_OPERATIONAL_SUMMARY = (
+    "DECISION:\n"
+    "Operational actions and risks identified\n"
+    "\n"
+    "KEY POINTS:\n"
+    "• Lifeboat drill overdue — last recorded 3 months ago\n"
+    "• Fire pump 2 showing low pressure on weekly test\n"
+    "• Chief Mate requests replacement impeller\n"
+    "\n"
+    "RISKS:\n"
+    "• Overdue drill is an open non-conformity under the ISM Code\n"
+    "• Degraded fire pump pressure may indicate seal or impeller failure\n"
+    "\n"
+    "ACTIONS:\n"
+    "• Schedule lifeboat drill before next port call\n"
+    "• Inspect fire pump 2 impeller and shaft seal\n"
+    "• Raise NC in SMS for overdue drill\n"
+    "• Log both items in planned maintenance system"
+)
+
+
+class TestOperationalNotes(unittest.TestCase):
+
+    def _empty_state(self):
+        return {"user_id": "test_user", "active_session_id": None, "sessions": [], "documents": []}
+
+    # --- detection logic ---
+
+    def test_no_fields_is_operational(self):
+        from whatsapp_app import _is_operational_note
+        self.assertTrue(_is_operational_note({
+            "supplier_name": None, "total": None, "subtotal": None, "line_items": [],
+        }))
+
+    def test_supplier_present_is_commercial(self):
+        from whatsapp_app import _is_operational_note
+        self.assertFalse(_is_operational_note({
+            "supplier_name": "Neptune Supplies", "total": None, "subtotal": None, "line_items": [],
+        }))
+
+    def test_total_present_is_commercial(self):
+        from whatsapp_app import _is_operational_note
+        self.assertFalse(_is_operational_note({
+            "supplier_name": None, "total": 1200.0, "subtotal": None, "line_items": [],
+        }))
+
+    def test_subtotal_present_is_commercial(self):
+        from whatsapp_app import _is_operational_note
+        self.assertFalse(_is_operational_note({
+            "supplier_name": None, "total": None, "subtotal": 800.0, "line_items": [],
+        }))
+
+    def test_priced_line_items_is_commercial(self):
+        from whatsapp_app import _is_operational_note
+        self.assertFalse(_is_operational_note({
+            "supplier_name": None, "total": None, "subtotal": None,
+            "line_items": [{"description": "Part A", "unit_rate": 400.0, "line_total": None}],
+        }))
+
+    def test_unpriced_line_items_is_operational(self):
+        from whatsapp_app import _is_operational_note
+        # Bullets extracted as items but with no pricing
+        self.assertTrue(_is_operational_note({
+            "supplier_name": None, "total": None, "subtotal": None,
+            "line_items": [
+                {"description": "Check fire pump", "unit_rate": None, "line_total": None},
+                {"description": "Overdue drill", "unit_rate": None, "line_total": None},
+            ],
+        }))
+
+    # --- routing ---
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    @patch("whatsapp_app.summarise_operational_note_from_image")
+    def test_operational_note_returns_structured_summary(self, mock_summarise, mock_extract):
+        mock_extract.return_value = _OPERATIONAL_EXTRACTION
+        mock_summarise.return_value = _OPERATIONAL_SUMMARY
+
+        from whatsapp_app import _handle_image_upload
+        answer, _ = _handle_image_upload("data/notes.jpg", self._empty_state())
+
+        self.assertIn("DECISION:", answer)
+        self.assertIn("Operational actions", answer)
+        self.assertIn("KEY POINTS:", answer)
+        self.assertIn("RISKS:", answer)
+        self.assertIn("ACTIONS:", answer)
+        mock_summarise.assert_called_once_with("data/notes.jpg")
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    @patch("whatsapp_app.summarise_operational_note_from_image")
+    def test_operational_note_not_stored_in_session(self, mock_summarise, mock_extract):
+        mock_extract.return_value = _OPERATIONAL_EXTRACTION
+        mock_summarise.return_value = _OPERATIONAL_SUMMARY
+
+        from whatsapp_app import _handle_image_upload
+        _, updated_state = _handle_image_upload("data/notes.jpg", self._empty_state())
+
+        self.assertEqual(len(updated_state["documents"]), 0)
+        self.assertIsNone(updated_state["active_session_id"])
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    @patch("whatsapp_app.summarise_operational_note_from_image")
+    def test_commercial_image_not_treated_as_operational(self, mock_summarise, mock_extract):
+        mock_extract.return_value = _QUOTE_EXTRACTION
+
+        from whatsapp_app import _handle_image_upload
+        answer, _ = _handle_image_upload("data/quote.jpg", self._empty_state())
+
+        self.assertIn("QUOTE RECEIVED", answer)
+        mock_summarise.assert_not_called()
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    @patch("whatsapp_app.summarise_operational_note_from_image")
+    def test_operational_note_does_not_break_comparison(self, mock_summarise, mock_extract):
+        """Uploading an operational note must not affect any active comparison session."""
+        mock_extract.return_value = _OPERATIONAL_EXTRACTION
+        mock_summarise.return_value = _OPERATIONAL_SUMMARY
+
+        state = self._empty_state()
+        doc_a = make_document_record(
+            {**_QUOTE_EXTRACTION, "supplier_name": "Supplier A", "total": 5000.0,
+             "document_number": None, "document_date": None},
+            "data/quote_a.jpg",
+        )
+        from domain.session_manager import create_quote_session
+        state, session = create_quote_session(doc_a, state)
+        session_id_before = state["active_session_id"]
+
+        from whatsapp_app import _handle_image_upload
+        _, updated_state = _handle_image_upload("data/notes.jpg", state)
+
+        self.assertEqual(updated_state["active_session_id"], session_id_before)
+        self.assertEqual(len(updated_state["documents"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
