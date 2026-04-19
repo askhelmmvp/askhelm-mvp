@@ -58,10 +58,14 @@ app = Flask(__name__)
 # File I/O
 # ---------------------------------------------------------------------------
 
+_IMAGE_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
+
+
 def download_file(url: str, content_type: str) -> str:
     ext_map = {
         "application/pdf": ".pdf",
         "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
         "image/png": ".png",
         "image/webp": ".webp",
     }
@@ -645,6 +649,19 @@ def build_what_should_i_do_response(comparison_data: Optional[dict]) -> str:
     return _make_response(decision="HERE IS WHAT TO DO NEXT", why=why, actions=actions)
 
 
+def _image_received_response() -> str:
+    return _make_response(
+        decision="IMAGE RECEIVED",
+        why="The image was uploaded but could not be processed successfully.",
+        actions=[
+            "Try a clearer image",
+            "Crop to the relevant page only",
+            "Retry upload",
+            "Or send a PDF instead",
+        ],
+    )
+
+
 def build_new_session_response() -> str:
     return _make_response(
         decision="COMPARISON RESET",
@@ -844,43 +861,48 @@ def _is_operational_note(extracted: dict) -> bool:
 
 
 def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
-    extracted = extract_commercial_document_from_images([file_path])
+    fname = os.path.basename(file_path)
+    logger.info("Image extraction started: %s", fname)
+
+    try:
+        extracted = extract_commercial_document_from_images([file_path])
+    except Exception as exc:
+        logger.exception("Image extraction failed for %s: %s", fname, exc)
+        return _image_received_response(), state
 
     if not isinstance(extracted, dict):
-        raise ValueError("Image extraction did not return a JSON object")
+        logger.warning("Image extraction returned non-dict (type=%s) for %s",
+                       type(extracted).__name__, fname)
+        return _image_received_response(), state
+
+    logger.info("Image extraction succeeded: %s", fname)
 
     if _is_operational_note(extracted):
-        logger.info("Image classified as operational note: %s", os.path.basename(file_path))
-        return summarise_operational_note_from_image(file_path), state
+        logger.info("Image classified as operational note: %s", fname)
+        try:
+            return summarise_operational_note_from_image(file_path), state
+        except Exception as exc:
+            logger.exception("Operational note summarisation failed for %s: %s", fname, exc)
+            return _image_received_response(), state
 
     extracted = normalise_doc_type(extracted)
     doc_record = make_document_record(extracted, file_path)
-
+    doc_type = doc_record["doc_type"]
     supplier = doc_record["supplier_name"] or "Unknown supplier"
     total = doc_record["total"]
     currency = doc_record["currency"]
-    line_count = len(doc_record["line_items"])
-    doc_type = doc_record["doc_type"]
 
-    logger.info("Image extracted: type=%s supplier=%s total=%s %s", doc_type, supplier, total, currency)
-
-    if doc_type == "quote":
-        return _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
-
-    if doc_type == "invoice":
-        return _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+    logger.info("Image classified: type=%s supplier=%s total=%s %s",
+                doc_type, supplier, total, currency)
 
     state, _ = create_pending_session(doc_record, state)
+
     return _make_response(
         decision="IMAGE PROCESSED",
-        why=(
-            f"Document image extracted from {os.path.basename(file_path)}. "
-            f"Supplier: {supplier}. {line_count} line items found. "
-            f"Could not classify as quote or invoice."
-        ),
+        why="Document extracted and ready for review or comparison.",
         actions=[
-            "Ask: show extraction",
-            "Upload another document to compare",
+            "show extraction",
+            "upload another document to compare",
         ],
     ), state
 
@@ -1016,13 +1038,20 @@ def whatsapp_reply():
         if num_media > 0:
             media_url = request.form.get("MediaUrl0")
             media_type = request.form.get("MediaContentType0", "")
+            logger.info(
+                "Inbound media: num_media=%d content_type=%r url_present=%s",
+                num_media, media_type, bool(media_url),
+            )
+
             file_path = download_file(media_url, media_type)
+            logger.info("File saved: %s", file_path)
 
             if media_type == "application/pdf":
                 answer, state = _handle_pdf_upload(file_path, state)
-            elif media_type in ("image/jpeg", "image/png"):
+            elif media_type in _IMAGE_CONTENT_TYPES:
                 answer, state = _handle_image_upload(file_path, state)
             else:
+                logger.warning("Unsupported media type: %r", media_type)
                 answer = _make_response(
                     decision="FILE RECEIVED",
                     why=f"Document saved as {os.path.basename(file_path)}.",

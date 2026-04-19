@@ -616,33 +616,30 @@ class TestImageExtraction(unittest.TestCase):
         return {"user_id": "test_user", "active_session_id": None, "sessions": [], "documents": []}
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
-    def test_jpeg_quote_returns_quote_received(self, mock_vision):
+    def test_jpeg_quote_returns_image_processed(self, mock_vision):
         mock_vision.return_value = _QUOTE_EXTRACTION
         from whatsapp_app import _handle_image_upload
         answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
 
-        self.assertIn("QUOTE RECEIVED", answer)
-        self.assertIn("Pacific Marine Supplies", answer)
-        self.assertIn("9020.0", answer)
+        self.assertIn("IMAGE PROCESSED", answer)
         mock_vision.assert_called_once_with(["data/test_doc.jpg"])
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
-    def test_png_quote_returns_quote_received(self, mock_vision):
+    def test_png_quote_returns_image_processed(self, mock_vision):
         mock_vision.return_value = _QUOTE_EXTRACTION
         from whatsapp_app import _handle_image_upload
         answer, state = _handle_image_upload("data/test_doc.png", self._empty_state())
 
-        self.assertIn("QUOTE RECEIVED", answer)
+        self.assertIn("IMAGE PROCESSED", answer)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
-    def test_image_invoice_returns_invoice_result(self, mock_vision):
+    def test_image_invoice_returns_image_processed(self, mock_vision):
         mock_vision.return_value = _INVOICE_EXTRACTION
         from whatsapp_app import _handle_image_upload
         answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
 
-        # No matching quote — returns INVOICE RECEIVED NO MATCHING QUOTE
-        self.assertIn("INVOICE RECEIVED", answer)
-        self.assertIn("Pacific Marine Supplies", answer)
+        self.assertIn("IMAGE PROCESSED", answer)
+        self.assertEqual(len(state["documents"]), 1)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
     def test_image_stored_in_state_documents(self, mock_vision):
@@ -680,20 +677,42 @@ class TestImageExtraction(unittest.TestCase):
         self.assertIn("show extraction", answer)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
-    def test_image_quote_then_invoice_triggers_comparison(self, mock_vision):
-        """Image quote followed by matching image invoice auto-compares."""
+    def test_image_quote_then_image_invoice_both_stored(self, mock_vision):
+        """Both image uploads are stored; IMAGE PROCESSED is returned each time (no auto-compare)."""
         from whatsapp_app import _handle_image_upload
 
         mock_vision.return_value = _QUOTE_EXTRACTION
-        _, state = _handle_image_upload("data/quote.jpg", self._empty_state())
+        answer_q, state = _handle_image_upload("data/quote.jpg", self._empty_state())
 
         mock_vision.return_value = _INVOICE_EXTRACTION
-        answer, state = _handle_image_upload("data/invoice.jpg", state)
+        answer_i, state = _handle_image_upload("data/invoice.jpg", state)
 
-        # Same supplier, same total → auto-match → comparison result
-        self.assertIn("DECISION:", answer)
-        self.assertNotIn("IMAGE PROCESSED", answer)
+        self.assertIn("IMAGE PROCESSED", answer_q)
+        self.assertIn("IMAGE PROCESSED", answer_i)
         self.assertEqual(len(state["documents"]), 2)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_extraction_failure_returns_image_received(self, mock_vision):
+        """API / parse errors return IMAGE RECEIVED, not a crash or FILE ERROR."""
+        mock_vision.side_effect = RuntimeError("vision API timeout")
+        from whatsapp_app import _handle_image_upload
+        answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
+
+        self.assertIn("IMAGE RECEIVED", answer)
+        self.assertIn("clearer image", answer)
+        self.assertEqual(len(state["documents"]), 0)
+
+    def test_image_content_type_set_covers_jpg_alias(self):
+        from whatsapp_app import _IMAGE_CONTENT_TYPES
+        self.assertIn("image/jpeg", _IMAGE_CONTENT_TYPES)
+        self.assertIn("image/jpg", _IMAGE_CONTENT_TYPES)
+        self.assertIn("image/png", _IMAGE_CONTENT_TYPES)
+
+    def test_unsupported_media_type_not_in_image_set(self):
+        from whatsapp_app import _IMAGE_CONTENT_TYPES
+        self.assertNotIn("image/gif", _IMAGE_CONTENT_TYPES)
+        self.assertNotIn("image/webp", _IMAGE_CONTENT_TYPES)
+        self.assertNotIn("application/pdf", _IMAGE_CONTENT_TYPES)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
     def test_pdf_flow_unaffected_by_image_handler(self, mock_vision):
@@ -834,7 +853,7 @@ class TestOperationalNotes(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, _ = _handle_image_upload("data/quote.jpg", self._empty_state())
 
-        self.assertIn("QUOTE RECEIVED", answer)
+        self.assertIn("IMAGE PROCESSED", answer)
         mock_summarise.assert_not_called()
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
