@@ -66,6 +66,7 @@ _GREETINGS = {"hi", "hello", "start", "hey"}
 # Checked BEFORE compliance substrings so pricing questions ("is this expensive",
 # "is this reasonable") are not accidentally routed to the compliance engine.
 _MARKET_CHECK_SUBSTRINGS = [
+    # "is X a fair/reasonable/expensive" forms
     "is this a fair price",
     "is that a fair price",
     "fair price for",
@@ -75,23 +76,102 @@ _MARKET_CHECK_SUBSTRINGS = [
     "does this look expensive",
     "is this overpriced",
     "is that overpriced",
+    "is this good value",
+    "is that good value",
+    # direct pricing queries
+    "how much for",
+    "cost of",
+    "price for",
+    "price of",
+    "what does it cost",
+    "what's the cost",
+    "what is the cost",
+    "what's the price",
+    "what is the price",
+    # existing
     "what should this cost",
     "what should that cost",
     "ballpark cost for",
     "market price for",
     "typical cost for",
     "expected cost for",
-    "is this good value",
-    "is that good value",
 ]
 
-# Regex patterns: catch "what should X cost", "how much should X be" and
-# similar natural forms that can't be matched by a fixed substring.
+# Regex patterns: cover natural forms that can't be matched by fixed substrings.
 _MARKET_CHECK_PATTERNS = [
-    r"\bwhat should\b.{0,80}\bcost\b",
-    r"\bwhat (would|does|will)\b.{0,60}\bcost\b",
-    r"\bhow much (should|would|does|will|is|are)\b",
+    r"\bwhat should\b.{0,80}\bcost\b",          # "what should a windlass service cost"
+    r"\bwhat (would|does|will)\b.{0,60}\bcost\b",  # "what would this cost"
+    r"\bhow much (should|would|does|will|is|are|for)\b",  # "how much for/is/does X"
+    r"\bis .{0,60}\b(reasonable|overpriced|fair)\b",      # "is €4500 reasonable"
 ]
+
+# ---------------------------------------------------------------------------
+# Marine parts / OEM brand heuristic
+# ---------------------------------------------------------------------------
+
+# Known OEM engine and equipment manufacturers.
+_OEM_BRANDS = {
+    "yanmar", "mtu", "caterpillar", "danfoss", "nanni", "volvo penta",
+    "kohler", "cummins", "detroit diesel", "mercury", "perkins",
+    "john deere", "westerbeke", "jabsco", "vetus", "wartsila",
+    "zf marine", "twin disc", "scania", "man diesel", "rolls royce",
+    "northern lights", "onan", "sleipner", "ray marine", "furuno",
+}
+
+# Common marine mechanical parts whose presence implies a pricing question.
+_MARINE_PART_WORDS = {
+    "pump", "sensor", "valve", "joint", "compressor", "impeller",
+    "bearing", "seal", "gasket", "filter", "belt", "injector",
+    "alternator", "gearbox", "propeller", "shaft", "coupling",
+    "thermostat", "intercooler", "turbocharger", "solenoid",
+    "heat exchanger", "o-ring", "overhaul kit", "service kit",
+    "repair kit", "spare part", "actuator", "transducer", "throttle",
+    "fuel pump", "water pump", "oil pump", "sea pump", "bilge pump",
+    "expansion tank", "heat exchanger",
+}
+
+# Part numbers: patterns like "196350-04061" or "NJ-1234/56"
+_PART_NUMBER_RE = re.compile(r'\b[A-Z0-9]{2,}-[A-Z0-9]{3,}\b', re.IGNORECASE)
+
+# Words that indicate the user is asking about pricing (not just mentioning a part).
+_PRICING_WORDS = {
+    "cost", "price", "much", "rate", "worth", "value",
+    "expensive", "cheap", "cheapest", "budget", "quote",
+}
+
+
+def _is_marine_pricing_question(t: str) -> bool:
+    """
+    True when the query references a marine part, OEM brand, or part number
+    AND contains explicit pricing intent. Catches statement-style queries like
+    "yanmar 196350-04061 price" as well as questions like "caterpillar pump — how much?"
+
+    Note: the caller wraps this in a compliance-substring guard, so regulatory
+    questions ("how much are we allowed to discharge") never reach this function.
+    """
+    has_oem = any(brand in t for brand in _OEM_BRANDS)
+    has_part = any(p in t for p in _MARINE_PART_WORDS)
+    has_part_number = bool(_PART_NUMBER_RE.search(t))
+    has_pricing = any(w in t for w in _PRICING_WORDS)
+
+    if not (has_oem or has_part or has_part_number):
+        return False
+
+    # Part number alone in an open question implies a price lookup.
+    if has_part_number and _is_open_question(t):
+        return True
+
+    # Part number + explicit pricing word — no question form needed.
+    # "p/n 196350-04061 price" is clearly a pricing query.
+    if has_part_number and has_pricing:
+        return True
+
+    # OEM brand or part word + explicit pricing word.
+    # Question form not required: "yanmar pump price" is unambiguous.
+    if (has_oem or has_part) and has_pricing:
+        return True
+
+    return False
 
 # ---------------------------------------------------------------------------
 # Compliance classification
@@ -293,13 +373,19 @@ def classify_text(text: str) -> str:
             return "quote_compare"
 
     # Market price check — before compliance so pricing questions ("is this expensive",
-    # "is this reasonable") are not mis-routed to the compliance engine.
-    for trigger in _MARKET_CHECK_SUBSTRINGS:
-        if trigger in t:
-            return "market_check"
+    # "is this reasonable", "how much for X") are not mis-routed to the compliance
+    # engine. A compliance-substring guard prevents regulatory questions (e.g. "how
+    # much are we allowed to discharge") from being wrongly classified here.
+    if not any(c in t for c in _COMPLIANCE_SUBSTRINGS):
+        for trigger in _MARKET_CHECK_SUBSTRINGS:
+            if trigger in t:
+                return "market_check"
 
-    for pattern in _MARKET_CHECK_PATTERNS:
-        if re.search(pattern, t):
+        for pattern in _MARKET_CHECK_PATTERNS:
+            if re.search(pattern, t):
+                return "market_check"
+
+        if _is_marine_pricing_question(t):
             return "market_check"
 
     # Compliance — checked after commercial intents, before generic fallback

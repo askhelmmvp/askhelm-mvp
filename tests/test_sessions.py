@@ -1158,6 +1158,64 @@ class TestMarketCheckIntent(unittest.TestCase):
         # commercial guard words must prevent quote/invoice text from becoming market_check
         self.assertNotEqual(self._cls("upload the invoice"), "market_check")
 
+    # --- new: "how much for X" routing (the original bug) ---
+
+    def test_how_much_for_yanmar_part_number(self):
+        # The exact failing case from the bug report
+        self.assertEqual(
+            self._cls("how much for a yanmar universal joint p/n 196350-04061"),
+            "market_check",
+        )
+
+    def test_is_price_reasonable_with_currency_and_item(self):
+        # "is €4500 reasonable for a pump overhaul kit?" — reported as failing
+        self.assertEqual(
+            self._cls("is €4500 reasonable for a pump overhaul kit?"),
+            "market_check",
+        )
+
+    def test_how_much_for_bare(self):
+        self.assertEqual(self._cls("how much for an impeller"), "market_check")
+
+    def test_how_much_is(self):
+        self.assertEqual(self._cls("how much is a windlass overhaul"), "market_check")
+
+    def test_how_much_does(self):
+        self.assertEqual(self._cls("how much does a bilge pump service cost"), "market_check")
+
+    # --- OEM brand heuristic ---
+
+    def test_oem_brand_with_part_and_price_word(self):
+        self.assertEqual(self._cls("what does a caterpillar injector cost"), "market_check")
+
+    def test_oem_brand_with_part_number_and_price_word(self):
+        # Statement-style query (no "?") — pricing word makes intent unambiguous
+        self.assertEqual(self._cls("yanmar part 196350-04061 price"), "market_check")
+
+    def test_part_number_in_open_question(self):
+        self.assertEqual(self._cls("how much for part 196350-04061"), "market_check")
+
+    # --- compliance guard: regulatory "how much" must NOT become market_check ---
+
+    def test_how_much_allowed_stays_compliance(self):
+        # "allowed" is in _COMPLIANCE_SUBSTRINGS → guard blocks market_check
+        self.assertEqual(
+            self._cls("how much are we allowed to discharge"),
+            "compliance_question",
+        )
+
+    def test_how_much_with_regulation_stays_compliance(self):
+        self.assertEqual(
+            self._cls("how much does the regulation require"),
+            "compliance_question",
+        )
+
+    def test_marpol_how_much_stays_compliance(self):
+        self.assertEqual(
+            self._cls("how much sulphur is allowed under marpol"),
+            "compliance_question",
+        )
+
 
 # ---------------------------------------------------------------------------
 # Market price check — handler
