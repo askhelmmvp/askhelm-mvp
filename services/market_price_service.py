@@ -31,50 +31,64 @@ def _has_part_number(query: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# System prompt
+# System prompt — three response modes, WhatsApp-concise
 # ---------------------------------------------------------------------------
 
 _SYSTEM_PROMPT = """\
-You are a Chief Engineer with extensive experience in yacht procurement and marine parts pricing.
-A crew member or owner has asked about pricing for a marine part or service.
+You are a Chief Engineer. A crew member has asked about marine parts or service pricing via WhatsApp.
 
-Your job:
-1. Identify the exact item or service from their question.
-2. Assess your CONFIDENCE in the price data you can provide:
-   - exact_match: You have reliable pricing data for this exact item (specific OEM part number, model, service type).
-   - similar_item_estimate: You have data for similar/comparable items but not this exact one.
-   - insufficient_confidence: The item is too specific (e.g. an exact OEM part number) for you to give a reliable price without verified sources, OR the query is too vague.
-3. Provide appropriate pricing information based on your confidence level.
+Pick ONE mode based on the query — nothing else:
 
-IMPORTANT — confidence assignment rules:
-- If the query contains a specific OEM part number (e.g. "196350-04061", "NJ-1234"), you MUST use similar_item_estimate or insufficient_confidence. Never claim exact_match for a specific part number unless you have a verified market price for that exact code.
-- If the query is for a generic service (e.g. "windlass service", "hull cleaning") without a specific model, similar_item_estimate is acceptable.
-- Use insufficient_confidence when: the part number is too specific to price reliably, the item is highly variable, or you cannot give a useful range.
-
-STRICT RULES:
-- Be specific with numbers only when confidence is exact_match or similar_item_estimate.
-- For insufficient_confidence: do NOT give price ranges. Direct the user to get quotes instead.
-- Always acknowledge variability: marine pricing depends on brand, urgency, location, yacht size.
-- Tone: cautious but useful. Chief Engineer style. No padding.
-
-Respond in this EXACT format — nothing before or after:
+MODE A — Exact OEM part number present, cannot verify exact market price:
 CONFIDENCE:
-<one of: exact_match / similar_item_estimate / insufficient_confidence>
+insufficient_confidence
 
 DECISION:
-<see rules below>
-- exact_match: estimated market range with cautious wording (e.g. "Within expected range — typical cost €X–€Y")
-- similar_item_estimate: "Estimate only — based on similar items, not exact verified match"
-- insufficient_confidence: "Unclear — exact market price not confidently verified"
+No reliable exact price confirmed
 
 WHY:
-<one or two sentences: what you found and why confidence is what it is>
+I could not verify a strong market price from exact matches alone.
+
+ACTIONS:
+• Send the quoted price and I'll judge it
+• Or get 2 quotes against the exact part number
+
+MODE B — Generic item or service, no specific price given in the query:
+CONFIDENCE:
+similar_item_estimate
+
+DECISION:
+Broad estimate only
+
+WHY:
+Typical range is €X–€Y depending on [main variable].
+
+ACTIONS:
+• [One short clarifying question — ask only the minimum needed]
+
+MODE C — A specific price appears in the query:
+CONFIDENCE:
+exact_match
+
+DECISION:
+<Reasonable / High / Low / Unclear>
+
+WHY:
+<one sentence max>
 
 ACTIONS:
 • <action 1>
-• <action 2>
-• <action 3>
-• <action 4>
+• <action 2 — max 2 bullets>
+
+RULES:
+- Use MODE A when a specific OEM part number is present and you cannot confidently price it.
+- Use MODE B when no price was given and the item is estimable (e.g. service type, general component).
+- Use MODE C when a specific price appears in the question.
+- If the query has a price but the item is too vague to assess: use MODE C with DECISION Unclear and one short clarifying question.
+- WHY: one sentence only. No lists, no caveats, no padding.
+- ACTIONS: max 2 bullets. For MODE B, one bullet is the clarifying question.
+- Never give a price range when mode A applies.
+- Tone: brief, practical. No preamble.
 """
 
 # ---------------------------------------------------------------------------
@@ -93,7 +107,7 @@ _SECTION_RE = re.compile(
 
 
 def _parse_confidence(raw: str) -> tuple:
-    """Returns (confidence_level, raw_without_confidence_line)."""
+    """Returns (confidence_level, raw_text)."""
     m = _CONFIDENCE_RE.search(raw)
     if m:
         level = m.group(1).strip().lower()
@@ -108,7 +122,7 @@ def _parse_sections(raw: str) -> dict:
     return sections
 
 
-def _build_response(sections: dict, confidence: str) -> str:
+def _build_response(sections: dict) -> str:
     parts = []
     if "DECISION" in sections:
         parts.append(f"DECISION:\n{sections['DECISION']}")
@@ -120,33 +134,31 @@ def _build_response(sections: dict, confidence: str) -> str:
 
 
 _INSUFFICIENT_ACTIONS = (
-    "• Get 2 quotes against the exact part number\n"
-    "• Check OEM dealer pricing\n"
-    "• Confirm whether an aftermarket equivalent is acceptable\n"
-    "• Request an itemised breakdown from any supplier"
+    "• Send the quoted price and I'll judge it\n"
+    "• Or get 2 quotes against the exact part number"
 )
 
 _INSUFFICIENT_RESPONSE = (
-    "DECISION:\nUnclear — exact market price not confidently verified\n\n"
-    "WHY:\nI could not confirm a reliable price for the exact part number from strong matching sources.\n\n"
+    "DECISION:\nNo reliable exact price confirmed\n\n"
+    "WHY:\nI could not verify a strong market price from exact matches alone.\n\n"
     f"ACTIONS:\n{_INSUFFICIENT_ACTIONS}"
 )
 
 
 def _enforce_insufficient(sections: dict) -> str:
-    why = sections.get("WHY", "I could not confirm a reliable price from strong matching sources.")
+    why = sections.get("WHY", "I could not verify a strong market price from exact matches alone.")
     return (
-        f"DECISION:\nUnclear — exact market price not confidently verified\n\n"
+        f"DECISION:\nNo reliable exact price confirmed\n\n"
         f"WHY:\n{why}\n\n"
         f"ACTIONS:\n{_INSUFFICIENT_ACTIONS}"
     )
 
 
 def _enforce_similar(sections: dict) -> str:
-    why = sections.get("WHY", "Pricing is based on comparable items, not this exact specification.")
-    actions = sections.get("ACTIONS", "• Get at least 2 supplier quotes\n• Verify OEM vs aftermarket pricing")
+    why = sections.get("WHY", "Pricing varies by brand, model, and urgency.")
+    actions = sections.get("ACTIONS", "• Send more details for a better estimate")
     return (
-        f"DECISION:\nEstimate only — based on similar items, not exact verified match\n\n"
+        f"DECISION:\nBroad estimate only\n\n"
         f"WHY:\n{why}\n\n"
         f"ACTIONS:\n{actions}"
     )
@@ -156,20 +168,21 @@ def _enforce_similar(sections: dict) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
-def check_market_price(query: str) -> str:
+def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
     """
     Assess whether a quoted price is fair for a marine part or service.
-    Applies confidence-level enforcement so specific part numbers never get
-    false-precise price ranges.
-    Returns a formatted DECISION / WHY / ACTIONS response.
+
+    allow_broad_estimate: when True (follow-up context where user has already
+    acknowledged uncertainty), skips the part-number → insufficient downgrade
+    so Claude can return a best-effort similar_item_estimate.
     """
-    logger.info("Market check: query=%r", query[:120])
+    logger.info("Market check: query=%r allow_broad_estimate=%s", query[:120], allow_broad_estimate)
     query_has_part_number = _has_part_number(query)
 
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=400,
+            max_tokens=300,
             system=_SYSTEM_PROMPT,
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
@@ -180,19 +193,20 @@ def check_market_price(query: str) -> str:
         confidence, raw = _parse_confidence(raw)
         sections = _parse_sections(raw)
 
-        # Infer confidence from sections if missing from response
+        # Infer confidence from DECISION text if Claude omitted the CONFIDENCE line
         if confidence is None:
             decision = sections.get("DECISION", "").lower()
-            if "unclear" in decision or "not confidently" in decision:
+            if "no reliable" in decision or "unclear" in decision or "not confidently" in decision:
                 confidence = CONFIDENCE_INSUFFICIENT
-            elif "estimate only" in decision or "similar" in decision:
+            elif "broad estimate" in decision or "estimate only" in decision or "similar" in decision:
                 confidence = CONFIDENCE_SIMILAR
             else:
                 confidence = CONFIDENCE_EXACT if not query_has_part_number else CONFIDENCE_SIMILAR
 
         # Downgrade: specific part number + only similar data → insufficient.
-        # Use standardized WHY to avoid leaking Claude's uncertain price ranges.
-        if query_has_part_number and confidence == CONFIDENCE_SIMILAR:
+        # Use the fully standardized response to prevent any price ranges leaking through.
+        # Skipped when allow_broad_estimate=True (user has explicitly asked for a best guess).
+        if query_has_part_number and confidence == CONFIDENCE_SIMILAR and not allow_broad_estimate:
             logger.info("Market check: downgrading similar→insufficient (part number present)")
             return _INSUFFICIENT_RESPONSE
 
@@ -202,8 +216,8 @@ def check_market_price(query: str) -> str:
         if confidence == CONFIDENCE_SIMILAR:
             return _enforce_similar(sections)
 
-        # exact_match: return Claude's full response, stripping the CONFIDENCE line
-        return _build_response(sections, confidence)
+        # exact_match — return Claude's response without the CONFIDENCE line
+        return _build_response(sections)
 
     except Exception as exc:
         logger.exception("Market check failed: %s", exc)

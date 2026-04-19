@@ -1326,5 +1326,116 @@ class TestMarketCheckHandler(unittest.TestCase):
         self.assertIn("DECISION", answer)
 
 
+# ---------------------------------------------------------------------------
+# Market check follow-up intent classification
+# ---------------------------------------------------------------------------
+
+class TestMarketCheckFollowupIntent(unittest.TestCase):
+
+    def _cls(self, text):
+        from domain.intent import classify_text
+        return classify_text(text)
+
+    def test_ok_give_me_an_estimate(self):
+        self.assertEqual(self._cls("ok give me an estimate"), "market_check_followup")
+
+    def test_give_me_an_estimate(self):
+        self.assertEqual(self._cls("give me an estimate"), "market_check_followup")
+
+    def test_what_do_you_think(self):
+        self.assertEqual(self._cls("what do you think"), "market_check_followup")
+
+    def test_is_that_high(self):
+        self.assertEqual(self._cls("is that high"), "market_check_followup")
+
+    def test_roughly_what_then(self):
+        self.assertEqual(self._cls("roughly what then"), "market_check_followup")
+
+    def test_best_guess(self):
+        self.assertEqual(self._cls("best guess"), "market_check_followup")
+
+    def test_rough_estimate_substring(self):
+        self.assertEqual(self._cls("just a rough estimate please"), "market_check_followup")
+
+    def test_normal_market_check_not_followup(self):
+        # Specific question with a part should still be market_check, not followup
+        result = self._cls("how much for a yanmar impeller")
+        self.assertEqual(result, "market_check")
+
+    def test_compliance_followup_not_overridden(self):
+        # "next steps" is compliance_followup — must not be reclassified
+        self.assertEqual(self._cls("next steps"), "compliance_followup")
+
+
+# ---------------------------------------------------------------------------
+# Market check follow-up routing
+# ---------------------------------------------------------------------------
+
+def _state_with_market_check_context(topic="how much for a danfoss pressure sensor"):
+    return {
+        "sessions": [],
+        "documents": [],
+        "last_context": {"type": "market_check", "topic": topic},
+    }
+
+
+def _state_with_compliance_context():
+    return {
+        "sessions": [],
+        "documents": [],
+        "last_context": {"type": "compliance", "topic": "does marpol apply in the med"},
+    }
+
+
+class TestMarketCheckFollowupRouting(unittest.TestCase):
+
+    @patch("whatsapp_app.check_market_price")
+    def test_followup_with_market_check_context_routes_to_market_check(self, mock_check):
+        """'ok give me an estimate' after a market_check → calls check_market_price with context."""
+        mock_check.return_value = "DECISION:\nBroad estimate only\n\nWHY:\nTypical range €150–€600.\n\nACTIONS:\n• What model?"
+        from whatsapp_app import _handle_text_message
+        answer, state = _handle_text_message(
+            "ok give me an estimate",
+            _state_with_market_check_context("how much for a danfoss pressure sensor"),
+        )
+        self.assertTrue(mock_check.called)
+        call_args = mock_check.call_args
+        # combined query contains original topic
+        self.assertIn("danfoss pressure sensor", call_args[0][0])
+        # allow_broad_estimate kwarg is True
+        self.assertTrue(call_args[1].get("allow_broad_estimate") or call_args[0][1] if len(call_args[0]) > 1 else call_args[1].get("allow_broad_estimate"))
+        self.assertIn("DECISION", answer)
+
+    @patch("whatsapp_app.check_market_price")
+    def test_followup_without_market_check_context_returns_text_received(self, mock_check):
+        """'ok give me an estimate' without market_check context → TEXT RECEIVED."""
+        from whatsapp_app import _handle_text_message
+        answer, _ = _handle_text_message("ok give me an estimate", _empty_state())
+        self.assertFalse(mock_check.called)
+        self.assertIn("TEXT RECEIVED", answer)
+
+    @patch("whatsapp_app.check_market_price")
+    def test_followup_preserves_market_check_last_context(self, mock_check):
+        """After follow-up, last_context remains market_check."""
+        mock_check.return_value = "DECISION:\nBroad estimate only\n\nWHY:\nTest.\n\nACTIONS:\n• Detail"
+        from whatsapp_app import _handle_text_message
+        _, state = _handle_text_message(
+            "roughly what then",
+            _state_with_market_check_context("how much for a sea water pump"),
+        )
+        self.assertEqual(state.get("last_context", {}).get("type"), "market_check")
+
+    @patch("whatsapp_app.check_market_price")
+    def test_followup_with_compliance_context_returns_text_received(self, mock_check):
+        """'ok give me an estimate' after a compliance answer → TEXT RECEIVED (not market_check)."""
+        from whatsapp_app import _handle_text_message
+        answer, _ = _handle_text_message(
+            "ok give me an estimate",
+            _state_with_compliance_context(),
+        )
+        self.assertFalse(mock_check.called)
+        self.assertIn("TEXT RECEIVED", answer)
+
+
 if __name__ == "__main__":
     unittest.main()

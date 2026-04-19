@@ -1077,6 +1077,15 @@ def _handle_text_message(incoming: str, state: dict) -> Tuple[str, dict]:
         state["last_context"] = {"type": "compliance", "topic": incoming}
         return answer, state
 
+    if intent == "market_check_followup":
+        if last_ctx.get("type") == "market_check":
+            original_topic = last_ctx.get("topic", "")
+            combined = f"{original_topic}\nUser follow-up: {incoming}" if original_topic else incoming
+            answer = check_market_price(combined, allow_broad_estimate=True)
+            state["last_context"] = {"type": "market_check", "topic": original_topic or incoming}
+            return answer, state
+        # No market_check context — fall through to TEXT RECEIVED
+
     if intent == "market_check":
         answer = check_market_price(incoming)
         state["last_context"] = {"type": "market_check", "topic": incoming}

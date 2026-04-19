@@ -56,6 +56,35 @@ _COMPLIANCE_FOLLOWUP_EXACT = {
     "what do we do now",
 }
 
+# Phrases that indicate the user wants a follow-up on a market price question.
+# Routing in _handle_text_message checks last_context to confirm market_check context.
+_MARKET_CHECK_FOLLOWUP_EXACT = {
+    "ok give me an estimate",
+    "give me an estimate",
+    "just give me an estimate",
+    "what do you think",
+    "is that high",
+    "is that low",
+    "roughly what then",
+    "best guess",
+    "give me a range",
+    "just a range",
+    "ok roughly",
+    "ok ballpark",
+    "ballpark that",
+    "roughly speaking",
+    "what's your estimate",
+    "what is your estimate",
+    "any rough idea",
+}
+
+_MARKET_CHECK_FOLLOWUP_SUBSTRINGS = [
+    "just give me a ballpark",
+    "rough estimate",
+    "rough range",
+    "give me a rough",
+]
+
 _GREETINGS = {"hi", "hello", "start", "hey"}
 
 # ---------------------------------------------------------------------------
@@ -367,6 +396,13 @@ def classify_text(text: str) -> str:
 
     if t in _COMPLIANCE_FOLLOWUP_EXACT:
         return "compliance_followup"
+
+    if t in _MARKET_CHECK_FOLLOWUP_EXACT:
+        return "market_check_followup"
+
+    for phrase in _MARKET_CHECK_FOLLOWUP_SUBSTRINGS:
+        if phrase in t:
+            return "market_check_followup"
 
     for trigger in _QUOTE_COMPARE_SUBSTRINGS:
         if trigger in t:
