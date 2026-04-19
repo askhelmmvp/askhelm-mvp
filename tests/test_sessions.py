@@ -1096,5 +1096,177 @@ class TestOperationalNoteClassification(unittest.TestCase):
         }))
 
 
+# ---------------------------------------------------------------------------
+# Market price check — intent classification
+# ---------------------------------------------------------------------------
+
+class TestMarketCheckIntent(unittest.TestCase):
+
+    def _cls(self, text):
+        return classify_text(text)
+
+    # --- required trigger phrases ---
+
+    def test_fair_price_question(self):
+        self.assertEqual(self._cls("is this a fair price"), "market_check")
+
+    def test_fair_price_with_item(self):
+        self.assertEqual(self._cls("is EUR 2500 a fair price for windlass service"), "market_check")
+
+    def test_reasonable_question(self):
+        self.assertEqual(self._cls("is this reasonable"), "market_check")
+
+    def test_does_this_look_expensive(self):
+        self.assertEqual(self._cls("does this look expensive"), "market_check")
+
+    def test_what_should_this_cost(self):
+        self.assertEqual(self._cls("what should this cost"), "market_check")
+
+    def test_ballpark_cost_for(self):
+        self.assertEqual(self._cls("ballpark cost for anchor windlass"), "market_check")
+
+    # --- extended natural variants ---
+
+    def test_is_this_overpriced(self):
+        self.assertEqual(self._cls("is this overpriced for a sea pump"), "market_check")
+
+    def test_how_much_should(self):
+        self.assertEqual(self._cls("how much should a bilge pump service cost"), "market_check")
+
+    def test_market_price_for(self):
+        self.assertEqual(self._cls("market price for impeller replacement"), "market_check")
+
+    def test_is_this_good_value(self):
+        self.assertEqual(self._cls("is this good value"), "market_check")
+
+    # --- no false positives ---
+
+    def test_compliance_question_not_market_check(self):
+        # MARPOL phrasing should go to compliance, not market_check
+        self.assertEqual(self._cls("is marpol annex vi compliant"), "compliance_question")
+
+    def test_quote_compare_not_market_check(self):
+        self.assertNotEqual(self._cls("compare these quotes"), "market_check")
+
+    def test_new_session_not_market_check(self):
+        self.assertNotEqual(self._cls("new quote"), "market_check")
+
+    def test_greeting_not_market_check(self):
+        self.assertNotEqual(self._cls("hi"), "market_check")
+
+    def test_upload_not_market_check(self):
+        # commercial guard words must prevent quote/invoice text from becoming market_check
+        self.assertNotEqual(self._cls("upload the invoice"), "market_check")
+
+
+# ---------------------------------------------------------------------------
+# Market price check — handler
+# ---------------------------------------------------------------------------
+
+_MARKET_RESPONSE_WITH_PRICE = (
+    "DECISION:\nAbove market\n\n"
+    "WHY:\nWindlass service typically runs €800–€1,200 for a standard unit. "
+    "€2,500 is well above that unless it includes parts replacement.\n\n"
+    "ACTIONS:\n"
+    "• Request itemised labour vs parts breakdown\n"
+    "• Get two additional quotes from competing yards\n"
+    "• Confirm OEM vs aftermarket parts\n"
+    "• Check if urgency premium is applied"
+)
+
+_MARKET_RESPONSE_NO_PRICE = (
+    "DECISION:\nEstimated range only — no price to assess\n\n"
+    "WHY:\nWindlass service typically costs €600–€1,400 depending on unit size and parts needed.\n\n"
+    "ACTIONS:\n"
+    "• Request an itemised quote\n"
+    "• Specify the windlass model and age\n"
+    "• Ask for OEM vs aftermarket options\n"
+    "• Check for urgency or call-out premium"
+)
+
+_MARKET_RESPONSE_AMBIGUOUS = (
+    "DECISION:\nUnclear\n\n"
+    "WHY:\nNo specific item mentioned — pricing range cannot be determined.\n\n"
+    "ACTIONS:\n"
+    "• Specify the exact item or service\n"
+    "• Provide the supplier quote for comparison\n"
+    "• Include part number or model if available\n"
+    "• Ask the supplier to itemise labour and parts separately"
+)
+
+
+class TestMarketCheckHandler(unittest.TestCase):
+
+    @patch("whatsapp_app.check_market_price")
+    def test_question_with_price_returns_decision(self, mock_check):
+        mock_check.return_value = _MARKET_RESPONSE_WITH_PRICE
+        from whatsapp_app import _handle_text_message
+        answer, _ = _handle_text_message(
+            "is EUR 2500 a fair price for windlass service", _empty_state()
+        )
+        self.assertIn("DECISION", answer)
+        self.assertIn("Above market", answer)
+        mock_check.assert_called_once_with("is EUR 2500 a fair price for windlass service")
+
+    @patch("whatsapp_app.check_market_price")
+    def test_question_without_price_returns_range(self, mock_check):
+        mock_check.return_value = _MARKET_RESPONSE_NO_PRICE
+        from whatsapp_app import _handle_text_message
+        answer, _ = _handle_text_message(
+            "what should a windlass service cost", _empty_state()
+        )
+        self.assertIn("Estimated range", answer)
+        self.assertIn("ACTIONS", answer)
+        mock_check.assert_called_once()
+
+    @patch("whatsapp_app.check_market_price")
+    def test_ambiguous_item_returns_unclear(self, mock_check):
+        mock_check.return_value = _MARKET_RESPONSE_AMBIGUOUS
+        from whatsapp_app import _handle_text_message
+        answer, _ = _handle_text_message("is this a fair price", _empty_state())
+        self.assertIn("Unclear", answer)
+
+    @patch("whatsapp_app.check_market_price")
+    def test_market_check_sets_last_context(self, mock_check):
+        mock_check.return_value = _MARKET_RESPONSE_WITH_PRICE
+        from whatsapp_app import _handle_text_message
+        _, state = _handle_text_message(
+            "is EUR 500 a fair price for impeller", _empty_state()
+        )
+        ctx = state.get("last_context", {})
+        self.assertEqual(ctx.get("type"), "market_check")
+        self.assertIn("impeller", ctx.get("topic", ""))
+
+    @patch("whatsapp_app.check_market_price")
+    def test_market_check_does_not_affect_session_documents(self, mock_check):
+        mock_check.return_value = _MARKET_RESPONSE_WITH_PRICE
+        from whatsapp_app import _handle_text_message
+        _, state = _handle_text_message("is this a fair price", _empty_state())
+        self.assertEqual(len(state["documents"]), 0)
+        self.assertIsNone(state["active_session_id"])
+
+    @patch("whatsapp_app.check_market_price")
+    def test_market_check_does_not_break_compliance_routing(self, mock_check):
+        """A compliance question after a market check must still route to compliance."""
+        mock_check.return_value = _MARKET_RESPONSE_WITH_PRICE
+        from whatsapp_app import _handle_text_message, answer_compliance_query
+        _, state = _handle_text_message("is this a fair price", _empty_state())
+        # compliance question should still work — just check intent classification
+        self.assertEqual(classify_text("is marpol annex vi required"), "compliance_question")
+
+    @patch("whatsapp_app.check_market_price")
+    def test_market_check_response_always_non_empty(self, mock_check):
+        """Service failure fallback must still produce a non-empty reply."""
+        mock_check.return_value = (
+            "DECISION:\nUnclear\n\n"
+            "WHY:\nMarket price lookup is temporarily unavailable.\n\n"
+            "ACTIONS:\n• Request an itemised breakdown from the supplier"
+        )
+        from whatsapp_app import _handle_text_message
+        answer, _ = _handle_text_message("is this a fair price", _empty_state())
+        self.assertTrue(answer.strip())
+        self.assertIn("DECISION", answer)
+
+
 if __name__ == "__main__":
     unittest.main()

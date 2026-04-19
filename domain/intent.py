@@ -59,6 +59,41 @@ _COMPLIANCE_FOLLOWUP_EXACT = {
 _GREETINGS = {"hi", "hello", "start", "hey"}
 
 # ---------------------------------------------------------------------------
+# Market price check classification
+# ---------------------------------------------------------------------------
+
+# Substring triggers: matched anywhere in the lowercased message.
+# Checked BEFORE compliance substrings so pricing questions ("is this expensive",
+# "is this reasonable") are not accidentally routed to the compliance engine.
+_MARKET_CHECK_SUBSTRINGS = [
+    "is this a fair price",
+    "is that a fair price",
+    "fair price for",
+    "is this reasonable",
+    "is that reasonable",
+    "reasonable price for",
+    "does this look expensive",
+    "is this overpriced",
+    "is that overpriced",
+    "what should this cost",
+    "what should that cost",
+    "ballpark cost for",
+    "market price for",
+    "typical cost for",
+    "expected cost for",
+    "is this good value",
+    "is that good value",
+]
+
+# Regex patterns: catch "what should X cost", "how much should X be" and
+# similar natural forms that can't be matched by a fixed substring.
+_MARKET_CHECK_PATTERNS = [
+    r"\bwhat should\b.{0,80}\bcost\b",
+    r"\bwhat (would|does|will)\b.{0,60}\bcost\b",
+    r"\bhow much (should|would|does|will|is|are)\b",
+]
+
+# ---------------------------------------------------------------------------
 # Compliance classification
 # ---------------------------------------------------------------------------
 
@@ -235,8 +270,8 @@ def classify_text(text: str) -> str:
     """
     Returns one of:
       new_session | quote_compare | why_higher | show_added |
-      show_missing | what_to_do | compliance_followup |
-      compliance_question | greeting | unknown
+      show_missing | what_to_do | show_extraction | compliance_followup |
+      compliance_question | market_check | greeting | unknown
     """
     t = text.strip().lower()
 
@@ -256,6 +291,16 @@ def classify_text(text: str) -> str:
     for trigger in _QUOTE_COMPARE_SUBSTRINGS:
         if trigger in t:
             return "quote_compare"
+
+    # Market price check — before compliance so pricing questions ("is this expensive",
+    # "is this reasonable") are not mis-routed to the compliance engine.
+    for trigger in _MARKET_CHECK_SUBSTRINGS:
+        if trigger in t:
+            return "market_check"
+
+    for pattern in _MARKET_CHECK_PATTERNS:
+        if re.search(pattern, t):
+            return "market_check"
 
     # Compliance — checked after commercial intents, before generic fallback
     for trigger in _COMPLIANCE_SUBSTRINGS:

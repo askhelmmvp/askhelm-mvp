@@ -36,6 +36,7 @@ from domain.session_manager import (
 )
 from domain.intent import classify_text
 from domain.compliance_engine import answer_compliance_query, answer_compliance_followup
+from services.market_price_service import check_market_price
 import config
 
 load_dotenv(dotenv_path=".env")
@@ -1074,6 +1075,11 @@ def _handle_text_message(incoming: str, state: dict) -> Tuple[str, dict]:
     if intent == "compliance_question":
         answer = answer_compliance_query(incoming)
         state["last_context"] = {"type": "compliance", "topic": incoming}
+        return answer, state
+
+    if intent == "market_check":
+        answer = check_market_price(incoming)
+        state["last_context"] = {"type": "market_check", "topic": incoming}
         return answer, state
 
     return _make_response(
