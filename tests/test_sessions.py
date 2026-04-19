@@ -779,10 +779,23 @@ class TestOperationalNotes(unittest.TestCase):
             "supplier_name": None, "total": None, "subtotal": None, "line_items": [],
         }))
 
-    def test_supplier_present_is_commercial(self):
+    def test_supplier_only_is_operational(self):
+        # Supplier name alone (no pricing, no doc_type) → operational; person name in notes won't block classification
+        from whatsapp_app import _is_operational_note
+        self.assertTrue(_is_operational_note({
+            "supplier_name": "Capt. Anderson", "total": None, "subtotal": None, "line_items": [],
+        }))
+
+    def test_explicit_quote_doc_type_is_commercial(self):
         from whatsapp_app import _is_operational_note
         self.assertFalse(_is_operational_note({
-            "supplier_name": "Neptune Supplies", "total": None, "subtotal": None, "line_items": [],
+            "doc_type": "quote", "supplier_name": None, "total": None, "subtotal": None, "line_items": [],
+        }))
+
+    def test_explicit_invoice_doc_type_is_commercial(self):
+        from whatsapp_app import _is_operational_note
+        self.assertFalse(_is_operational_note({
+            "doc_type": "invoice", "supplier_name": "Neptune Supplies", "total": None, "subtotal": None, "line_items": [],
         }))
 
     def test_total_present_is_commercial(self):
@@ -878,6 +891,85 @@ class TestOperationalNotes(unittest.TestCase):
 
         self.assertEqual(updated_state["active_session_id"], session_id_before)
         self.assertEqual(len(updated_state["documents"]), 1)
+
+
+class TestOperationalNoteClassification(unittest.TestCase):
+    """Regression tests for the handwritten-note-with-person-name bug."""
+
+    def test_handwritten_note_with_person_name_is_operational(self):
+        # Capt. Anderson extracted as supplier_name but no pricing → must be operational
+        from whatsapp_app import _is_operational_note
+        self.assertTrue(_is_operational_note({
+            "doc_type": None,
+            "supplier_name": "Capt. Anderson",
+            "total": None,
+            "subtotal": None,
+            "line_items": [
+                {"description": "Schedule lifeboat drill", "unit_rate": None, "line_total": None},
+                {"description": "Check bilge alarms", "unit_rate": None, "line_total": None},
+            ],
+        }))
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    @patch("whatsapp_app.summarise_operational_note_from_image")
+    def test_handwritten_note_no_commercial_session_created(self, mock_summarise, mock_extract):
+        mock_extract.return_value = {
+            "doc_type": None,
+            "supplier_name": "Capt. Anderson",
+            "total": None, "subtotal": None,
+            "line_items": [],
+            "exclusions": [], "assumptions": [],
+            "document_number": None, "document_date": None,
+            "currency": None, "tax": None,
+        }
+        mock_summarise.return_value = _OPERATIONAL_SUMMARY
+
+        from whatsapp_app import _handle_image_upload
+        _, state = _handle_image_upload("data/handwritten.jpg", _empty_state())
+
+        self.assertEqual(len(state["documents"]), 0)
+        self.assertIsNone(state["active_session_id"])
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    @patch("whatsapp_app.summarise_operational_note_from_image")
+    def test_handwritten_note_returns_summary(self, mock_summarise, mock_extract):
+        mock_extract.return_value = {
+            "doc_type": None,
+            "supplier_name": "Chief Eng. Reyes",
+            "total": None, "subtotal": None,
+            "line_items": [],
+            "exclusions": [], "assumptions": [],
+            "document_number": None, "document_date": None,
+            "currency": None, "tax": None,
+        }
+        mock_summarise.return_value = _OPERATIONAL_SUMMARY
+
+        from whatsapp_app import _handle_image_upload
+        answer, _ = _handle_image_upload("data/handwritten.jpg", _empty_state())
+
+        self.assertIn("DECISION:", answer)
+        self.assertIn("KEY POINTS:", answer)
+        mock_summarise.assert_called_once()
+
+    def test_quote_without_totals_but_explicit_doc_type_is_commercial(self):
+        from whatsapp_app import _is_operational_note
+        self.assertFalse(_is_operational_note({
+            "doc_type": "quote",
+            "supplier_name": None,
+            "total": None, "subtotal": None,
+            "line_items": [
+                {"description": "Service A", "unit_rate": None, "line_total": None},
+            ],
+        }))
+
+    def test_unknown_doc_type_no_pricing_is_operational(self):
+        from whatsapp_app import _is_operational_note
+        self.assertTrue(_is_operational_note({
+            "doc_type": "unknown",
+            "supplier_name": "Meeting Notes",
+            "total": None, "subtotal": None,
+            "line_items": [],
+        }))
 
 
 if __name__ == "__main__":

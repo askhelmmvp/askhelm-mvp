@@ -848,16 +848,24 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
     return build_three_way_comparison_response(ranked), state
 
 
+_COMMERCIAL_DOC_TYPES = {
+    "quote", "quotation", "estimate", "proposal", "offer", "proforma",
+    "invoice", "tax invoice", "commercial invoice", "final invoice",
+}
+
+
 def _is_operational_note(extracted: dict) -> bool:
-    """Return True when an extraction has no commercial structure — no supplier, no totals, no pricing."""
-    has_supplier = bool((extracted.get("supplier_name") or "").strip())
+    """Return True when an extraction has no commercial structure — no pricing, no totals, no explicit commercial doc type."""
+    raw_type = (extracted.get("doc_type") or "").strip().lower()
+    if raw_type in _COMMERCIAL_DOC_TYPES:
+        return False
     has_total = extracted.get("total") is not None
     has_subtotal = extracted.get("subtotal") is not None
     has_priced_items = any(
         item.get("unit_rate") is not None or item.get("line_total") is not None
         for item in (extracted.get("line_items") or [])
     )
-    return not (has_supplier or has_total or has_subtotal or has_priced_items)
+    return not (has_total or has_subtotal or has_priced_items)
 
 
 def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
