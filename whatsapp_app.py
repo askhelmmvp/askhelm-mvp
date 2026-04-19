@@ -868,51 +868,82 @@ def _is_operational_note(extracted: dict) -> bool:
     return not (has_total or has_subtotal or has_priced_items)
 
 
+def _image_unknown_response() -> str:
+    return _make_response(
+        decision="IMAGE PROCESSED",
+        why="The image was read, but it does not look like a standard quote or invoice.",
+        actions=[
+            "Ask: show extraction",
+            "Ask for a summary",
+            "Upload another document to compare",
+        ],
+    )
+
+
 def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
     fname = os.path.basename(file_path)
-    logger.info("Image extraction started: %s", fname)
+    logger.info("Image upload: extraction started: %s", fname)
 
+    # --- Step 1: extract ---
     try:
         extracted = extract_commercial_document_from_images([file_path])
     except Exception as exc:
-        logger.exception("Image extraction failed for %s: %s", fname, exc)
+        logger.exception("Image upload: extraction failed for %s: %s", fname, exc)
+        logger.info("Image upload: branch=failed reply=IMAGE_RECEIVED")
         return _image_received_response(), state
 
     if not isinstance(extracted, dict):
-        logger.warning("Image extraction returned non-dict (type=%s) for %s",
+        logger.warning("Image upload: extraction returned non-dict (type=%s) for %s",
                        type(extracted).__name__, fname)
+        logger.info("Image upload: branch=failed reply=IMAGE_RECEIVED")
         return _image_received_response(), state
 
-    logger.info("Image extraction succeeded: %s", fname)
+    logger.info("Image upload: extraction succeeded for %s", fname)
 
+    # --- Step 2: operational note ---
     if _is_operational_note(extracted):
-        logger.info("Image classified as operational note: %s", fname)
+        logger.info("Image upload: branch=operational_note for %s", fname)
         try:
-            return summarise_operational_note_from_image(file_path), state
+            reply = summarise_operational_note_from_image(file_path)
+            logger.info("Image upload: reply=operational_summary created=%s", bool(reply))
+            return reply, state
         except Exception as exc:
-            logger.exception("Operational note summarisation failed for %s: %s", fname, exc)
+            logger.exception("Image upload: operational summarisation failed for %s: %s", fname, exc)
+            logger.info("Image upload: branch=failed reply=IMAGE_RECEIVED")
             return _image_received_response(), state
 
-    extracted = normalise_doc_type(extracted)
-    doc_record = make_document_record(extracted, file_path)
-    doc_type = doc_record["doc_type"]
-    supplier = doc_record["supplier_name"] or "Unknown supplier"
-    total = doc_record["total"]
-    currency = doc_record["currency"]
+    # --- Step 3: commercial document ---
+    try:
+        extracted = normalise_doc_type(extracted)
+        doc_record = make_document_record(extracted, file_path)
+        doc_type = doc_record["doc_type"]
+        supplier = doc_record["supplier_name"] or "Unknown supplier"
+        total = doc_record["total"]
+        currency = doc_record["currency"]
 
-    logger.info("Image classified: type=%s supplier=%s total=%s %s",
-                doc_type, supplier, total, currency)
+        logger.info("Image upload: type=%s supplier=%s total=%s %s for %s",
+                    doc_type, supplier, total, currency, fname)
 
-    state, _ = create_pending_session(doc_record, state)
+        if doc_type in ("quote", "invoice"):
+            logger.info("Image upload: branch=commercial reply=IMAGE_PROCESSED")
+            state, _ = create_pending_session(doc_record, state)
+            return _make_response(
+                decision="IMAGE PROCESSED",
+                why=f"Extracted a {doc_type} from {supplier}. Total: {total} {currency}.",
+                actions=[
+                    "show extraction",
+                    "upload another document to compare",
+                ],
+            ), state
 
-    return _make_response(
-        decision="IMAGE PROCESSED",
-        why="Document extracted and ready for review or comparison.",
-        actions=[
-            "show extraction",
-            "upload another document to compare",
-        ],
-    ), state
+        # doc_type is "unknown" — readable but not a recognisable commercial format
+        logger.info("Image upload: branch=unknown reply=IMAGE_PROCESSED_UNKNOWN")
+        return _image_unknown_response(), state
+
+    except Exception as exc:
+        logger.exception("Image upload: commercial processing failed for %s: %s", fname, exc)
+        logger.info("Image upload: branch=failed reply=IMAGE_RECEIVED")
+        return _image_received_response(), state
 
 
 def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
@@ -1039,13 +1070,21 @@ def whatsapp_reply():
     user_id = user_id_from_phone(phone)
     state = load_user_state(user_id)
 
+    # Safety-net: answer is always defined before the try/except so that any
+    # unexpected exception path still produces a visible WhatsApp reply.
+    answer = _make_response(
+        decision="SERVICE ERROR",
+        why="An unexpected error occurred. Please try again.",
+        actions=["Retry your message or upload"],
+    )
+
     try:
         incoming = request.form.get("Body", "").strip()
         num_media = int(request.form.get("NumMedia") or 0)
 
         if num_media > 0:
             media_url = request.form.get("MediaUrl0")
-            media_type = request.form.get("MediaContentType0", "")
+            media_type = (request.form.get("MediaContentType0") or "").strip().lower()
             logger.info(
                 "Inbound media: num_media=%d content_type=%r url_present=%s",
                 num_media, media_type, bool(media_url),
@@ -1085,9 +1124,12 @@ def whatsapp_reply():
 
     save_user_state(user_id, state)
 
+    body = f"⚓ AskHelm \n\n{answer}"
+    logger.info("Twilio reply: body_length=%d user=%s", len(body), user_id)
+
     resp = MessagingResponse()
-    resp.message(f"⚓ AskHelm \n\n{answer}")
-    return str(resp)
+    resp.message(body)
+    return str(resp), 200, {"Content-Type": "text/xml"}
 
 
 if __name__ == "__main__":
