@@ -714,6 +714,38 @@ class TestImageExtraction(unittest.TestCase):
         self.assertNotIn("image/webp", _IMAGE_CONTENT_TYPES)
         self.assertNotIn("application/pdf", _IMAGE_CONTENT_TYPES)
 
+    # --- Twilio reply body always present ---
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_commercial_image_reply_body_is_non_empty(self, mock_vision):
+        """A quote/invoice image must produce a non-empty reply body for Twilio to deliver."""
+        mock_vision.return_value = _QUOTE_EXTRACTION
+        from whatsapp_app import _handle_image_upload
+        answer, _ = _handle_image_upload("data/quote.jpg", self._empty_state())
+        self.assertTrue(answer.strip(), "Reply body must not be empty for commercial image")
+        self.assertIn("IMAGE PROCESSED", answer)
+        self.assertIn("Pacific Marine Supplies", answer)
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_unknown_image_reply_body_is_non_empty(self, mock_vision):
+        """An unclassified image must produce a non-empty reply body; no session created."""
+        mock_vision.return_value = _UNKNOWN_EXTRACTION
+        from whatsapp_app import _handle_image_upload
+        answer, state = _handle_image_upload("data/unknown.jpg", self._empty_state())
+        self.assertTrue(answer.strip(), "Reply body must not be empty for unknown image")
+        self.assertIn("IMAGE PROCESSED", answer)
+        self.assertIn("does not look like a standard quote or invoice", answer)
+        self.assertEqual(len(state["documents"]), 0, "Unknown doc should not be stored in session")
+
+    @patch("whatsapp_app.extract_commercial_document_from_images")
+    def test_failed_image_reply_body_is_non_empty(self, mock_vision):
+        """Extraction failure must produce a non-empty reply body — never a silent HTTP 200."""
+        mock_vision.side_effect = Exception("vision timeout")
+        from whatsapp_app import _handle_image_upload
+        answer, _ = _handle_image_upload("data/bad.jpg", self._empty_state())
+        self.assertTrue(answer.strip(), "Reply body must not be empty for failed extraction")
+        self.assertIn("IMAGE RECEIVED", answer)
+
     @patch("whatsapp_app.extract_commercial_document_from_images")
     def test_pdf_flow_unaffected_by_image_handler(self, mock_vision):
         """PDF handler must not call the vision service."""
@@ -725,6 +757,98 @@ class TestImageExtraction(unittest.TestCase):
             _handle_pdf_upload("data/test.pdf", self._empty_state())
 
         mock_vision.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Immediate image reply via background thread
+# ---------------------------------------------------------------------------
+
+class TestImageImmediateReply(unittest.TestCase):
+    """Image uploads must return IMAGE RECEIVED immediately; extraction runs in background."""
+
+    def _post_image(self, mock_download, mock_bg, mock_load, content_type="image/jpeg"):
+        mock_download.return_value = "/tmp/upload_test.jpg"
+        mock_load.return_value = _empty_state()
+        from whatsapp_app import app
+        with app.test_client() as client:
+            return client.post("/whatsapp", data={
+                "From": "whatsapp:+447700900000",
+                "NumMedia": "1",
+                "MediaUrl0": "https://api.twilio.com/media/xxx",
+                "MediaContentType0": content_type,
+                "Body": "",
+            })
+
+    @patch("whatsapp_app.save_user_state")
+    @patch("whatsapp_app.load_user_state")
+    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app.download_file")
+    def test_jpeg_upload_returns_immediate_image_received(self, mock_dl, mock_bg, mock_load, mock_save):
+        response = self._post_image(mock_dl, mock_bg, mock_load, "image/jpeg")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(b"IMAGE RECEIVED", response.data)
+        self.assertIn(b"Processing your image now", response.data)
+
+    @patch("whatsapp_app.save_user_state")
+    @patch("whatsapp_app.load_user_state")
+    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app.download_file")
+    def test_jpeg_upload_starts_background_thread(self, mock_dl, mock_bg, mock_load, mock_save):
+        self._post_image(mock_dl, mock_bg, mock_load, "image/jpeg")
+        mock_bg.assert_called_once()
+        args = mock_bg.call_args[0]
+        self.assertEqual(args[0], "/tmp/upload_test.jpg")   # file_path
+        self.assertIsInstance(args[2], str)                 # user_id is a non-empty hash
+        self.assertTrue(args[2])
+
+    @patch("whatsapp_app.save_user_state")
+    @patch("whatsapp_app.load_user_state")
+    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app.download_file")
+    def test_jpeg_upload_does_not_save_state_in_main_thread(self, mock_dl, mock_bg, mock_load, mock_save):
+        """State persistence must be left to the background thread."""
+        self._post_image(mock_dl, mock_bg, mock_load, "image/jpeg")
+        mock_save.assert_not_called()
+
+    @patch("whatsapp_app.save_user_state")
+    @patch("whatsapp_app.load_user_state")
+    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app.download_file")
+    def test_png_upload_returns_immediate_image_received(self, mock_dl, mock_bg, mock_load, mock_save):
+        response = self._post_image(mock_dl, mock_bg, mock_load, "image/png")
+        self.assertIn(b"IMAGE RECEIVED", response.data)
+
+    @patch("whatsapp_app.save_user_state")
+    @patch("whatsapp_app.load_user_state")
+    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app.download_file")
+    def test_reply_content_type_is_xml(self, mock_dl, mock_bg, mock_load, mock_save):
+        response = self._post_image(mock_dl, mock_bg, mock_load)
+        self.assertIn("text/xml", response.content_type)
+
+    @patch("whatsapp_app.save_user_state")
+    @patch("whatsapp_app.load_user_state")
+    @patch("whatsapp_app.extract_commercial_document_with_claude")
+    @patch("whatsapp_app.extract_pdf_text")
+    @patch("whatsapp_app.download_file")
+    def test_pdf_flow_still_replies_synchronously(self, mock_dl, mock_pdf_text, mock_pdf_llm, mock_load, mock_save):
+        """PDF uploads must NOT use the background thread — they reply inline."""
+        mock_dl.return_value = "/tmp/upload_test.pdf"
+        mock_pdf_text.return_value = "some invoice text"
+        mock_pdf_llm.return_value = _QUOTE_EXTRACTION
+        mock_load.return_value = _empty_state()
+        from whatsapp_app import app
+        with app.test_client() as client:
+            response = client.post("/whatsapp", data={
+                "From": "whatsapp:+447700900000",
+                "NumMedia": "1",
+                "MediaUrl0": "https://api.twilio.com/media/doc.pdf",
+                "MediaContentType0": "application/pdf",
+                "Body": "",
+            })
+        self.assertEqual(response.status_code, 200)
+        self.assertNotIn(b"IMAGE RECEIVED", response.data)
+        mock_save.assert_called_once()  # state saved synchronously for PDFs
 
 
 # ---------------------------------------------------------------------------

@@ -1,10 +1,13 @@
+import copy
 import os
 import json
 import logging
 import requests
+import threading
 from typing import Optional, Tuple
 from dotenv import load_dotenv
 from flask import Flask, request
+from twilio.rest import Client as TwilioRestClient
 from twilio.twiml.messaging_response import MessagingResponse
 
 from domain.extraction import extract_pdf_text, render_pdf_pages_to_images
@@ -43,6 +46,7 @@ config.log_startup()
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
+TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
 
 BASE_CURRENCY = "EUR"
 
@@ -868,6 +872,35 @@ def _is_operational_note(extracted: dict) -> bool:
     return not (has_total or has_subtotal or has_priced_items)
 
 
+def _send_whatsapp_message(to_phone: str, body: str) -> None:
+    """Send a proactive WhatsApp message via Twilio REST API."""
+    if not (TWILIO_FROM_NUMBER and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
+        logger.warning("Image upload: proactive send skipped — TWILIO_FROM_NUMBER or credentials not set")
+        return
+    try:
+        client = TwilioRestClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
+        client.messages.create(from_=TWILIO_FROM_NUMBER, to=to_phone, body=body)
+        logger.info("Image upload: proactive message sent to %s body_length=%d", to_phone, len(body))
+    except Exception as exc:
+        logger.exception("Image upload: proactive send failed: %s", exc)
+
+
+def _process_image_background(file_path: str, state: dict, user_id: str, phone: str) -> None:
+    """Run image extraction in a background thread and deliver the result via Twilio REST API."""
+    fname = os.path.basename(file_path)
+    logger.info("Image upload: background extraction started: %s user=%s", fname, user_id)
+    try:
+        answer, updated_state = _handle_image_upload(file_path, state)
+        save_user_state(user_id, updated_state)
+        logger.info("Image upload: background extraction completed: %s user=%s", fname, user_id)
+    except Exception as exc:
+        logger.exception("Image upload: background extraction failed for %s: %s", fname, exc)
+        answer = _image_received_response()
+    body = f"⚓ AskHelm \n\n{answer}"
+    logger.info("Image upload: sending extraction result user=%s body_length=%d", user_id, len(body))
+    _send_whatsapp_message(phone, body)
+
+
 def _image_unknown_response() -> str:
     return _make_response(
         decision="IMAGE PROCESSED",
@@ -1070,13 +1103,14 @@ def whatsapp_reply():
     user_id = user_id_from_phone(phone)
     state = load_user_state(user_id)
 
-    # Safety-net: answer is always defined before the try/except so that any
-    # unexpected exception path still produces a visible WhatsApp reply.
+    # Safety-net: always defined so every code path produces a visible reply.
     answer = _make_response(
         decision="SERVICE ERROR",
         why="An unexpected error occurred. Please try again.",
         actions=["Retry your message or upload"],
     )
+    # For image uploads the background thread saves state; skip the main-thread save.
+    save_state = True
 
     try:
         incoming = request.form.get("Body", "").strip()
@@ -1095,8 +1129,25 @@ def whatsapp_reply():
 
             if media_type == "application/pdf":
                 answer, state = _handle_pdf_upload(file_path, state)
+
             elif media_type in _IMAGE_CONTENT_TYPES:
-                answer, state = _handle_image_upload(file_path, state)
+                # Return immediately; extraction runs in background thread and
+                # delivers the result via a proactive Twilio REST API message.
+                thread = threading.Thread(
+                    target=_process_image_background,
+                    args=(file_path, copy.deepcopy(state), user_id, phone),
+                    daemon=True,
+                )
+                thread.start()
+                logger.info("Image upload: background thread started for %s user=%s",
+                            os.path.basename(file_path), user_id)
+                answer = _make_response(
+                    decision="IMAGE RECEIVED",
+                    why="Processing your image now.",
+                    actions=["Wait for extraction result", "Or send another document"],
+                )
+                save_state = False  # background thread handles state persistence
+
             else:
                 logger.warning("Unsupported media type: %r", media_type)
                 answer = _make_response(
@@ -1122,10 +1173,11 @@ def whatsapp_reply():
             ],
         )
 
-    save_user_state(user_id, state)
+    if save_state:
+        save_user_state(user_id, state)
 
     body = f"⚓ AskHelm \n\n{answer}"
-    logger.info("Twilio reply: body_length=%d user=%s", len(body), user_id)
+    logger.info("Twilio reply: body_length=%d save_state=%s user=%s", len(body), save_state, user_id)
 
     resp = MessagingResponse()
     resp.message(body)

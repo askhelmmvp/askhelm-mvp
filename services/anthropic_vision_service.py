@@ -76,6 +76,7 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
         model="claude-sonnet-4-6",
         max_tokens=3000,
         messages=[{"role": "user", "content": content}],
+        timeout=90.0,
     )
 
     raw = response.content[0].text.strip()
@@ -140,6 +141,7 @@ def summarise_operational_note_from_image(image_path: str) -> str:
         model="claude-sonnet-4-6",
         max_tokens=500,
         messages=[{"role": "user", "content": content}],
+        timeout=90.0,
     )
 
     return response.content[0].text.strip()
