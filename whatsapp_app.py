@@ -392,6 +392,43 @@ def _rank_docs_by_price(docs):
 # Public response builders
 # ---------------------------------------------------------------------------
 
+def _build_freight_response(
+    supplier_b: str,
+    freight_items: list,
+    delta,
+    delta_percent,
+    currency_b: str,
+) -> str:
+    freight_total = sum(
+        float(item.get("line_total") or item.get("unit_rate") or 0)
+        for item in freight_items
+    )
+    freight_descs = [
+        (item.get("description") or "freight").strip()
+        for item in freight_items
+    ]
+    freight_label = " + ".join(freight_descs)
+
+    if freight_total:
+        amount_str = f"{freight_total:g} {currency_b}".strip()
+        why = f"{freight_label} ({amount_str}) added — not in original quote."
+    else:
+        why = f"{freight_label} added — not in original quote."
+
+    pct = abs(delta_percent) if delta_percent is not None else None
+    pct_str = f" (+{pct:.1f}%)" if pct is not None else ""
+
+    return _make_response(
+        decision=f"INVOICE FROM {supplier_b.upper()} IS HIGHER — FREIGHT ADDED{pct_str}",
+        why=why,
+        actions=[
+            "Confirm if freight was agreed (e.g. ex works)",
+            "Approve if freight was expected",
+            "Query with supplier if not pre-agreed",
+        ],
+    )
+
+
 def build_comparison_response(doc_a, doc_b, comparison):
     supplier_a = (doc_a.get("supplier_name") or "first supplier").strip()
     supplier_b = (doc_b.get("supplier_name") or "second supplier").strip()
@@ -404,12 +441,18 @@ def build_comparison_response(doc_a, doc_b, comparison):
     total_b = comparison.get("total_b")
     added_items = comparison.get("added_items") or []
     missing_items = comparison.get("missing_items") or []
+    freight_items = comparison.get("freight_items") or []
 
     total_a_conv, total_b_conv, delta, delta_percent = _compute_delta(
         total_a, total_b, currency_a, currency_b
     )
     added_names = _get_item_names(added_items)
     missing_names = _get_item_names(missing_items)
+
+    # Freight-specific response: invoice higher than quote purely due to freight/delivery addition
+    quote_to_invoice = doc_type_a == "quote" and doc_type_b == "invoice"
+    if quote_to_invoice and delta is not None and delta > 0 and freight_items:
+        return _build_freight_response(supplier_b, freight_items, delta, delta_percent, currency_b)
 
     if (
         currency_a and currency_b

@@ -1,3 +1,15 @@
+_FREIGHT_KEYWORDS = {
+    "freight", "delivery", "packing", "transport", "shipping",
+    "courier", "carriage", "handling", "logistics", "dispatch",
+    "postage", "forwarding",
+}
+
+
+def _is_freight_item(desc: str) -> bool:
+    lower = desc.lower()
+    return any(kw in lower for kw in _FREIGHT_KEYWORDS)
+
+
 def compare_documents(doc_a: dict, doc_b: dict) -> dict:
     total_a = doc_a.get("total")
     total_b = doc_b.get("total")
@@ -31,6 +43,11 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         if item.get("description", "").strip().lower() not in descriptions_b
     ]
 
+    freight_items = [
+        item for item in added_items
+        if _is_freight_item(item.get("description", ""))
+    ]
+
     return {
         "total_a": total_a,
         "total_b": total_b,
@@ -38,4 +55,5 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         "delta_percent": delta_percent,
         "added_items": added_items,
         "missing_items": missing_items,
+        "freight_items": freight_items,
     }

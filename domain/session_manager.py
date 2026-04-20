@@ -235,16 +235,32 @@ def score_invoice_against_session(
         reasons.append(f"reference linkage: '{inv_ref}' ~ '{qte_ref}'")
 
     # 3. Similar totals (0-20)
+    # Use invoice subtotal when it is closer to the quote total — handles freight-on-top invoices
+    # where the subtotal matches the quoted scope and the delta is just the freight charge.
     inv_total = invoice_doc.get("total")
     qte_total = anchor.get("total")
-    if inv_total and qte_total and qte_total != 0:
-        ratio = abs(inv_total - qte_total) / abs(qte_total)
+    inv_subtotal = invoice_doc.get("subtotal")
+
+    compare_total = inv_total
+    if (
+        inv_subtotal is not None
+        and inv_total is not None
+        and qte_total is not None
+        and qte_total != 0
+    ):
+        total_gap = abs(inv_total - qte_total) / abs(qte_total)
+        subtotal_gap = abs(inv_subtotal - qte_total) / abs(qte_total)
+        if subtotal_gap < total_gap:
+            compare_total = inv_subtotal
+
+    if compare_total is not None and qte_total is not None and qte_total != 0:
+        ratio = abs(compare_total - qte_total) / abs(qte_total)
         if ratio < 0.05:
             score += 20
-            reasons.append(f"totals nearly identical: {inv_total} vs {qte_total}")
+            reasons.append(f"totals nearly identical: {compare_total} vs {qte_total}")
         elif ratio < 0.20:
             score += 10
-            reasons.append(f"totals close ({ratio * 100:.0f}% diff): {inv_total} vs {qte_total}")
+            reasons.append(f"totals close ({ratio * 100:.0f}% diff): {compare_total} vs {qte_total}")
         else:
             reasons.append(f"totals diverge ({ratio * 100:.0f}% diff)")
 
@@ -283,12 +299,59 @@ def score_invoice_against_session(
     return score, reasons
 
 
+def _should_force_compare(invoice_doc: dict, session: dict, state: dict) -> bool:
+    """
+    Return True when the invoice obviously belongs to this session even if the
+    numeric score is below AUTO_MATCH_THRESHOLD.
+
+    Conditions (both must hold):
+      • Supplier name matches exactly or one contains the other.
+      • ≥50% of the line-item descriptions overlap (by description text).
+
+    This catches the common case where an invoice adds a freight / delivery line
+    that was absent from the quote, causing the totals to diverge and the item
+    overlap to drop just below the scoring threshold.
+    """
+    anchor = get_doc(session["anchor_doc_id"], state)
+    if anchor is None or anchor.get("doc_type") != "quote":
+        return False
+
+    inv_sup = invoice_doc.get("supplier_name", "").strip().lower()
+    qte_sup = anchor.get("supplier_name", "").strip().lower()
+    if not inv_sup or not qte_sup:
+        return False
+    supplier_matches = (inv_sup == qte_sup or inv_sup in qte_sup or qte_sup in inv_sup)
+    if not supplier_matches:
+        return False
+
+    inv_descs = {
+        i.get("description", "").strip().lower()
+        for i in invoice_doc.get("line_items", [])
+        if i.get("description")
+    }
+    qte_descs = {
+        i.get("description", "").strip().lower()
+        for i in anchor.get("line_items", [])
+        if i.get("description")
+    }
+    if not inv_descs or not qte_descs:
+        return False
+
+    overlap = len(inv_descs & qte_descs) / max(len(inv_descs), len(qte_descs))
+    return overlap >= 0.5
+
+
 def find_best_matching_session(
     invoice_doc: dict, state: dict
 ) -> Tuple[Optional[str], int, List[str]]:
     """
     Find the best open quote session for an incoming invoice.
     Returns (session_id or None, score, reasons).
+
+    Force-compare override: if the best-scoring session has supplier match AND
+    ≥50% line-item overlap but its numeric score is still below AUTO_MATCH_THRESHOLD,
+    the score is boosted to threshold so the invoice is always compared rather than
+    silently dropped into a pending session.
     """
     open_sessions = [
         s for s in state.get("sessions", [])
@@ -297,7 +360,7 @@ def find_best_matching_session(
         and len(s["document_ids"]) == 1
     ]
 
-    best_id, best_score, best_reasons = None, 0, []
+    best_id, best_score, best_reasons, best_session = None, 0, [], None
     for session in open_sessions:
         score, reasons = score_invoice_against_session(invoice_doc, session, state)
         logger.debug(
@@ -305,7 +368,19 @@ def find_best_matching_session(
             session["session_id"], score, invoice_doc.get("supplier_name"), reasons,
         )
         if score > best_score:
-            best_id, best_score, best_reasons = session["session_id"], score, reasons
+            best_id, best_score, best_reasons, best_session = (
+                session["session_id"], score, reasons, session
+            )
+
+    # Force-compare: boost below-threshold matches that clearly belong together
+    if best_id is not None and best_score < AUTO_MATCH_THRESHOLD and best_session is not None:
+        if _should_force_compare(invoice_doc, best_session, state):
+            best_score = AUTO_MATCH_THRESHOLD
+            best_reasons.append("force-matched: supplier match + ≥50% line item overlap")
+            logger.info(
+                "Force-compare applied: session=%s new_score=%d invoice_from=%s",
+                best_id, best_score, invoice_doc.get("supplier_name"),
+            )
 
     logger.info(
         "Best session match for invoice from '%s': session=%s score=%d",
