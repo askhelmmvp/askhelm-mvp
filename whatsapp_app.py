@@ -37,6 +37,13 @@ from domain.session_manager import (
 from domain.intent import classify_text
 from domain.compliance_engine import answer_compliance_query, answer_compliance_followup
 from services.market_price_service import check_market_price
+from services.reminder_service import (
+    start_reminder_scheduler,
+    strip_reminder_prefix,
+    parse_datetime_and_text,
+    create_reminder,
+    format_due_datetime,
+)
 import config
 
 load_dotenv(dotenv_path=".env")
@@ -44,6 +51,7 @@ load_dotenv(dotenv_path=".env")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 config.log_startup()
+start_reminder_scheduler()
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
@@ -1128,7 +1136,33 @@ def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
     ), state
 
 
-def _handle_text_message(incoming: str, state: dict) -> Tuple[str, dict]:
+def _handle_reminder_command(message: str, phone: str, state: dict) -> Tuple[str, dict]:
+    remainder = strip_reminder_prefix(message)
+    if remainder is None:
+        remainder = message
+    due_at, text = parse_datetime_and_text(remainder)
+    if due_at is None:
+        return (
+            "REMINDER NOT SET\n\n"
+            "Couldn't parse the date/time.\n\n"
+            "Try:\n"
+            "• remind me in 2 hours to check the engine\n"
+            "• remind me tomorrow 9am to call the yard\n"
+            "• remind me next Monday 0900 to review the quote\n"
+            "• remind me 25 April 14:30 to sign the contract"
+        ), state
+    if not text:
+        return (
+            "REMINDER NOT SET\n\n"
+            "Please include a reminder message, e.g.:\n"
+            "• remind me tomorrow 9am to call the yard"
+        ), state
+    reminder = create_reminder(phone=phone, due_at=due_at, text=text)
+    due_str = format_due_datetime(due_at, reminder["timezone"])
+    return f"REMINDER SET\n\n{text}\n\n{due_str}", state
+
+
+def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[str, dict]:
     intent = classify_text(incoming)
     last_ctx = state.get("last_context", {})
 
@@ -1199,6 +1233,9 @@ def _handle_text_message(incoming: str, state: dict) -> Tuple[str, dict]:
             state["last_context"] = {"type": "market_check", "topic": incoming}
             return answer, state
         # No usable context — fall through to TEXT RECEIVED
+
+    if intent == "reminder":
+        return _handle_reminder_command(incoming, phone, state)
 
     if intent == "market_check":
         # Enrich vague references ("is this expensive?", "what should this cost?") with
@@ -1291,7 +1328,7 @@ def whatsapp_reply():
                     ],
                 )
         else:
-            answer, state = _handle_text_message(incoming, state)
+            answer, state = _handle_text_message(incoming, state, phone=phone)
 
     except Exception as e:
         logger.exception("Error processing request for user %s", user_id)

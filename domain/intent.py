@@ -383,14 +383,27 @@ def _is_open_question(t: str) -> bool:
     return t.endswith("?") or t.startswith(_QUESTION_STARTERS)
 
 
+_REMINDER_PREFIXES = (
+    "!remindme",
+    "!remind me",
+    "remindme ",
+    "remind me ",
+    "set a reminder",
+)
+
+
 def classify_text(text: str) -> str:
     """
     Returns one of:
       new_session | quote_compare | why_higher | show_added |
       show_missing | what_to_do | show_extraction | compliance_followup |
-      compliance_question | market_check | greeting | unknown
+      compliance_question | market_check | reminder | greeting | unknown
     """
     t = text.strip().lower()
+
+    for prefix in _REMINDER_PREFIXES:
+        if t.startswith(prefix):
+            return "reminder"
 
     if t in _NEW_SESSION_EXACT:
         return "new_session"

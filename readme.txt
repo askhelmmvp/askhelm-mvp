@@ -16,4 +16,4 @@ python3 whatsapp_app.py
 
 ->
 
-git add . && git commit -m "update" && git push
+git add . && git commit -m "add remind me function" && git push
