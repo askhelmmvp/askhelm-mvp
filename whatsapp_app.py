@@ -697,6 +697,69 @@ def build_what_should_i_do_response(comparison_data: Optional[dict]) -> str:
     return _make_response(decision="HERE IS WHAT TO DO NEXT", why=why, actions=actions)
 
 
+_VAGUE_DOC_REF_WORDS = frozenset({"this", "these", "it", "them"})
+
+
+def _has_vague_document_reference(query: str) -> bool:
+    """True when the query contains a pronoun that likely refers to an uploaded document."""
+    words = {w.strip("?.,!;:") for w in query.lower().split()}
+    return bool(words & _VAGUE_DOC_REF_WORDS)
+
+
+def _build_document_context(state: dict) -> str:
+    """
+    Build a brief pricing-context string from the most recently uploaded document.
+    Returns an empty string when no document is available.
+    Used to enrich vague market-check queries ('rough price for this?') with
+    the actual items and total so Claude can give a useful assessment.
+    """
+    docs = state.get("documents", [])
+    if not docs:
+        return ""
+    doc = docs[-1]
+
+    supplier = (doc.get("supplier_name") or "").strip()
+    total = doc.get("total")
+    currency = (doc.get("currency") or "").strip().upper()
+    doc_type = (doc.get("doc_type") or "document").strip()
+    line_items = doc.get("line_items") or []
+
+    label = f"{doc_type} from {supplier}" if supplier else doc_type
+    parts = [f"Uploaded document: {label}"]
+
+    item_strs = []
+    for item in line_items[:6]:
+        desc = (item.get("description") or "").strip()
+        rate = item.get("line_total") if item.get("line_total") is not None else item.get("unit_rate")
+        if desc and rate is not None:
+            item_strs.append(f"{desc} ({rate} {currency})".strip())
+        elif desc:
+            item_strs.append(desc)
+    if item_strs:
+        parts.append("Items: " + "; ".join(item_strs))
+
+    if total is not None:
+        total_str = f"{total} {currency}".strip()
+        parts.append(f"Total: {total_str}")
+
+    return "\n".join(parts)
+
+
+def _enrich_with_doc_context(query: str, state: dict) -> str:
+    """
+    Prepend document context to a vague pricing query when:
+      • the query contains a pronoun referring to 'this'/'these' document, AND
+      • a document has been uploaded in the current session.
+    Returns the original query unchanged if no enrichment is possible.
+    """
+    if not _has_vague_document_reference(query):
+        return query
+    doc_ctx = _build_document_context(state)
+    if not doc_ctx:
+        return query
+    return f"{doc_ctx}\n\nUser question: {query}"
+
+
 def _image_received_response() -> str:
     return _make_response(
         decision="IMAGE RECEIVED",
@@ -1127,10 +1190,21 @@ def _handle_text_message(incoming: str, state: dict) -> Tuple[str, dict]:
             answer = check_market_price(combined, allow_broad_estimate=True)
             state["last_context"] = {"type": "market_check", "topic": original_topic or incoming}
             return answer, state
-        # No market_check context — fall through to TEXT RECEIVED
+        # No market_check history — try using the most recently uploaded document as context.
+        # Handles: upload quote → "give me a rough price for this?" without prior market_check.
+        doc_ctx = _build_document_context(state)
+        if doc_ctx:
+            combined = f"{doc_ctx}\n\nUser question: {incoming}"
+            answer = check_market_price(combined, allow_broad_estimate=True)
+            state["last_context"] = {"type": "market_check", "topic": incoming}
+            return answer, state
+        # No usable context — fall through to TEXT RECEIVED
 
     if intent == "market_check":
-        answer = check_market_price(incoming)
+        # Enrich vague references ("is this expensive?", "what should this cost?") with
+        # context from the most recently uploaded document when one is available.
+        query = _enrich_with_doc_context(incoming, state)
+        answer = check_market_price(query)
         state["last_context"] = {"type": "market_check", "topic": incoming}
         return answer, state
 

@@ -107,11 +107,17 @@ _MARKET_CHECK_SUBSTRINGS = [
     "is that overpriced",
     "is this good value",
     "is that good value",
+    "is this expensive",
+    "is that expensive",
+    "are these expensive",
     # direct pricing queries
     "how much for",
+    "how much is this",
+    "how much are these",
     "cost of",
     "price for",
     "price of",
+    "rough price",
     "what does it cost",
     "what's the cost",
     "what is the cost",
@@ -128,10 +134,12 @@ _MARKET_CHECK_SUBSTRINGS = [
 
 # Regex patterns: cover natural forms that can't be matched by fixed substrings.
 _MARKET_CHECK_PATTERNS = [
-    r"\bwhat should\b.{0,80}\bcost\b",          # "what should a windlass service cost"
-    r"\bwhat (would|does|will)\b.{0,60}\bcost\b",  # "what would this cost"
-    r"\bhow much (should|would|does|will|is|are|for)\b",  # "how much for/is/does X"
-    r"\bis .{0,60}\b(reasonable|overpriced|fair)\b",      # "is €4500 reasonable"
+    r"\bwhat should\b.{0,80}\bcost\b",                           # "what should a windlass service cost"
+    r"\bwhat (would|does|will)\b.{0,60}\bcost\b",                # "what would this cost"
+    r"\bhow much (should|would|does|will|is|are|for)\b",         # "how much for/is/does X"
+    r"\bis .{0,60}\b(reasonable|overpriced|fair|expensive|pricey|costly)\b",  # "is €4500 reasonable/expensive"
+    r"\bshould (this|that|it|these)\b.{0,40}\bcost\b",           # "should this cost €400"
+    r"\bhow much should (this|that|it|these)\b",                  # "how much should this be"
 ]
 
 # ---------------------------------------------------------------------------
