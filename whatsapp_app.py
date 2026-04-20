@@ -206,6 +206,7 @@ def _build_decision_and_why(
     total_a, total_b,
     total_a_conv, total_b_conv,
     delta, delta_percent,
+    missing_names=None,
 ):
     both_quotes = doc_type_a == "quote" and doc_type_b == "quote"
     quote_to_invoice = doc_type_a == "quote" and doc_type_b == "invoice"
@@ -262,16 +263,27 @@ def _build_decision_and_why(
 
     elif quote_to_invoice:
         if delta > 0:
-            decision = f"INVOICE FROM {supplier_b.upper()} EXCEEDS QUOTE"
+            if missing_names:
+                decision = f"INVOICE FROM {supplier_b.upper()} EXCEEDS QUOTE — SCOPE DIFFERENCE"
+            else:
+                decision = "MATCH CONFIRMED — COST INCREASE"
         elif delta < 0:
-            decision = f"INVOICE FROM {supplier_b.upper()} IS BELOW QUOTE"
+            decision = "MATCH CONFIRMED — COST REDUCTION"
         else:
             decision = "INVOICE MATCHES QUOTE"
 
         if delta == 0:
-            why = f"{invoice_totals()} The invoice matches the quote."
+            why = f"{invoice_totals()} The invoice matches the quote exactly."
+        elif delta > 0:
+            if missing_names:
+                why = (
+                    f"{invoice_totals()} Invoice is {pct:.1f}% higher. "
+                    f"Items not carried over: {', '.join(missing_names)}."
+                )
+            else:
+                why = f"{invoice_totals()} Invoice is {pct:.1f}% higher than the quote."
         else:
-            why = f"{invoice_totals()} The invoice is {pct:.1f}% {direction} the quote."
+            why = f"{invoice_totals()} Invoice is {pct:.1f}% lower than the quote."
 
     elif both_invoices:
         if delta > 0:
@@ -419,15 +431,15 @@ def _build_freight_response(
 
     if freight_total:
         amount_str = f"{freight_total:g} {currency_b}".strip()
-        why = f"{freight_label} ({amount_str}) added — not in original quote."
+        why = f"{supplier_b.upper()}: {freight_label} ({amount_str}) added — not in original quote."
     else:
-        why = f"{freight_label} added — not in original quote."
+        why = f"{supplier_b.upper()}: {freight_label} added — not in original quote."
 
     pct = abs(delta_percent) if delta_percent is not None else None
     pct_str = f" (+{pct:.1f}%)" if pct is not None else ""
 
     return _make_response(
-        decision=f"INVOICE FROM {supplier_b.upper()} IS HIGHER — FREIGHT ADDED{pct_str}",
+        decision=f"MATCH CONFIRMED — FREIGHT ADDED{pct_str}",
         why=why,
         actions=[
             "Confirm if freight was agreed (e.g. ex works)",
@@ -449,7 +461,9 @@ def build_comparison_response(doc_a, doc_b, comparison):
     total_b = comparison.get("total_b")
     added_items = comparison.get("added_items") or []
     missing_items = comparison.get("missing_items") or []
-    freight_items = comparison.get("freight_items") or []
+    # Prefer structured ancillary_items; fall back to freight_items for backward compat
+    ancillary_items = comparison.get("ancillary_items") or comparison.get("freight_items") or []
+    all_ancillary = comparison.get("all_added_are_ancillary", False)
 
     total_a_conv, total_b_conv, delta, delta_percent = _compute_delta(
         total_a, total_b, currency_a, currency_b
@@ -457,10 +471,11 @@ def build_comparison_response(doc_a, doc_b, comparison):
     added_names = _get_item_names(added_items)
     missing_names = _get_item_names(missing_items)
 
-    # Freight-specific response: invoice higher than quote purely due to freight/delivery addition
+    # Ancillary-only uplift: invoice higher than quote but ALL added items are ancillary
+    # charges (freight, delivery, packing, etc.) — the core scope is unchanged.
     quote_to_invoice = doc_type_a == "quote" and doc_type_b == "invoice"
-    if quote_to_invoice and delta is not None and delta > 0 and freight_items:
-        return _build_freight_response(supplier_b, freight_items, delta, delta_percent, currency_b)
+    if quote_to_invoice and delta is not None and delta > 0 and ancillary_items and all_ancillary:
+        return _build_freight_response(supplier_b, ancillary_items, delta, delta_percent, currency_b)
 
     if (
         currency_a and currency_b
@@ -495,6 +510,7 @@ def build_comparison_response(doc_a, doc_b, comparison):
         total_a, total_b,
         total_a_conv, total_b_conv,
         delta, delta_percent,
+        missing_names=missing_names,
     )
     risks = _build_risks(
         doc_type_a, doc_type_b, supplier_a, supplier_b, added_names, missing_names, delta

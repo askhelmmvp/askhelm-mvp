@@ -1,13 +1,29 @@
-_FREIGHT_KEYWORDS = {
-    "freight", "delivery", "packing", "transport", "shipping",
-    "courier", "carriage", "handling", "logistics", "dispatch",
-    "postage", "forwarding",
+# Ancillary commercial charges that may appear on an invoice but not on the original
+# quote. Their presence should not reduce match confidence or trigger a scope-change
+# warning — they are expected additions to the agreed scope.
+_ANCILLARY_KEYWORDS = {
+    # physical movement
+    "freight", "delivery", "transport", "shipping", "courier",
+    "carriage", "dispatch", "postage", "forwarding", "logistics",
+    # packaging
+    "packing", "crating", "packaging",
+    # port / duty
+    "handling", "port charge", "berth", "demurrage",
+    "duty", "customs", "tariff", "import",
+    # admin / compliance
+    "surcharge", "fuel surcharge", "insurance",
+    "documentation", "certification",
 }
 
+_FREIGHT_KEYWORDS = _ANCILLARY_KEYWORDS  # backward compatibility alias
 
-def _is_freight_item(desc: str) -> bool:
+
+def _is_ancillary_item(desc: str) -> bool:
     lower = desc.lower()
-    return any(kw in lower for kw in _FREIGHT_KEYWORDS)
+    return any(kw in lower for kw in _ANCILLARY_KEYWORDS)
+
+
+_is_freight_item = _is_ancillary_item  # backward compatibility alias
 
 
 def compare_documents(doc_a: dict, doc_b: dict) -> dict:
@@ -43,9 +59,14 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         if item.get("description", "").strip().lower() not in descriptions_b
     ]
 
-    freight_items = [
+    ancillary_items = [
         item for item in added_items
-        if _is_freight_item(item.get("description", ""))
+        if _is_ancillary_item(item.get("description", ""))
+    ]
+    # Added items that are not ancillary charges — genuine scope additions
+    non_ancillary_added = [
+        item for item in added_items
+        if not _is_ancillary_item(item.get("description", ""))
     ]
 
     return {
@@ -55,5 +76,9 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         "delta_percent": delta_percent,
         "added_items": added_items,
         "missing_items": missing_items,
-        "freight_items": freight_items,
+        "freight_items": ancillary_items,        # backward compatibility
+        "ancillary_items": ancillary_items,
+        "non_ancillary_added_items": non_ancillary_added,
+        # True when invoice adds items but ALL of them are ancillary charges
+        "all_added_are_ancillary": bool(added_items) and not non_ancillary_added,
     }

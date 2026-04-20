@@ -213,7 +213,7 @@ class TestShouldForceCompare(unittest.TestCase):
 
     def test_same_supplier_majority_items_forces_compare(self):
         state = _state_with_quote()
-        invoice = _invoice_doc()  # 3 matching + 1 freight = 75% overlap
+        invoice = _invoice_doc()  # 3 matching + 1 freight = 100% quote-relative overlap
         self.assertTrue(_should_force_compare(invoice, self._session(state), state))
 
     def test_different_supplier_no_force(self):
@@ -235,7 +235,7 @@ class TestShouldForceCompare(unittest.TestCase):
             {"description": "Completely different B"},
             {"description": "Freight"},
         ])
-        # overlap = 1 matching / 4 max = 25% < 50%
+        # quote-relative overlap = 1/3 = 33% < 50%
         self.assertFalse(_should_force_compare(invoice, self._session(state), state))
 
     def test_exactly_50pct_overlap_forces_compare(self):
@@ -313,12 +313,25 @@ class TestFindBestMatchingSession(unittest.TestCase):
         )
 
     def test_force_compare_reason_appended_when_triggered(self):
-        """When force-compare kicks in, the reason is recorded."""
-        # Build a scenario that naturally scores below threshold:
-        # different doc numbers, no dates, freight pushes totals 30% apart, no subtotal
+        """When force-compare kicks in, the reason is recorded.
+
+        Scenario: same supplier, only 2 of 3 quoted items present in invoice
+        (67% quote-relative overlap), no dates, totals 30% apart.
+        Natural score = 30(supplier) + 0(ref) + 0(totals) + 20(items@67%) + 0(dates) = 50 < 60.
+        Force-compare applies: supplier matches + 2/3 = 67% >= 50%.
+        """
         quote = _quote_doc(total=1000.0, subtotal=None, doc_date="", doc_number="QT-001")
         state = _state_with_quote(quote)
-        invoice = _invoice_doc(total=1300.0, subtotal=None, doc_date="", doc_number="INV-999")
+        invoice = _invoice_doc(
+            items=[
+                {"description": "Impeller replacement", "unit_rate": 400.0, "line_total": 400.0},
+                {"description": "Labour - engine service", "unit_rate": 400.0, "line_total": 400.0},
+                # Oil filter set deliberately absent — quote item not carried over
+                {"description": "Different part entirely", "unit_rate": 300.0, "line_total": 300.0},
+                {"description": "Freight", "unit_rate": 300.0, "line_total": 300.0},
+            ],
+            total=1400.0, subtotal=None, doc_date="", doc_number="INV-999",
+        )
         session_id, score, reasons = find_best_matching_session(invoice, state)
         self.assertIsNotNone(session_id)
         self.assertGreaterEqual(score, AUTO_MATCH_THRESHOLD)
@@ -350,6 +363,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         invoice = _invoice_doc()
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
+        self.assertIn("MATCH CONFIRMED", response)
         self.assertIn("FREIGHT ADDED", response)
         self.assertIn("ACME MARINE LTD", response)
 
@@ -371,7 +385,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         self.assertIn("Confirm if freight was agreed", response)
 
     def test_non_freight_addition_uses_standard_response(self):
-        """Invoice adds a spare part (not freight) → standard comparison response."""
+        """Invoice adds a spare part (not ancillary) → standard cost-increase response."""
         from whatsapp_app import build_comparison_response
         quote = _quote_doc()
         invoice = _invoice_doc(items=[
@@ -382,8 +396,11 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         ], total=1150.0, subtotal=1000.0)
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
-        self.assertNotIn("FREIGHT ADDED", response)
+        # Not the ancillary-uplift path (freight-specific actions absent)
+        self.assertNotIn("Confirm if freight was agreed", response)
+        # But still a clear decision
         self.assertIn("DECISION", response)
+        self.assertIn("MATCH CONFIRMED", response)
 
     def test_delivery_item_also_triggers_freight_response(self):
         from whatsapp_app import build_comparison_response
@@ -396,6 +413,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         ], total=1080.0, subtotal=1000.0)
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
+        self.assertIn("MATCH CONFIRMED", response)
         self.assertIn("FREIGHT ADDED", response)
         self.assertIn("Delivery to vessel", response)
 
@@ -443,6 +461,7 @@ class TestFullFreightIntegration(unittest.TestCase):
             len(invoice["line_items"]),
             state,
         )
+        self.assertIn("MATCH CONFIRMED", answer, f"Got: {answer[:300]}")
         self.assertIn("FREIGHT ADDED", answer, f"Got: {answer[:300]}")
 
     def test_invoice_upload_different_supplier_no_comparison_performed(self):

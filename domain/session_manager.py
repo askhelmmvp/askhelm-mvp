@@ -200,10 +200,14 @@ def score_invoice_against_session(
 
     Weights:
       supplier match        0-30
-      reference linkage     0-25
-      similar totals        0-20
-      line item overlap     0-15
+      reference linkage     0-20
+      similar totals        0-10  (secondary signal — must not dominate)
+      line item overlap     0-30  (quote-relative: fraction of quoted items present in invoice)
       date proximity        0-10
+
+    Item overlap uses the quote as the denominator: an invoice that covers all
+    quoted scope and adds only ancillary charges scores 100%, not a penalised
+    fraction based on the extra lines.
     """
     anchor = get_doc(session["anchor_doc_id"], state)
     if anchor is None or anchor.get("doc_type") != "quote":
@@ -225,16 +229,16 @@ def score_invoice_against_session(
         else:
             reasons.append(f"supplier mismatch: '{inv_sup}' vs '{qte_sup}'")
 
-    # 2. Document reference linkage (0-25)
+    # 2. Document reference linkage (0-20)
     inv_ref = invoice_doc.get("document_number", "").strip().lower()
     qte_ref = anchor.get("document_number", "").strip().lower()
     if inv_ref and qte_ref and (
         inv_ref == qte_ref or inv_ref in qte_ref or qte_ref in inv_ref
     ):
-        score += 25
+        score += 20
         reasons.append(f"reference linkage: '{inv_ref}' ~ '{qte_ref}'")
 
-    # 3. Similar totals (0-20)
+    # 3. Similar totals (0-10) — secondary signal only
     # Use invoice subtotal when it is closer to the quote total — handles freight-on-top invoices
     # where the subtotal matches the quoted scope and the delta is just the freight charge.
     inv_total = invoice_doc.get("total")
@@ -256,15 +260,17 @@ def score_invoice_against_session(
     if compare_total is not None and qte_total is not None and qte_total != 0:
         ratio = abs(compare_total - qte_total) / abs(qte_total)
         if ratio < 0.05:
-            score += 20
+            score += 10
             reasons.append(f"totals nearly identical: {compare_total} vs {qte_total}")
         elif ratio < 0.20:
-            score += 10
+            score += 5
             reasons.append(f"totals close ({ratio * 100:.0f}% diff): {compare_total} vs {qte_total}")
         else:
             reasons.append(f"totals diverge ({ratio * 100:.0f}% diff)")
 
-    # 4. Line item overlap (0-15)
+    # 4. Line item overlap (0-30) — quote-relative denominator
+    # Measures: what fraction of the quoted items appear in the invoice?
+    # Extra ancillary lines (freight, delivery) on the invoice do not reduce this score.
     inv_descs = {
         i.get("description", "").strip().lower()
         for i in invoice_doc.get("line_items", [])
@@ -276,11 +282,11 @@ def score_invoice_against_session(
         if i.get("description")
     }
     if inv_descs and qte_descs:
-        overlap = len(inv_descs & qte_descs) / max(len(inv_descs), len(qte_descs))
-        pts = round(overlap * 15)
+        overlap = len(inv_descs & qte_descs) / len(qte_descs)  # quote-relative
+        pts = round(overlap * 30)
         if pts > 0:
             score += pts
-            reasons.append(f"line item overlap {overlap * 100:.0f}%: +{pts}pts")
+            reasons.append(f"line item overlap {overlap * 100:.0f}% of quoted scope: +{pts}pts")
 
     # 5. Date proximity (0-10)
     try:
@@ -306,11 +312,10 @@ def _should_force_compare(invoice_doc: dict, session: dict, state: dict) -> bool
 
     Conditions (both must hold):
       • Supplier name matches exactly or one contains the other.
-      • ≥50% of the line-item descriptions overlap (by description text).
+      • ≥50% of the quote's line items are present in the invoice (quote-relative).
 
-    This catches the common case where an invoice adds a freight / delivery line
-    that was absent from the quote, causing the totals to diverge and the item
-    overlap to drop just below the scoring threshold.
+    Uses quote-relative overlap (same as the scorer) so that an invoice covering
+    all quoted scope plus ancillary charges still qualifies for force-compare.
     """
     anchor = get_doc(session["anchor_doc_id"], state)
     if anchor is None or anchor.get("doc_type") != "quote":
@@ -337,7 +342,7 @@ def _should_force_compare(invoice_doc: dict, session: dict, state: dict) -> bool
     if not inv_descs or not qte_descs:
         return False
 
-    overlap = len(inv_descs & qte_descs) / max(len(inv_descs), len(qte_descs))
+    overlap = len(inv_descs & qte_descs) / len(qte_descs)  # quote-relative
     return overlap >= 0.5
 
 
