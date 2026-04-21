@@ -195,6 +195,55 @@ class TestCompareDocumentsFreight(unittest.TestCase):
         result = compare_documents(quote, invoice)
         self.assertEqual(len(result["freight_items"]), 0)
 
+    def test_sandfirden_part_number_prefix_does_not_cause_mismatch(self):
+        """
+        Exact live bug: quote extraction includes part number in description,
+        invoice extraction omits it (or vice versa).  The items are the same —
+        only FREIGHT COSTS should appear as added; nothing should be missing.
+        """
+        quote = {
+            "total": 670.82,
+            "line_items": [
+                {"description": "1921956 ANTIFREEZE/CORR. 50/50 20L", "line_total": 367.20},
+                {"description": "246458 GASKET", "line_total": 187.20},
+            ],
+        }
+        invoice = {
+            "total": 761.57,
+            "line_items": [
+                {"description": "ANTIFREEZE/CORR. 50/50 20L", "line_total": 367.20},
+                {"description": "GASKET", "line_total": 187.20},
+                {"description": "FREIGHT COSTS WITH KAAN", "line_total": 75.00},
+            ],
+        }
+        result = compare_documents(quote, invoice)
+        self.assertEqual(result["missing_items"], [], f"Unexpected missing: {result['missing_items']}")
+        self.assertEqual(len(result["added_items"]), 1)
+        self.assertEqual(result["added_items"][0]["description"], "FREIGHT COSTS WITH KAAN")
+        self.assertEqual(len(result["ancillary_items"]), 1)
+        self.assertTrue(result["all_added_are_ancillary"])
+
+    def test_description_variation_does_not_cause_mismatch(self):
+        """Minor OCR formatting difference ('20L' vs '20 L') must not split items."""
+        quote = {
+            "total": 670.82,
+            "line_items": [
+                {"description": "ANTIFREEZE/CORR. 50/50 20L", "line_total": 367.20},
+                {"description": "GASKET", "line_total": 187.20},
+            ],
+        }
+        invoice = {
+            "total": 761.57,
+            "line_items": [
+                {"description": "Antifreeze Corr 50/50 20 L", "line_total": 367.20},
+                {"description": "Gasket", "line_total": 187.20},
+                {"description": "Freight delivery", "line_total": 75.00},
+            ],
+        }
+        result = compare_documents(quote, invoice)
+        self.assertEqual(result["missing_items"], [], f"Unexpected missing: {result['missing_items']}")
+        self.assertEqual(len(result["added_items"]), 1)
+
     def test_delta_calculated_on_full_total_not_subtotal(self):
         quote = _quote_doc(total=1000.0)
         invoice = _invoice_doc(total=1150.0, subtotal=1000.0)
