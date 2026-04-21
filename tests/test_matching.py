@@ -414,8 +414,8 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
         self.assertIn("MATCH CONFIRMED", response)
-        self.assertIn("FREIGHT ADDED", response)
-        self.assertIn("ACME MARINE LTD", response)
+        self.assertIn("COST INCREASE", response)
+        self.assertIn("Acme Marine Ltd", response)
 
     def test_freight_why_includes_amount(self):
         from whatsapp_app import build_comparison_response
@@ -424,7 +424,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
         self.assertIn("150", response)
-        self.assertIn("not in original quote", response)
+        self.assertIn("not shown on the original quote", response)
 
     def test_freight_actions_include_confirm_wording(self):
         from whatsapp_app import build_comparison_response
@@ -432,7 +432,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         invoice = _invoice_doc()
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
-        self.assertIn("Confirm if freight was agreed", response)
+        self.assertIn("Confirm freight was agreed", response)
 
     def test_non_freight_addition_uses_standard_response(self):
         """Invoice adds a spare part (not ancillary) → standard cost-increase response."""
@@ -464,8 +464,10 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
         self.assertIn("MATCH CONFIRMED", response)
-        self.assertIn("FREIGHT ADDED", response)
-        self.assertIn("Delivery to vessel", response)
+        self.assertIn("COST INCREASE", response)
+        # Delivery categorised as "delivery" and amount shown
+        self.assertIn("delivery", response)
+        self.assertIn("80", response)
 
 
 # ---------------------------------------------------------------------------
@@ -512,7 +514,7 @@ class TestFullFreightIntegration(unittest.TestCase):
             state,
         )
         self.assertIn("MATCH CONFIRMED", answer, f"Got: {answer[:300]}")
-        self.assertIn("FREIGHT ADDED", answer, f"Got: {answer[:300]}")
+        self.assertIn("COST INCREASE", answer, f"Got: {answer[:300]}")
 
     def test_invoice_upload_different_supplier_no_comparison_performed(self):
         """Invoice from a different supplier → no automatic comparison (uncertain or no match)."""

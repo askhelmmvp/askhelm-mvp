@@ -157,10 +157,8 @@ def _confidence_label(score: int) -> str:
 
 def _make_response(*, decision, why, risks=None, actions=None):
     parts = [f"DECISION:\n{decision}", f"WHY:\n{why}"]
-    if risks:
-        parts.append("KEY RISKS:\n- " + "\n- ".join(risks))
     if actions:
-        parts.append("RECOMMENDED ACTIONS:\n- " + "\n- ".join(actions))
+        parts.append("RECOMMENDED ACTIONS:\n• " + "\n• ".join(actions))
     return "\n\n".join(parts)
 
 
@@ -191,6 +189,29 @@ def _compute_delta(total_a, total_b, currency_a, currency_b):
         delta_percent = None
 
     return total_a_conv, total_b_conv, delta, delta_percent
+
+
+def _ancillary_category(items: list) -> str:
+    """Returns a human label for a group of ancillary items: 'freight', 'delivery', etc."""
+    if not items:
+        return "ancillary charges"
+    descs = " ".join((item.get("description") or "") for item in items).lower()
+    categories = []
+    if any(kw in descs for kw in ("freight", "shipping", "courier", "transport", "dispatch", "forwarding")):
+        categories.append("freight")
+    if any(kw in descs for kw in ("delivery", "carriage")):
+        categories.append("delivery")
+    if any(kw in descs for kw in ("packing", "packaging", "crating")):
+        categories.append("packaging")
+    if any(kw in descs for kw in ("insurance",)):
+        categories.append("insurance")
+    if any(kw in descs for kw in ("duty", "customs", "tariff", "import")):
+        categories.append("customs duties")
+    if any(kw in descs for kw in ("surcharge",)):
+        categories.append("surcharge")
+    if not categories:
+        return "ancillary charges"
+    return " and ".join(categories)
 
 
 def _get_item_names(items, limit=2):
@@ -272,26 +293,27 @@ def _build_decision_and_why(
     elif quote_to_invoice:
         if delta > 0:
             if missing_names:
-                decision = f"INVOICE FROM {supplier_b.upper()} EXCEEDS QUOTE — SCOPE DIFFERENCE"
+                decision = "MATCH CONFIRMED — SCOPE DIFFERENCE"
             else:
                 decision = "MATCH CONFIRMED — COST INCREASE"
         elif delta < 0:
             decision = "MATCH CONFIRMED — COST REDUCTION"
         else:
-            decision = "INVOICE MATCHES QUOTE"
+            decision = "MATCH CONFIRMED — NO CHANGE"
 
+        amt = f"{BASE_CURRENCY} {abs(delta):,.2f}"
         if delta == 0:
-            why = f"{invoice_totals()} The invoice matches the quote exactly."
+            why = f"{supplier_b} invoice matches the quoted amount exactly."
         elif delta > 0:
             if missing_names:
                 why = (
-                    f"{invoice_totals()} Invoice is {pct:.1f}% higher. "
-                    f"Items not carried over: {', '.join(missing_names)}."
+                    f"{supplier_b} invoice is {pct:.1f}% higher ({amt} increase). "
+                    f"Items on the original quote not found in the invoice: {', '.join(missing_names)}."
                 )
             else:
-                why = f"{invoice_totals()} Invoice is {pct:.1f}% higher than the quote."
+                why = f"{supplier_b} invoice is {pct:.1f}% higher than the quote ({amt} increase)."
         else:
-            why = f"{invoice_totals()} Invoice is {pct:.1f}% lower than the quote."
+            why = f"{supplier_b} invoice is {pct:.1f}% lower than the quote ({amt} reduction)."
 
     elif both_invoices:
         if delta > 0:
@@ -394,6 +416,76 @@ def _build_actions(doc_type_a, doc_type_b, supplier_a, supplier_b, delta):
     ]
 
 
+def _classify_comparison(
+    doc_a: dict, doc_b: dict, comparison: dict, match_score: int = 0
+) -> dict:
+    """
+    Returns a structured comparison outcome: decision code, delta, confidence.
+    Separates decision logic from response wording — can be called by future
+    intent handlers (e.g. 'what should I do') without touching formatting code.
+    """
+    doc_type_a = (doc_a.get("doc_type") or "document").lower()
+    doc_type_b = (doc_b.get("doc_type") or "document").lower()
+    currency_a = (doc_a.get("currency") or "").strip().upper()
+    currency_b = (doc_b.get("currency") or "").strip().upper()
+    supplier_a = (doc_a.get("supplier_name") or "first supplier").strip()
+    supplier_b = (doc_b.get("supplier_name") or "second supplier").strip()
+
+    total_a = comparison.get("total_a")
+    total_b = comparison.get("total_b")
+    missing_items = comparison.get("missing_items") or []
+    ancillary_items = (
+        comparison.get("ancillary_items") or comparison.get("freight_items") or []
+    )
+    ancillary_only = comparison.get("all_added_are_ancillary", False)
+    added_items = comparison.get("added_items") or []
+
+    _, _, delta, delta_percent = _compute_delta(total_a, total_b, currency_a, currency_b)
+
+    quote_to_invoice = doc_type_a == "quote" and doc_type_b == "invoice"
+    both_quotes = doc_type_a == "quote" and doc_type_b == "quote"
+
+    if quote_to_invoice:
+        if delta is None or delta == 0:
+            decision = "MATCH CONFIRMED — NO CHANGE"
+        elif delta > 0:
+            decision = (
+                "MATCH CONFIRMED — SCOPE DIFFERENCE" if missing_items
+                else "MATCH CONFIRMED — COST INCREASE"
+            )
+        else:
+            decision = "MATCH CONFIRMED — COST REDUCTION"
+    else:
+        decision = None  # other types resolved by _build_decision_and_why
+
+    # Confidence override: ancillary-only delta + full core match → HIGH
+    confidence = _confidence_label(match_score)
+    if quote_to_invoice and ancillary_only and not missing_items:
+        confidence = "HIGH"
+
+    return {
+        "comparison_type": (
+            "quote_vs_invoice" if quote_to_invoice
+            else "quote_vs_quote" if both_quotes
+            else "other"
+        ),
+        "decision": decision,
+        "supplier_a": supplier_a,
+        "supplier_b": supplier_b,
+        "currency_a": currency_a,
+        "currency_b": currency_b,
+        "total_a": total_a,
+        "total_b": total_b,
+        "delta": delta,
+        "delta_percent": delta_percent,
+        "ancillary_only": ancillary_only,
+        "ancillary_items": ancillary_items,
+        "missing_items": missing_items,
+        "added_items": added_items,
+        "confidence": confidence,
+    }
+
+
 def _rank_docs_by_price(docs):
     entries = []
     for doc in docs:
@@ -428,86 +520,82 @@ def _build_freight_response(
     currency_b: str,
     confidence_label: str = "",
 ) -> str:
-    freight_total = sum(
+    ancillary_total = sum(
         float(item.get("line_total") or item.get("unit_rate") or 0)
         for item in freight_items
     )
-    freight_descs = [
-        (item.get("description") or "freight").strip()
-        for item in freight_items
-    ]
-    freight_label = " + ".join(freight_descs)
+    category = _ancillary_category(freight_items)
+    cur = currency_b or BASE_CURRENCY
 
-    if freight_total:
-        amount_str = f"{freight_total:g} {currency_b}".strip()
-        why = f"{supplier_b.upper()}: {freight_label} ({amount_str}) added — not in original quote."
+    if ancillary_total:
+        charge_str = f"{cur} {ancillary_total:,.2f}"
+        why = (
+            f"{supplier_b} invoice matches the quote, but includes added {category} "
+            f"of {charge_str} not shown on the original quote."
+        )
     else:
-        why = f"{supplier_b.upper()}: {freight_label} added — not in original quote."
+        why = (
+            f"{supplier_b} invoice matches the quote, but includes added {category} "
+            f"not shown on the original quote."
+        )
 
     if confidence_label:
-        why = f"{why} (Confidence: {confidence_label})"
-
-    pct = abs(delta_percent) if delta_percent is not None else None
-    pct_str = f" (+{pct:.1f}%)" if pct is not None else ""
+        why = f"{why} Confidence: {confidence_label}."
 
     return _make_response(
-        decision=f"MATCH CONFIRMED — FREIGHT ADDED{pct_str}",
+        decision="MATCH CONFIRMED — COST INCREASE",
         why=why,
         actions=[
-            "Confirm if freight was agreed (e.g. ex works)",
-            "Approve if freight was expected",
-            "Query with supplier if not pre-agreed",
+            "Confirm freight was agreed under supply terms",
+            "Approve if expected",
+            "Query supplier if not pre-agreed",
         ],
     )
 
 
-def build_comparison_response(doc_a, doc_b, comparison, confidence_label: str = ""):
-    supplier_a = (doc_a.get("supplier_name") or "first supplier").strip()
-    supplier_b = (doc_b.get("supplier_name") or "second supplier").strip()
-    doc_type_a = (doc_a.get("doc_type") or "document").strip().lower()
-    doc_type_b = (doc_b.get("doc_type") or "document").strip().lower()
-    currency_a = (doc_a.get("currency") or "").strip().upper()
-    currency_b = (doc_b.get("currency") or "").strip().upper()
+def build_comparison_response(doc_a, doc_b, comparison, match_score: int = 0):
+    outcome = _classify_comparison(doc_a, doc_b, comparison, match_score)
+    confidence_label = outcome["confidence"]
 
-    total_a = comparison.get("total_a")
-    total_b = comparison.get("total_b")
-    added_items = comparison.get("added_items") or []
-    missing_items = comparison.get("missing_items") or []
-    # Prefer structured ancillary_items; fall back to freight_items for backward compat
-    ancillary_items = comparison.get("ancillary_items") or comparison.get("freight_items") or []
-    all_ancillary = comparison.get("all_added_are_ancillary", False)
+    supplier_a = outcome["supplier_a"]
+    supplier_b = outcome["supplier_b"]
+    currency_a = outcome["currency_a"]
+    currency_b = outcome["currency_b"]
+    doc_type_a = (doc_a.get("doc_type") or "document").lower()
+    doc_type_b = (doc_b.get("doc_type") or "document").lower()
 
-    total_a_conv, total_b_conv, delta, delta_percent = _compute_delta(
-        total_a, total_b, currency_a, currency_b
-    )
+    total_a = outcome["total_a"]
+    total_b = outcome["total_b"]
+    delta = outcome["delta"]
+    delta_percent = outcome["delta_percent"]
+    ancillary_items = outcome["ancillary_items"]
+    ancillary_only = outcome["ancillary_only"]
+    missing_items = outcome["missing_items"]
+    added_items = outcome["added_items"]
+
+    total_a_conv, total_b_conv, _, _ = _compute_delta(total_a, total_b, currency_a, currency_b)
     added_names = _get_item_names(added_items)
     missing_names = _get_item_names(missing_items)
 
-    # Ancillary-only uplift: invoice higher than quote but ALL added items are ancillary
-    # charges (freight, delivery, packing, etc.) — the core scope is unchanged.
-    quote_to_invoice = doc_type_a == "quote" and doc_type_b == "invoice"
-    if quote_to_invoice and delta is not None and delta > 0 and ancillary_items and all_ancillary:
-        return _build_freight_response(supplier_b, ancillary_items, delta, delta_percent, currency_b, confidence_label=confidence_label)
+    # Ancillary-only uplift: all added items are freight/delivery/etc., core scope unchanged.
+    quote_to_invoice = outcome["comparison_type"] == "quote_vs_invoice"
+    if quote_to_invoice and delta is not None and delta > 0 and ancillary_items and ancillary_only:
+        return _build_freight_response(
+            supplier_b, ancillary_items, delta, delta_percent, currency_b,
+            confidence_label=confidence_label,
+        )
 
     if (
         currency_a and currency_b
         and currency_a != currency_b
         and (total_a_conv is None or total_b_conv is None)
     ):
-        currency_risks = []
-        if added_names:
-            currency_risks.append(f"Additional items: {', '.join(added_names)}")
-        if missing_names:
-            currency_risks.append(f"Missing items: {', '.join(missing_names)}")
-        currency_risks.append("Totals are not directly comparable across different currencies")
-
         return _make_response(
             decision="CURRENCY MISMATCH",
             why=(
                 f"{supplier_a} is in {currency_a} and {supplier_b} is in {currency_b}, "
                 f"so the totals are not yet directly comparable."
             ),
-            risks=currency_risks,
             actions=[
                 f"Convert both documents into {BASE_CURRENCY} before deciding",
                 "Check scope differences first",
@@ -525,13 +613,10 @@ def build_comparison_response(doc_a, doc_b, comparison, confidence_label: str = 
         missing_names=missing_names,
     )
     if confidence_label:
-        why = f"{why} (Confidence: {confidence_label})"
-    risks = _build_risks(
-        doc_type_a, doc_type_b, supplier_a, supplier_b, added_names, missing_names, delta
-    )
+        why = f"{why} Confidence: {confidence_label}."
     actions = _build_actions(doc_type_a, doc_type_b, supplier_a, supplier_b, delta)
 
-    return _make_response(decision=decision, why=why, risks=risks, actions=actions)
+    return _make_response(decision=decision, why=why, actions=actions)
 
 
 def build_three_way_comparison_response(ranked):
@@ -936,10 +1021,7 @@ def _handle_invoice_upload(
             )
 
             quote_name = quote_doc.get("supplier_name") or "the same supplier"
-            answer = build_comparison_response(
-                quote_doc, doc_record, comparison,
-                confidence_label=_confidence_label(score),
-            )
+            answer = build_comparison_response(quote_doc, doc_record, comparison, match_score=score)
             return answer, state
 
     logger.info("comparison_ran=False final_confidence=%d", score)
