@@ -10,6 +10,7 @@ from domain.session_manager import (
     find_best_matching_session,
     score_invoice_against_session,
     _should_force_compare,
+    _supplier_score,
 )
 from domain.compare import compare_documents, _is_freight_item
 
@@ -492,6 +493,41 @@ class TestFullFreightIntegration(unittest.TestCase):
         self.assertTrue(
             "NO MATCHING QUOTE" in answer or "MATCH UNCERTAIN" in answer,
             f"Expected unmatched response, got: {answer[:200]}",
+        )
+
+
+class TestSupplierScore(unittest.TestCase):
+    """_supplier_score must handle legal-suffix variants like 'b.v.' vs 'BV'."""
+
+    def test_exact_match_scores_30(self):
+        pts, _ = _supplier_score("Acme Marine Ltd", "Acme Marine Ltd")
+        self.assertEqual(pts, 30)
+
+    def test_bv_vs_b_dot_v_dot_scores_30(self):
+        # The real Sandfirden bug: quote has "b.v.", invoice has "BV".
+        # After normalization both lose the dots/case, and sig_words
+        # {"sandfirden", "technics"} have Jaccard 1.0 → 30pts.
+        pts, reason = _supplier_score("Sandfirden Technics b.v.", "Sandfirden Technics BV")
+        self.assertEqual(pts, 30, f"Expected 30 pts, got {pts}. Reason: {reason}")
+
+    def test_partial_word_overlap_scores_at_least_20(self):
+        pts, _ = _supplier_score("ACME Marine Services Ltd", "Acme Marine")
+        self.assertGreaterEqual(pts, 20)
+
+    def test_completely_different_scores_0(self):
+        pts, _ = _supplier_score("Sandfirden Technics", "Rotterdam Shipyard")
+        self.assertEqual(pts, 0)
+
+    def test_bv_variant_lifts_session_score_to_threshold(self):
+        """End-to-end: 'b.v.' vs 'BV' supplier should now auto-match with same items."""
+        quote = _quote_doc(supplier="Sandfirden Technics b.v.")
+        state = _state_with_quote(quote)
+        invoice = _invoice_doc(supplier="Sandfirden Technics BV")
+        session_id, score, reasons = find_best_matching_session(invoice, state)
+        self.assertIsNotNone(session_id)
+        self.assertGreaterEqual(
+            score, AUTO_MATCH_THRESHOLD,
+            f"Expected ≥{AUTO_MATCH_THRESHOLD}, got {score}. Reasons: {reasons}",
         )
 
 

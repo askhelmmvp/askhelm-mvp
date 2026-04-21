@@ -1,3 +1,4 @@
+import re
 import uuid
 import hashlib
 import logging
@@ -9,6 +10,86 @@ logger = logging.getLogger(__name__)
 AUTO_MATCH_THRESHOLD = 60
 AMBIGUOUS_THRESHOLD = 30
 MAX_QUOTES_PER_SESSION = 3
+
+
+# ---------------------------------------------------------------------------
+# Description-matching helpers
+# ---------------------------------------------------------------------------
+
+def _normalize_desc(s: str) -> str:
+    """
+    Normalise a line-item description for resilient matching.
+    Lowercase → strip punctuation → collapse whitespace.
+
+    Handles common extraction/OCR variations such as:
+      "ANTIFREEZE/CORR. 50/50 20L"  →  "antifreeze corr 50 50 20l"
+      "Antifreeze Corr 50/50 20 L"  →  "antifreeze corr 50 50 20 l"
+    Both reduce to something that can be compared by significant-word overlap.
+    """
+    s = s.strip().lower()
+    s = re.sub(r'[^\w\s]', ' ', s)   # punctuation → space
+    return re.sub(r'\s+', ' ', s).strip()
+
+
+def _sig_words(s: str) -> set:
+    """Words longer than 2 characters from a normalised description string."""
+    return {w for w in s.split() if len(w) > 2}
+
+
+def _desc_matches(a: str, b: str) -> bool:
+    """
+    True when two line-item descriptions are considered the same item.
+    1. Exact match after normalisation.
+    2. Fallback: Jaccard similarity of significant words >= 0.5.
+    """
+    na, nb = _normalize_desc(a), _normalize_desc(b)
+    if na == nb:
+        return True
+    wa, wb = _sig_words(na), _sig_words(nb)
+    if not wa or not wb:
+        return False
+    return len(wa & wb) / len(wa | wb) >= 0.5
+
+
+def _supplier_score(a: str, b: str) -> Tuple[int, str]:
+    """
+    Score supplier name similarity (0, 20, or 30).
+    Uses normalized text + significant-word Jaccard so variants like
+    'Sandfirden Technics b.v.' and 'Sandfirden Technics BV' both score 30.
+    """
+    na, nb = _normalize_desc(a), _normalize_desc(b)
+    if na == nb:
+        return 30, f"exact supplier match: '{a}'"
+    if na in nb or nb in na:
+        return 20, f"partial supplier match: '{a}' ~ '{b}'"
+    wa, wb = _sig_words(na), _sig_words(nb)
+    if wa and wb:
+        jaccard = len(wa & wb) / len(wa | wb)
+        if jaccard >= 0.7:
+            return 30, f"supplier word-overlap {jaccard:.0%}: '{a}' ~ '{b}'"
+        if jaccard >= 0.4:
+            return 20, f"supplier partial word-overlap {jaccard:.0%}: '{a}' ~ '{b}'"
+    return 0, f"supplier mismatch: '{a}' vs '{b}'"
+
+
+def _count_matching_quote_items(inv_items: list, qte_items: list) -> int:
+    """
+    Count how many quote items have a matching counterpart in the invoice.
+    Uses normalised + word-overlap matching so OCR/extraction variations
+    ("ANTIFREEZE/CORR. 50/50 20L" vs "Antifreeze Corr 50/50 20 L") still match.
+    """
+    matched = 0
+    for qte in qte_items:
+        qte_desc = (qte.get("description") or "").strip()
+        if not qte_desc:
+            continue
+        if any(
+            _desc_matches(qte_desc, (inv.get("description") or "").strip())
+            for inv in inv_items
+            if inv.get("description")
+        ):
+            matched += 1
+    return matched
 
 
 # ---------------------------------------------------------------------------
@@ -217,17 +298,14 @@ def score_invoice_against_session(
     reasons: List[str] = []
 
     # 1. Supplier name (0-30)
-    inv_sup = invoice_doc.get("supplier_name", "").strip().lower()
-    qte_sup = anchor.get("supplier_name", "").strip().lower()
+    inv_sup = (invoice_doc.get("supplier_name") or "").strip()
+    qte_sup = (anchor.get("supplier_name") or "").strip()
+    supplier_pts = 0
     if inv_sup and qte_sup:
-        if inv_sup == qte_sup:
-            score += 30
-            reasons.append(f"exact supplier match: '{inv_sup}'")
-        elif inv_sup in qte_sup or qte_sup in inv_sup:
-            score += 20
-            reasons.append(f"partial supplier match: '{inv_sup}' ~ '{qte_sup}'")
-        else:
-            reasons.append(f"supplier mismatch: '{inv_sup}' vs '{qte_sup}'")
+        supplier_pts, sup_reason = _supplier_score(inv_sup, qte_sup)
+        score += supplier_pts
+        reasons.append(sup_reason)
+    logger.debug("supplier_score=%d inv='%s' qte='%s'", supplier_pts, inv_sup, qte_sup)
 
     # 2. Document reference linkage (0-20)
     inv_ref = invoice_doc.get("document_number", "").strip().lower()
@@ -268,25 +346,22 @@ def score_invoice_against_session(
         else:
             reasons.append(f"totals diverge ({ratio * 100:.0f}% diff)")
 
-    # 4. Line item overlap (0-30) — quote-relative denominator
+    # 4. Line item overlap (0-30) — quote-relative, OCR-resilient
     # Measures: what fraction of the quoted items appear in the invoice?
+    # Uses normalised + word-overlap matching so extraction variations
+    # ("ANTIFREEZE/CORR. 50/50 20L" vs "Antifreeze Corr 50/50 20 L") still match.
     # Extra ancillary lines (freight, delivery) on the invoice do not reduce this score.
-    inv_descs = {
-        i.get("description", "").strip().lower()
-        for i in invoice_doc.get("line_items", [])
-        if i.get("description")
-    }
-    qte_descs = {
-        i.get("description", "").strip().lower()
-        for i in anchor.get("line_items", [])
-        if i.get("description")
-    }
-    if inv_descs and qte_descs:
-        overlap = len(inv_descs & qte_descs) / len(qte_descs)  # quote-relative
-        pts = round(overlap * 30)
-        if pts > 0:
-            score += pts
-            reasons.append(f"line item overlap {overlap * 100:.0f}% of quoted scope: +{pts}pts")
+    inv_items = invoice_doc.get("line_items") or []
+    qte_items = anchor.get("line_items") or []
+    item_overlap_pts = 0
+    if inv_items and qte_items:
+        matched = _count_matching_quote_items(inv_items, qte_items)
+        overlap = matched / len(qte_items)
+        item_overlap_pts = round(overlap * 30)
+        if item_overlap_pts > 0:
+            score += item_overlap_pts
+            reasons.append(f"line item overlap {overlap * 100:.0f}% of quoted scope: +{item_overlap_pts}pts")
+    logger.debug("item_overlap_score=%d", item_overlap_pts)
 
     # 5. Date proximity (0-10)
     try:
@@ -302,6 +377,11 @@ def score_invoice_against_session(
     except (ValueError, TypeError):
         pass
 
+    logger.info(
+        "Scored invoice '%s' vs quote '%s': supplier_score=%d item_overlap_score=%d final_confidence=%d",
+        invoice_doc.get("supplier_name"), anchor.get("supplier_name"),
+        supplier_pts, item_overlap_pts, score,
+    )
     return score, reasons
 
 
@@ -321,29 +401,21 @@ def _should_force_compare(invoice_doc: dict, session: dict, state: dict) -> bool
     if anchor is None or anchor.get("doc_type") != "quote":
         return False
 
-    inv_sup = invoice_doc.get("supplier_name", "").strip().lower()
-    qte_sup = anchor.get("supplier_name", "").strip().lower()
+    inv_sup = (invoice_doc.get("supplier_name") or "").strip()
+    qte_sup = (anchor.get("supplier_name") or "").strip()
     if not inv_sup or not qte_sup:
         return False
-    supplier_matches = (inv_sup == qte_sup or inv_sup in qte_sup or qte_sup in inv_sup)
-    if not supplier_matches:
+    sup_pts, _ = _supplier_score(inv_sup, qte_sup)
+    if sup_pts == 0:
         return False
 
-    inv_descs = {
-        i.get("description", "").strip().lower()
-        for i in invoice_doc.get("line_items", [])
-        if i.get("description")
-    }
-    qte_descs = {
-        i.get("description", "").strip().lower()
-        for i in anchor.get("line_items", [])
-        if i.get("description")
-    }
-    if not inv_descs or not qte_descs:
+    inv_items = invoice_doc.get("line_items") or []
+    qte_items = anchor.get("line_items") or []
+    if not inv_items or not qte_items:
         return False
 
-    overlap = len(inv_descs & qte_descs) / len(qte_descs)  # quote-relative
-    return overlap >= 0.5
+    matched = _count_matching_quote_items(inv_items, qte_items)
+    return matched / len(qte_items) >= 0.5
 
 
 def find_best_matching_session(
@@ -387,9 +459,17 @@ def find_best_matching_session(
                 best_id, best_score, invoice_doc.get("supplier_name"),
             )
 
+    candidate_quote_id = None
+    if best_session is not None:
+        anchor = get_doc(best_session["anchor_doc_id"], state)
+        if anchor:
+            candidate_quote_id = anchor.get("document_id")
+
     logger.info(
-        "Best session match for invoice from '%s': session=%s score=%d",
+        "Best session match for invoice from '%s': session=%s score=%d "
+        "session_ids_checked=%d candidate_quote_id=%s",
         invoice_doc.get("supplier_name"), best_id, best_score,
+        len(open_sessions), candidate_quote_id,
     )
     return best_id, best_score, best_reasons
 

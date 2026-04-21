@@ -915,6 +915,12 @@ def _handle_invoice_upload(
             state = store_comparison_result(session, state, quote_doc, doc_record, comparison)
             session = get_active_session(state)
 
+            ancillary_detected = bool(comparison.get("ancillary_items"))
+            logger.info(
+                "comparison_ran=True ancillary_charge_detected=%s candidate_quote_id=%s final_confidence=%d",
+                ancillary_detected, quote_doc.get("document_id"), score,
+            )
+
             quote_name = quote_doc.get("supplier_name") or "the same supplier"
             match_note = (
                 f"Invoice matched to existing quote from {quote_name} "
@@ -922,6 +928,8 @@ def _handle_invoice_upload(
             )
             answer = build_comparison_response(quote_doc, doc_record, comparison)
             return f"{match_note}\n\n{answer}", state
+
+    logger.info("comparison_ran=False final_confidence=%d", score)
 
     if score >= AMBIGUOUS_THRESHOLD:
         state, _ = create_pending_session(doc_record, state)
@@ -1110,7 +1118,8 @@ def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
         return _image_received_response(), state
 
 
-def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
+def _extract_pdf_to_doc_record(file_path: str) -> dict:
+    """Extract text/images from a PDF and return a normalised doc_record. Does NOT touch state."""
     text = extract_pdf_text(file_path)
     if not text.strip():
         image_paths = render_pdf_pages_to_images(file_path)
@@ -1122,15 +1131,18 @@ def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
         raise ValueError("Document extraction did not return a JSON object")
 
     extracted = normalise_doc_type(extracted)
-    doc_record = make_document_record(extracted, file_path)
+    return make_document_record(extracted, file_path)
 
+
+def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
+    """Route an already-extracted doc_record through quote/invoice/unknown handling."""
     supplier = doc_record["supplier_name"] or "Unknown supplier"
     total = doc_record["total"]
     currency = doc_record["currency"]
     line_count = len(doc_record["line_items"])
     doc_type = doc_record["doc_type"]
 
-    logger.info("PDF extracted: type=%s supplier=%s total=%s %s", doc_type, supplier, total, currency)
+    logger.info("PDF dispatching: type=%s supplier=%s total=%s %s", doc_type, supplier, total, currency)
 
     if doc_type == "quote":
         return _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
@@ -1150,6 +1162,11 @@ def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
             "Start with a quote to open a new comparison session",
         ],
     ), state
+
+
+def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
+    """Single-attachment path: extract then dispatch immediately."""
+    return _dispatch_doc_record(_extract_pdf_to_doc_record(file_path), state)
 
 
 def _handle_reminder_command(message: str, phone: str, state: dict) -> Tuple[str, dict]:
@@ -1302,47 +1319,85 @@ def whatsapp_reply():
         num_media = int(request.form.get("NumMedia") or 0)
 
         if num_media > 0:
-            media_url = request.form.get("MediaUrl0")
-            media_type = (request.form.get("MediaContentType0") or "").strip().lower()
+            logger.info("Inbound media: media_count=%d", num_media)
+            image_started = False
+
+            # Phase 1: download all attachments; extract PDFs eagerly so we know
+            # each document's type before dispatching any of them.
+            pdf_doc_records: list = []
+            for i in range(num_media):
+                media_url = request.form.get(f"MediaUrl{i}")
+                media_type = (request.form.get(f"MediaContentType{i}") or "").strip().lower()
+
+                if not media_url:
+                    logger.warning("MediaUrl%d missing, skipping", i)
+                    continue
+
+                logger.info("Media [%d/%d]: content_type=%r", i + 1, num_media, media_type)
+                file_path = download_file(media_url, media_type)
+                logger.info("File saved [%d/%d]: %s", i + 1, num_media, os.path.basename(file_path))
+
+                if media_type == "application/pdf":
+                    doc_record = _extract_pdf_to_doc_record(file_path)
+                    logger.info(
+                        "PDF extracted [%d/%d]: type=%s supplier=%s",
+                        i + 1, num_media, doc_record["doc_type"], doc_record["supplier_name"],
+                    )
+                    pdf_doc_records.append(doc_record)
+
+                elif media_type in _IMAGE_CONTENT_TYPES:
+                    thread = threading.Thread(
+                        target=_process_image_background,
+                        args=(file_path, copy.deepcopy(state), user_id, phone),
+                        daemon=True,
+                    )
+                    thread.start()
+                    image_started = True
+
+                else:
+                    logger.warning("Unsupported media type [%d/%d]: %r", i + 1, num_media, media_type)
+
+            # Phase 2: dispatch PDFs — quotes first so any invoice in the same
+            # message can find the freshly-created quote session.
+            pdf_doc_records.sort(key=lambda d: 0 if d.get("doc_type") == "quote" else 1)
+
+            pdf_answers: list = []
+            comparison_answer: Optional[str] = None
+            for doc_record in pdf_doc_records:
+                att_answer, state = _dispatch_doc_record(doc_record, state)
+                pdf_answers.append(att_answer)
+                if "Invoice matched" in att_answer or "MATCH CONFIRMED" in att_answer:
+                    comparison_answer = att_answer
+
             logger.info(
-                "Inbound media: num_media=%d content_type=%r url_present=%s",
-                num_media, media_type, bool(media_url),
+                "processed_docs=%d comparison_found=%s image_threads_started=%s",
+                len(pdf_answers), comparison_answer is not None, image_started,
             )
 
-            file_path = download_file(media_url, media_type)
-            logger.info("File saved: %s", file_path)
-
-            if media_type == "application/pdf":
-                answer, state = _handle_pdf_upload(file_path, state)
-
-            elif media_type in _IMAGE_CONTENT_TYPES:
-                # Return immediately; extraction runs in background thread and
-                # delivers the result via a proactive Twilio REST API message.
-                thread = threading.Thread(
-                    target=_process_image_background,
-                    args=(file_path, copy.deepcopy(state), user_id, phone),
-                    daemon=True,
-                )
-                thread.start()
-                logger.info("Image upload: background thread started for %s user=%s",
-                            os.path.basename(file_path), user_id)
+            if comparison_answer is not None:
+                answer = comparison_answer
+            elif pdf_answers:
+                answer = pdf_answers[-1]
+            elif image_started:
                 answer = _make_response(
                     decision="IMAGE RECEIVED",
                     why="Processing your image now.",
                     actions=["Wait for extraction result", "Or send another document"],
                 )
-                save_state = False  # background thread handles state persistence
-
             else:
-                logger.warning("Unsupported media type: %r", media_type)
                 answer = _make_response(
                     decision="FILE RECEIVED",
-                    why=f"Document saved as {os.path.basename(file_path)}.",
+                    why="Document saved.",
                     actions=[
                         "PDF and image (JPEG, PNG) reading is enabled",
                         "Upload another document for comparison",
                     ],
                 )
+
+            # Only skip main-thread state save when images were uploaded without PDFs
+            # (the background thread handles state persistence in that case).
+            if image_started and not pdf_answers:
+                save_state = False
         else:
             answer, state = _handle_text_message(incoming, state, phone=phone)
 

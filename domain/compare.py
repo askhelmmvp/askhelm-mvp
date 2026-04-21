@@ -1,3 +1,13 @@
+import re
+
+
+def _normalize_desc(s: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace — mirrors session_manager version."""
+    s = s.strip().lower()
+    s = re.sub(r'[^\w\s]', ' ', s)
+    return re.sub(r'\s+', ' ', s).strip()
+
+
 # Ancillary commercial charges that may appear on an invoice but not on the original
 # quote. Their presence should not reduce match confidence or trigger a scope-change
 # warning — they are expected additions to the agreed scope.
@@ -39,24 +49,19 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
     items_a = doc_a.get("line_items") or []
     items_b = doc_b.get("line_items") or []
 
-    descriptions_a = {
-        item.get("description", "").strip().lower()
-        for item in items_a
-        if item.get("description")
-    }
-    descriptions_b = {
-        item.get("description", "").strip().lower()
-        for item in items_b
-        if item.get("description")
-    }
+    # Use normalised descriptions for membership tests so minor extraction
+    # variations ("ANTIFREEZE/CORR. 50/50" vs "Antifreeze Corr 50/50") are
+    # not misreported as added/missing items.
+    norm_a = {_normalize_desc(item.get("description", "")) for item in items_a if item.get("description")}
+    norm_b = {_normalize_desc(item.get("description", "")) for item in items_b if item.get("description")}
 
     added_items = [
         item for item in items_b
-        if item.get("description", "").strip().lower() not in descriptions_a
+        if item.get("description") and _normalize_desc(item.get("description", "")) not in norm_a
     ]
     missing_items = [
         item for item in items_a
-        if item.get("description", "").strip().lower() not in descriptions_b
+        if item.get("description") and _normalize_desc(item.get("description", "")) not in norm_b
     ]
 
     ancillary_items = [
