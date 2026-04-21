@@ -147,6 +147,14 @@ def format_item_list(items, empty_message):
 # Response formatting
 # ---------------------------------------------------------------------------
 
+def _confidence_label(score: int) -> str:
+    if score >= 80:
+        return "HIGH"
+    if score >= 50:
+        return "MEDIUM"
+    return "LOW"
+
+
 def _make_response(*, decision, why, risks=None, actions=None):
     parts = [f"DECISION:\n{decision}", f"WHY:\n{why}"]
     if risks:
@@ -418,6 +426,7 @@ def _build_freight_response(
     delta,
     delta_percent,
     currency_b: str,
+    confidence_label: str = "",
 ) -> str:
     freight_total = sum(
         float(item.get("line_total") or item.get("unit_rate") or 0)
@@ -435,6 +444,9 @@ def _build_freight_response(
     else:
         why = f"{supplier_b.upper()}: {freight_label} added — not in original quote."
 
+    if confidence_label:
+        why = f"{why} (Confidence: {confidence_label})"
+
     pct = abs(delta_percent) if delta_percent is not None else None
     pct_str = f" (+{pct:.1f}%)" if pct is not None else ""
 
@@ -449,7 +461,7 @@ def _build_freight_response(
     )
 
 
-def build_comparison_response(doc_a, doc_b, comparison):
+def build_comparison_response(doc_a, doc_b, comparison, confidence_label: str = ""):
     supplier_a = (doc_a.get("supplier_name") or "first supplier").strip()
     supplier_b = (doc_b.get("supplier_name") or "second supplier").strip()
     doc_type_a = (doc_a.get("doc_type") or "document").strip().lower()
@@ -475,7 +487,7 @@ def build_comparison_response(doc_a, doc_b, comparison):
     # charges (freight, delivery, packing, etc.) — the core scope is unchanged.
     quote_to_invoice = doc_type_a == "quote" and doc_type_b == "invoice"
     if quote_to_invoice and delta is not None and delta > 0 and ancillary_items and all_ancillary:
-        return _build_freight_response(supplier_b, ancillary_items, delta, delta_percent, currency_b)
+        return _build_freight_response(supplier_b, ancillary_items, delta, delta_percent, currency_b, confidence_label=confidence_label)
 
     if (
         currency_a and currency_b
@@ -512,6 +524,8 @@ def build_comparison_response(doc_a, doc_b, comparison):
         delta, delta_percent,
         missing_names=missing_names,
     )
+    if confidence_label:
+        why = f"{why} (Confidence: {confidence_label})"
     risks = _build_risks(
         doc_type_a, doc_type_b, supplier_a, supplier_b, added_names, missing_names, delta
     )
@@ -922,12 +936,11 @@ def _handle_invoice_upload(
             )
 
             quote_name = quote_doc.get("supplier_name") or "the same supplier"
-            match_note = (
-                f"Invoice matched to existing quote from {quote_name} "
-                f"(confidence {score}/100: {'; '.join(reasons[:2])})."
+            answer = build_comparison_response(
+                quote_doc, doc_record, comparison,
+                confidence_label=_confidence_label(score),
             )
-            answer = build_comparison_response(quote_doc, doc_record, comparison)
-            return f"{match_note}\n\n{answer}", state
+            return answer, state
 
     logger.info("comparison_ran=False final_confidence=%d", score)
 
@@ -937,7 +950,7 @@ def _handle_invoice_upload(
             decision="INVOICE RECEIVED — MATCH UNCERTAIN",
             why=(
                 f"Invoice from {supplier} for {total} {currency}. "
-                f"I found a possible quote match but confidence is low ({score}/100). "
+                f"I found a possible quote match but confidence is {_confidence_label(score).lower()}. "
                 f"No automatic comparison was made."
             ),
             actions=[
