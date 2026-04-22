@@ -36,7 +36,13 @@ from domain.session_manager import (
 )
 from domain.intent import classify_text
 from domain.compliance_engine import answer_compliance_query, answer_compliance_followup
-from services.market_price_service import check_market_price
+from services.market_price_service import check_market_price, commercial_followup_advice
+from domain.component_memory import (
+    extract_components_from_doc,
+    extract_components_from_text,
+    merge_components,
+    build_component_context,
+)
 from services.reminder_service import (
     start_reminder_scheduler,
     strip_reminder_prefix,
@@ -820,6 +826,40 @@ def build_what_should_i_do_response(comparison_data: Optional[dict]) -> str:
     return _make_response(decision="HERE IS WHAT TO DO NEXT", why=why, actions=actions)
 
 
+def _handle_action_request(
+    query: str, last_ctx: dict, comparison_data, state: dict
+) -> str:
+    """
+    Shared handler for 'what should I do?' and 'how many should I order?' queries.
+    Priority: comparison context → market check context → component memory alone.
+    """
+    if comparison_data:
+        return build_what_should_i_do_response(comparison_data)
+
+    comp_ctx = build_component_context(state)
+    ctx_type = last_ctx.get("type", "")
+
+    if ctx_type == "market_check":
+        topic = last_ctx.get("topic", "")
+        result = last_ctx.get("result", "")
+        doc_ctx = _build_document_context(state)
+        parts = []
+        if comp_ctx:
+            parts.append(comp_ctx)
+        if doc_ctx:
+            parts.append(doc_ctx)
+        if topic:
+            parts.append(f"Market check query: {topic}")
+        if result:
+            parts.append(f"Market price assessment:\n{result}")
+        return commercial_followup_advice(query, "\n\n".join(parts))
+
+    if comp_ctx:
+        return commercial_followup_advice(query, comp_ctx)
+
+    return _no_comparison_response()
+
+
 _VAGUE_DOC_REF_WORDS = frozenset({"this", "these", "it", "them"})
 
 
@@ -949,6 +989,20 @@ def build_extraction_view_response(state: dict) -> str:
 # ---------------------------------------------------------------------------
 # Upload handling
 # ---------------------------------------------------------------------------
+
+
+def _extract_and_merge_components(doc_record: dict, state: dict) -> dict:
+    """Extract components from a doc_record and merge into state working memory."""
+    from domain.component_memory import extract_components_from_doc, merge_components
+    comps = extract_components_from_doc(doc_record)
+    if comps:
+        logger.info(
+            "Component memory: extracted=%d from doc_id=%s type=%s",
+            len(comps), doc_record.get("document_id"), doc_record.get("doc_type"),
+        )
+        state = merge_components(comps, state)
+    return state
+
 
 def _handle_quote_upload(
     doc_record: dict, supplier: str, total, currency: str, line_count: int, state: dict
@@ -1198,10 +1252,14 @@ def _handle_images_upload(file_paths: list, state: dict) -> Tuple[str, dict]:
         )
 
         if doc_type == "quote":
-            return _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+            answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+            state = _extract_and_merge_components(doc_record, state)
+            return answer, state
 
         if doc_type == "invoice":
-            return _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+            answer, state = _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+            state = _extract_and_merge_components(doc_record, state)
+            return answer, state
 
         return _image_unknown_response(), state
 
@@ -1315,23 +1373,25 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
     logger.info("PDF dispatching: type=%s supplier=%s total=%s %s", doc_type, supplier, total, currency)
 
     if doc_type == "quote":
-        return _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+        answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+    elif doc_type == "invoice":
+        answer, state = _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+    else:
+        state, _ = create_pending_session(doc_record, state)
+        answer = _make_response(
+            decision="DOCUMENT EXTRACTED",
+            why=(
+                f"Read an unclassified document from {supplier} with {line_count} line items "
+                f"and total {total} {currency}. Could not determine if this is a quote or invoice."
+            ),
+            actions=[
+                "Upload a clearly labelled quote or invoice for proper classification",
+                "Start with a quote to open a new comparison session",
+            ],
+        )
 
-    if doc_type == "invoice":
-        return _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
-
-    state, _ = create_pending_session(doc_record, state)
-    return _make_response(
-        decision="DOCUMENT EXTRACTED",
-        why=(
-            f"Read an unclassified document from {supplier} with {line_count} line items "
-            f"and total {total} {currency}. Could not determine if this is a quote or invoice."
-        ),
-        actions=[
-            "Upload a clearly labelled quote or invoice for proper classification",
-            "Start with a quote to open a new comparison session",
-        ],
-    ), state
+    state = _extract_and_merge_components(doc_record, state)
+    return answer, state
 
 
 def _handle_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
@@ -1380,25 +1440,31 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if intent == "quote_compare":
         return _handle_quote_compare_intent(state)
 
-    # Context-aware follow-up routing:
-    # "what should I do" and compliance-specific follow-ups go to the
-    # compliance engine when the last interaction was a compliance question.
-    if intent in ("what_to_do", "compliance_followup"):
-        topic = last_ctx.get("topic", "") if last_ctx.get("type") == "compliance" else ""
-        if topic:
-            return answer_compliance_followup(topic), state
-        if intent == "compliance_followup":
-            return (
-                "DECISION: No recent compliance topic found.\n"
-                "WHY: No compliance question has been asked in this session yet.\n"
-                "SOURCE: N/A\n"
-                "ACTIONS: • Ask a compliance question first, then follow up."
-            ), state
-        # intent == "what_to_do" with no compliance context → fall through to commercial
-
-    # Commercial follow-ups operate on the active session only
+    # Commercial context computed early — needed for follow-up routing decisions.
     active = get_active_session(state)
     comparison_data = active.get("last_comparison") if active else None
+
+    # Context-aware follow-up routing:
+    if intent in ("what_to_do", "compliance_followup"):
+        if last_ctx.get("type") == "compliance":
+            topic = last_ctx.get("topic", "")
+            if topic:
+                return answer_compliance_followup(topic), state
+        if intent == "compliance_followup":
+            # Re-route to commercial when market check or comparison context exists.
+            if last_ctx.get("type") == "market_check" or comparison_data:
+                intent = "commercial_followup"
+            else:
+                return (
+                    "DECISION: No recent compliance topic found.\n"
+                    "WHY: No compliance question has been asked in this session yet.\n"
+                    "SOURCE: N/A\n"
+                    "ACTIONS: • Ask a compliance question first, then follow up."
+                ), state
+        # what_to_do (no compliance topic) or re-routed compliance_followup → fall through
+
+    if intent == "commercial_followup":
+        return _handle_action_request(incoming, last_ctx, comparison_data, state), state
 
     if intent == "why_higher":
         return build_why_higher_response(comparison_data), state
@@ -1413,7 +1479,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         return build_extraction_view_response(state), state
 
     if intent == "what_to_do":
-        return build_what_should_i_do_response(comparison_data), state
+        return _handle_action_request(incoming, last_ctx, comparison_data, state), state
 
     if intent == "compliance_question":
         answer = answer_compliance_query(incoming)
@@ -1425,15 +1491,14 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             original_topic = last_ctx.get("topic", "")
             combined = f"{original_topic}\nUser follow-up: {incoming}" if original_topic else incoming
             answer = check_market_price(combined, allow_broad_estimate=True)
-            state["last_context"] = {"type": "market_check", "topic": original_topic or incoming}
+            state["last_context"] = {"type": "market_check", "topic": original_topic or incoming, "result": answer}
             return answer, state
         # No market_check history — try using the most recently uploaded document as context.
-        # Handles: upload quote → "give me a rough price for this?" without prior market_check.
         doc_ctx = _build_document_context(state)
         if doc_ctx:
             combined = f"{doc_ctx}\n\nUser question: {incoming}"
             answer = check_market_price(combined, allow_broad_estimate=True)
-            state["last_context"] = {"type": "market_check", "topic": incoming}
+            state["last_context"] = {"type": "market_check", "topic": incoming, "result": answer}
             return answer, state
         # No usable context — fall through to TEXT RECEIVED
 
@@ -1445,7 +1510,11 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         # context from the most recently uploaded document when one is available.
         query = _enrich_with_doc_context(incoming, state)
         answer = check_market_price(query)
-        state["last_context"] = {"type": "market_check", "topic": incoming}
+        state["last_context"] = {"type": "market_check", "topic": incoming, "result": answer}
+        # Extract component from market check text (e.g. "DA226 anti-siphon valve €528")
+        comp = extract_components_from_text(incoming, "market_check")
+        if comp:
+            state = merge_components(comp, state)
         return answer, state
 
     return _make_response(

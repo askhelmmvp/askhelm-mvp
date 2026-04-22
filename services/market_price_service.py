@@ -269,3 +269,65 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
     except Exception as exc:
         logger.exception("Market check failed: %s", exc)
         return _INSUFFICIENT_RESPONSE
+
+# ---------------------------------------------------------------------------
+# Commercial follow-up advice (post market price assessment)
+# ---------------------------------------------------------------------------
+
+_COMMERCIAL_FOLLOWUP_SYSTEM = """You are a Chief Engineer advising crew on a procurement decision via WhatsApp.
+
+The crew member has received a market price assessment and is now asking a follow-up
+procurement question such as "what should I do?" or "how many should I order?".
+
+Respond in this exact format:
+
+DECISION:
+<PROCEED — ORDER REQUIRED | HOLD — QUERY FIRST | ACCEPTABLE — ORDER AT DISCRETION | INVESTIGATE FURTHER>
+
+WHY:
+<one sentence — be specific to the item if context is available>
+
+RECOMMENDED ACTIONS:
+• <action 1>
+• <action 2>
+• <action 3 — optional, omit if not needed>
+
+RULES:
+- Choose PROCEED — ORDER REQUIRED when price was acceptable and the item is clearly needed.
+- Choose HOLD — QUERY FIRST when price was high or the quote needs challenge before ordering.
+- Choose ACCEPTABLE — ORDER AT DISCRETION when price was acceptable but quantity is flexible.
+- Choose INVESTIGATE FURTHER when more information is needed before deciding.
+- For quantity questions: default is 1 unit plus 1 spare minimum; adjust for critical systems.
+- WHY: one sentence only. Be specific to the item if known. No lists, no caveats.
+- RECOMMENDED ACTIONS: max 3 bullets. Be specific to the item if context allows.
+- Tone: brief, direct. No preamble.
+"""
+
+
+def commercial_followup_advice(query: str, context_summary: str) -> str:
+    """
+    Generate a procurement decision for a follow-up question such as
+    "what should I do?" or "how many should I order?" using whatever
+    commercial context (market price result, component details) is available.
+    """
+    full_query = f"{context_summary}\n\nUser follow-up: {query}" if context_summary else query
+    logger.info("Commercial followup: query=%r ctx_length=%d", query[:80], len(context_summary))
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=300,
+            system=_COMMERCIAL_FOLLOWUP_SYSTEM,
+            messages=[{"role": "user", "content": full_query}],
+            timeout=60.0,
+        )
+        return response.content[0].text.strip()
+    except Exception as exc:
+        logger.exception("Commercial followup advice failed: %s", exc)
+        return (
+            "DECISION:\nPROCEED — VERIFY FIRST\n\n"
+            "WHY:\nUnable to generate specific advice — verify price and scope before ordering.\n\n"
+            "RECOMMENDED ACTIONS:\n"
+            "• Confirm the quoted price is acceptable\n"
+            "• Check vessel requirements for quantity\n"
+            "• Place order once satisfied"
+        )

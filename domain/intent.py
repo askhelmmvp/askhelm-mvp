@@ -85,6 +85,24 @@ _MARKET_CHECK_FOLLOWUP_SUBSTRINGS = [
     "give me a rough",
 ]
 
+# Phrases that are commercial procurement follow-ups (ordering, proceeding).
+# Routing in _handle_text_message checks last_context to provide relevant commercial advice.
+_COMMERCIAL_FOLLOWUP_SUBSTRINGS = [
+    "how many should i order",
+    "how many should we order",
+    "how many to order",
+    "should i order",
+    "should we order",
+    "should i proceed",
+    "should we proceed",
+    "should i buy",
+    "should we buy",
+    "ok to order",
+    "safe to order",
+    "is it worth ordering",
+    "worth ordering",
+]
+
 _GREETINGS = {"hi", "hello", "start", "hey"}
 
 # ---------------------------------------------------------------------------
@@ -369,6 +387,8 @@ _COMMERCIAL_GUARD = {
     "file",
     "document",
     "attachment",
+    "order",
+    "proceed",
 }
 
 # Message starters that indicate an open question.
@@ -397,9 +417,13 @@ def classify_text(text: str) -> str:
     Returns one of:
       new_session | quote_compare | why_higher | show_added |
       show_missing | what_to_do | show_extraction | compliance_followup |
-      compliance_question | market_check | reminder | greeting | unknown
+      commercial_followup | compliance_question | market_check | reminder |
+      greeting | unknown
     """
     t = text.strip().lower()
+    # Strip trailing punctuation for exact-match lookups so "what should i do?"
+    # and "what should i do" both resolve to the same intent.
+    t_core = t.rstrip("?!").strip()
 
     for prefix in _REMINDER_PREFIXES:
         if t.startswith(prefix):
@@ -412,18 +436,22 @@ def classify_text(text: str) -> str:
         if len(phrase) > 4 and t.startswith(phrase):
             return "new_session"
 
-    if t in _FOLLOW_UPS:
-        return _FOLLOW_UPS[t]
+    if t_core in _FOLLOW_UPS:
+        return _FOLLOW_UPS[t_core]
 
-    if t in _COMPLIANCE_FOLLOWUP_EXACT:
+    if t_core in _COMPLIANCE_FOLLOWUP_EXACT:
         return "compliance_followup"
 
-    if t in _MARKET_CHECK_FOLLOWUP_EXACT:
+    if t_core in _MARKET_CHECK_FOLLOWUP_EXACT:
         return "market_check_followup"
 
     for phrase in _MARKET_CHECK_FOLLOWUP_SUBSTRINGS:
         if phrase in t:
             return "market_check_followup"
+
+    for phrase in _COMMERCIAL_FOLLOWUP_SUBSTRINGS:
+        if phrase in t:
+            return "commercial_followup"
 
     for trigger in _QUOTE_COMPARE_SUBSTRINGS:
         if trigger in t:
