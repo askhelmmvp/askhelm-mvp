@@ -88,41 +88,32 @@ You are a Chief Engineer. A crew member has asked about marine parts or service 
 Pick ONE mode based on the query — nothing else:
 
 MODE A — Exact OEM part number present, cannot verify exact market price:
-CONFIDENCE:
-insufficient_confidence
-
 DECISION:
-No reliable exact price confirmed
+INSUFFICIENT DATA
 
 WHY:
-I could not verify a strong market price from exact matches alone.
+I could not verify a market price for this exact part number. Confidence: LOW
 
 ACTIONS:
 • Send the quoted price and I'll judge it
 • Or get 2 quotes against the exact part number
 
 MODE B — Generic item or service, no specific price given in the query:
-CONFIDENCE:
-similar_item_estimate
-
 DECISION:
-Broad estimate only
+INSUFFICIENT DATA
 
 WHY:
-Typical range is €X–€Y depending on [main variable].
+Typical range is €X–€Y depending on [main variable] — need more detail to assess. Confidence: MEDIUM
 
 ACTIONS:
 • [One short clarifying question — ask only the minimum needed]
 
 MODE C — A specific price appears in the query:
-CONFIDENCE:
-exact_match
-
 DECISION:
-<Reasonable / High / Low / Unclear>
+<ACCEPTABLE PRICE | HIGH PRICE — QUERY | LOW PRICE — OPPORTUNITY | INSUFFICIENT DATA>
 
 WHY:
-<one sentence max>
+<one sentence max — end with "Confidence: HIGH / MEDIUM / LOW">
 
 ACTIONS:
 • <action 1>
@@ -132,10 +123,11 @@ RULES:
 - Use MODE A when a specific OEM part number is present and you cannot confidently price it.
 - Use MODE B when no price was given and the item is estimable (e.g. service type, general component).
 - Use MODE C when a specific price appears in the question.
-- If the query has a price but the item is too vague to assess: use MODE C with DECISION Unclear and one short clarifying question.
-- WHY: one sentence only. No lists, no caveats, no padding.
+- If the query has a price but the item is too vague to assess: use MODE C with DECISION INSUFFICIENT DATA and one short clarifying question.
+- DECISION must always be one of: ACCEPTABLE PRICE, HIGH PRICE — QUERY, LOW PRICE — OPPORTUNITY, INSUFFICIENT DATA. Never use "High", "Low", "Reasonable", "Unclear", or any other label.
+- WHY: one sentence only. End with "Confidence: HIGH", "Confidence: MEDIUM", or "Confidence: LOW". No lists, no caveats, no padding.
 - ACTIONS: max 2 bullets. For MODE B, one bullet is the clarifying question.
-- Never give a price range when mode A applies.
+- Never include CONFIDENCE: as a separate section — confidence belongs only inside the WHY sentence.
 - Tone: brief, practical. No preamble.
 """
 
@@ -187,26 +179,26 @@ _INSUFFICIENT_ACTIONS = (
 )
 
 _INSUFFICIENT_RESPONSE = (
-    "DECISION:\nNo reliable exact price confirmed\n\n"
-    "WHY:\nI could not verify a strong market price from exact matches alone.\n\n"
+    "DECISION:\nINSUFFICIENT DATA\n\n"
+    "WHY:\nI could not verify a market price for this exact part number. Confidence: LOW\n\n"
     f"ACTIONS:\n{_INSUFFICIENT_ACTIONS}"
 )
 
 
 def _enforce_insufficient(sections: dict) -> str:
-    why = sections.get("WHY", "I could not verify a strong market price from exact matches alone.")
+    why = sections.get("WHY", "I could not verify a market price for this exact part number. Confidence: LOW")
     return (
-        f"DECISION:\nNo reliable exact price confirmed\n\n"
+        f"DECISION:\nINSUFFICIENT DATA\n\n"
         f"WHY:\n{why}\n\n"
         f"ACTIONS:\n{_INSUFFICIENT_ACTIONS}"
     )
 
 
 def _enforce_similar(sections: dict) -> str:
-    why = sections.get("WHY", "Pricing varies by brand, model, and urgency.")
+    why = sections.get("WHY", "Pricing varies by brand, model, and urgency. Confidence: MEDIUM")
     actions = sections.get("ACTIONS", "• Send more details for a better estimate")
     return (
-        f"DECISION:\nBroad estimate only\n\n"
+        f"DECISION:\nINSUFFICIENT DATA\n\n"
         f"WHY:\n{why}\n\n"
         f"ACTIONS:\n{actions}"
     )
@@ -248,13 +240,13 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
         confidence, raw = _parse_confidence(raw)
         sections = _parse_sections(raw)
 
-        # Infer confidence from DECISION text if Claude omitted the CONFIDENCE line
+        # Infer confidence from DECISION text (new prompt omits CONFIDENCE section entirely)
         if confidence is None:
             decision = sections.get("DECISION", "").lower()
-            if "no reliable" in decision or "unclear" in decision or "not confidently" in decision:
+            if "insufficient" in decision or "unclear" in decision:
                 confidence = CONFIDENCE_INSUFFICIENT
-            elif "broad estimate" in decision or "estimate only" in decision or "similar" in decision:
-                confidence = CONFIDENCE_SIMILAR
+            elif "acceptable price" in decision or "high price" in decision or "low price" in decision:
+                confidence = CONFIDENCE_EXACT
             else:
                 confidence = CONFIDENCE_EXACT if not query_has_part_number else CONFIDENCE_SIMILAR
 
