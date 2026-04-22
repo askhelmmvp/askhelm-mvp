@@ -31,6 +31,54 @@ def _has_part_number(query: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Assembly-scope detection
+# Fired when the query covers a major mechanical assembly but has no model
+# or drive identifier — we need that info before we can judge price fairly.
+# ---------------------------------------------------------------------------
+
+_STERN_DRIVE_SCOPE = frozenset([
+    "transom", "stern drive", "sterndrive", "gimbal", "outdrive",
+    "transom plate", "gimbal housing", "gimbal ring", "transom housing",
+])
+
+# Known drive/engine models and brands that act as identifiers
+_DRIVE_MODEL_INDICATORS = [
+    "zt370", "zt320", "zt280", "zt260", "zt240",
+    "volvo penta", "volvo d", "volvo b",
+    "mercruiser", "bravo", "alpha drive",
+    "yanmar", "cummins", "caterpillar", "man ", " mtu",
+    "nanni", "scania", "duoprop", "aquamatic",
+]
+
+
+def _is_stern_drive_scope_without_model(query: str) -> bool:
+    """
+    True when the query concerns stern drive / transom assembly work AND no
+    drive model or part identifier is present.  Without a model number a
+    reliable price check is impossible — we should ask first.
+    """
+    q = query.lower()
+    has_scope = any(kw in q for kw in _STERN_DRIVE_SCOPE)
+    if not has_scope:
+        return False
+    has_identifier = _has_part_number(query) or any(m in q for m in _DRIVE_MODEL_INDICATORS)
+    return not has_identifier
+
+
+_STERN_DRIVE_CONTEXT_RESPONSE = (
+    "DECISION:\n"
+    "MORE DETAIL NEEDED FOR A RELIABLE PRICE CHECK\n\n"
+    "WHY:\n"
+    "This appears to cover a stern drive transom / gimbal repair. "
+    "Fair pricing depends mainly on the drive model and key assembly part numbers.\n\n"
+    "RECOMMENDED ACTIONS:\n"
+    "• Send the stern drive make/model (e.g. ZT370)\n"
+    "• Send any transom plate or housing part number\n"
+    "• Then I'll assess whether the parts and labour look fair"
+)
+
+
+# ---------------------------------------------------------------------------
 # System prompt — three response modes, WhatsApp-concise
 # ---------------------------------------------------------------------------
 
@@ -178,6 +226,13 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
     """
     logger.info("Market check: query=%r allow_broad_estimate=%s", query[:120], allow_broad_estimate)
     query_has_part_number = _has_part_number(query)
+
+    # Assembly-scope check: stern drive / transom work with no model → ask first.
+    # Skipped on follow-up calls (allow_broad_estimate=True) so the user's reply
+    # with model/part info is passed straight through to Claude.
+    if not allow_broad_estimate and _is_stern_drive_scope_without_model(query):
+        logger.info("Market check: stern drive scope without model identifier → requesting context")
+        return _STERN_DRIVE_CONTEXT_RESPONSE
 
     try:
         response = client.messages.create(

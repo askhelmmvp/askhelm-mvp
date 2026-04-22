@@ -1135,6 +1135,81 @@ def _process_image_background(file_path: str, state: dict, user_id: str, phone: 
     _send_whatsapp_message(phone, body)
 
 
+def _process_images_background(file_paths: list, state: dict, user_id: str, phone: str) -> None:
+    """
+    Background thread entry point for image uploads.
+    Passes all pages from the same message to Claude together so multi-page
+    documents (e.g. page 1 + page 2 of the same quote) are extracted as one.
+    """
+    fnames = [os.path.basename(p) for p in file_paths]
+    logger.info("Image upload: background started pages=%d files=%s user=%s", len(file_paths), fnames, user_id)
+    try:
+        answer, updated_state = _handle_images_upload(file_paths, state)
+        save_user_state(user_id, updated_state)
+        logger.info("Image upload: background completed pages=%d user=%s", len(file_paths), user_id)
+    except Exception as exc:
+        logger.exception("Image upload: background failed pages=%d: %s", len(file_paths), exc)
+        answer = _image_received_response()
+    body = f"⚓ AskHelm \n\n{answer}"
+    _send_whatsapp_message(phone, body)
+
+
+def _handle_images_upload(file_paths: list, state: dict) -> Tuple[str, dict]:
+    """
+    Extract and dispatch one or more images as a single document.
+    A single path delegates to the existing single-image path unchanged.
+    Multiple paths are passed together so Claude sees all pages at once —
+    this handles page 1 + page 2 of the same quote as one extraction.
+    """
+    if len(file_paths) == 1:
+        return _handle_image_upload(file_paths[0], state)
+
+    page_count = len(file_paths)
+    logger.info("Image upload: multi-page extraction page_count=%d", page_count)
+    try:
+        extracted = extract_commercial_document_from_images(file_paths)
+    except Exception as exc:
+        logger.exception("Image upload: multi-page extraction failed: %s", exc)
+        return _image_received_response(), state
+
+    if not isinstance(extracted, dict):
+        return _image_received_response(), state
+
+    if _is_operational_note(extracted):
+        try:
+            reply = summarise_operational_note_from_image(file_paths[0])
+            return reply, state
+        except Exception as exc:
+            logger.exception("Image upload: multi-page op-note summarisation failed: %s", exc)
+            return _image_received_response(), state
+
+    try:
+        extracted = normalise_doc_type(extracted)
+        doc_record = make_document_record(extracted, file_paths[0])
+        doc_type = doc_record["doc_type"]
+        supplier = doc_record["supplier_name"] or "Unknown supplier"
+        total = doc_record["total"]
+        currency = doc_record["currency"]
+        line_count = len(doc_record["line_items"])
+
+        logger.info(
+            "Image upload (multi-page): type=%s supplier=%s total=%s %s pages=%d items=%d",
+            doc_type, supplier, total, currency, page_count, line_count,
+        )
+
+        if doc_type == "quote":
+            return _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+
+        if doc_type == "invoice":
+            return _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+
+        return _image_unknown_response(), state
+
+    except Exception as exc:
+        logger.exception("Image upload: multi-page dispatch failed: %s", exc)
+        return _image_received_response(), state
+
+
 def _image_unknown_response() -> str:
     return _make_response(
         decision="IMAGE PROCESSED",
@@ -1419,7 +1494,10 @@ def whatsapp_reply():
 
             # Phase 1: download all attachments; extract PDFs eagerly so we know
             # each document's type before dispatching any of them.
+            # Images are collected (not yet threaded) so all pages from the same
+            # message can be sent to Claude together as one multi-page document.
             pdf_doc_records: list = []
+            image_file_paths: list = []
             for i in range(num_media):
                 media_url = request.form.get(f"MediaUrl{i}")
                 media_type = (request.form.get(f"MediaContentType{i}") or "").strip().lower()
@@ -1441,16 +1519,22 @@ def whatsapp_reply():
                     pdf_doc_records.append(doc_record)
 
                 elif media_type in _IMAGE_CONTENT_TYPES:
-                    thread = threading.Thread(
-                        target=_process_image_background,
-                        args=(file_path, copy.deepcopy(state), user_id, phone),
-                        daemon=True,
-                    )
-                    thread.start()
+                    image_file_paths.append(file_path)
                     image_started = True
 
                 else:
                     logger.warning("Unsupported media type [%d/%d]: %r", i + 1, num_media, media_type)
+
+            # Spawn ONE background thread for all images in this message so that
+            # multiple pages of the same document are extracted together.
+            if image_file_paths:
+                logger.info("Image upload: spawning thread for %d page(s)", len(image_file_paths))
+                thread = threading.Thread(
+                    target=_process_images_background,
+                    args=(image_file_paths, copy.deepcopy(state), user_id, phone),
+                    daemon=True,
+                )
+                thread.start()
 
             # Phase 2: dispatch PDFs — quotes first so any invoice in the same
             # message can find the freshly-created quote session.
