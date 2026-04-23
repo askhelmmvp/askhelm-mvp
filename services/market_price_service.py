@@ -264,7 +264,11 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
             return _enforce_similar(sections)
 
         # exact_match — return Claude's response without the CONFIDENCE line
-        return _build_response(sections)
+        result = _build_response(sections)
+        if not result.strip():
+            logger.warning("Market check: empty parsed response (sections=%s), using fallback", list(sections.keys()))
+            return _INSUFFICIENT_RESPONSE
+        return result
 
     except Exception as exc:
         logger.exception("Market check failed: %s", exc)

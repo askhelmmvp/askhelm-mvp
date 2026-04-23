@@ -179,6 +179,15 @@ def _no_comparison_response() -> str:
     )
 
 
+_MARKET_CHECK_CONTEXT_FALLBACK = (
+    "DECISION:\nINSUFFICIENT DATA\n\n"
+    "WHY:\nI found the last quoted item, but I could not complete a reliable live price check from the current context. Confidence: LOW\n\n"
+    "ACTIONS:\n"
+    "• Send the make/model or part number\n"
+    "• Or send another supplier quote for comparison"
+)
+
+
 # ---------------------------------------------------------------------------
 # Comparison logic helpers
 # ---------------------------------------------------------------------------
@@ -930,6 +939,53 @@ def _enrich_with_doc_context(query: str, state: dict) -> str:
     return f"{doc_ctx}\n\nUser question: {query}"
 
 
+def _handle_document_market_check(
+    query: str, state: dict, doc_ctx: str = "", comp_ctx: str = ""
+) -> Tuple[str, dict]:
+    """
+    Handle a market-check query when document or component context is available.
+    Enriches the query with that context, calls check_market_price, and guards
+    against empty / malformed responses with a structured fallback.
+    """
+    has_last_document = bool(doc_ctx)
+    has_component_memory = bool(comp_ctx)
+    logger.info(
+        "followup_market_check_entered=True has_last_document=%s has_component_memory=%s",
+        has_last_document, has_component_memory,
+    )
+    ctx_parts = []
+    if comp_ctx:
+        ctx_parts.append(comp_ctx)
+    if doc_ctx:
+        ctx_parts.append(doc_ctx)
+    reused_quote_context = bool(ctx_parts)
+    ctx_parts.append(f"User question: {query}")
+    enriched = "\n\n".join(ctx_parts)
+    logger.info(
+        "reused_quote_context=%s external_lookup_called=True enriched_length=%d",
+        reused_quote_context, len(enriched),
+    )
+    answer = ""
+    try:
+        answer = check_market_price(enriched, allow_broad_estimate=True)
+        response_built = bool(answer and answer.strip())
+        logger.info(
+            "response_built=%s response_length=%d exception=False",
+            response_built, len(answer),
+        )
+        if not response_built:
+            logger.warning("followup_market_check: empty response, using fallback")
+            answer = _MARKET_CHECK_CONTEXT_FALLBACK
+    except Exception as exc:
+        logger.exception("followup_market_check exception=True: %s response_built=False", exc)
+        answer = _MARKET_CHECK_CONTEXT_FALLBACK
+    state["last_context"] = {"type": "market_check", "topic": query, "result": answer}
+    comp = extract_components_from_text(query, "market_check")
+    if comp:
+        state = merge_components(comp, state)
+    return answer, state
+
+
 def _image_received_response() -> str:
     return _make_response(
         decision="IMAGE RECEIVED",
@@ -1520,12 +1576,18 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         return _handle_reminder_command(incoming, phone, state)
 
     if intent == "market_check":
-        # Enrich vague references ("is this expensive?", "what should this cost?") with
-        # context from the most recently uploaded document when one is available.
+        # If we have document or component context, use the dedicated enriched handler
+        # which guards against empty responses and logs diagnostic fields.
+        doc_ctx = _build_document_context(state)
+        comp_ctx = build_component_context(state)
+        if doc_ctx or comp_ctx:
+            return _handle_document_market_check(incoming, state, doc_ctx, comp_ctx)
+        # No context — enrich vague pronoun references and call directly.
         query = _enrich_with_doc_context(incoming, state)
         answer = check_market_price(query)
+        if not answer or not answer.strip():
+            answer = _MARKET_CHECK_CONTEXT_FALLBACK
         state["last_context"] = {"type": "market_check", "topic": incoming, "result": answer}
-        # Extract component from market check text (e.g. "DA226 anti-siphon valve €528")
         comp = extract_components_from_text(incoming, "market_check")
         if comp:
             state = merge_components(comp, state)
@@ -1552,6 +1614,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             _enriched = "\n\n".join(_ctx_parts)
             logger.info("Context fallback: routing question to market_check with doc/component context")
             answer = check_market_price(_enriched, allow_broad_estimate=True)
+            if not answer or not answer.strip():
+                logger.warning("Context fallback: empty response from check_market_price, using fallback")
+                answer = _MARKET_CHECK_CONTEXT_FALLBACK
             state["last_context"] = {"type": "market_check", "topic": incoming, "result": answer}
             _comp = extract_components_from_text(incoming, "market_check")
             if _comp:
