@@ -854,8 +854,15 @@ def _handle_action_request(
             parts.append(f"Market price assessment:\n{result}")
         return commercial_followup_advice(query, "\n\n".join(parts))
 
+    # Use whatever context is available: component memory + last document
+    doc_ctx = _build_document_context(state)
+    parts = []
     if comp_ctx:
-        return commercial_followup_advice(query, comp_ctx)
+        parts.append(comp_ctx)
+    if doc_ctx:
+        parts.append(doc_ctx)
+    if parts:
+        return commercial_followup_advice(query, "\n\n".join(parts))
 
     return _no_comparison_response()
 
@@ -1391,6 +1398,13 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
         )
 
     state = _extract_and_merge_components(doc_record, state)
+    if doc_type in ("quote", "invoice"):
+        state["last_context"] = {
+            "type": "document_processed",
+            "document_type": doc_type,
+            "document_id": doc_record.get("document_id", ""),
+            "supplier": supplier,
+        }
     return answer, state
 
 
@@ -1516,6 +1530,33 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         if comp:
             state = merge_components(comp, state)
         return answer, state
+
+    # Context-aware fallback: if we have recent document or component context
+    # and the message looks like a question, try to answer it using that
+    # context rather than returning a generic TEXT RECEIVED response.
+    _doc_ctx = _build_document_context(state)
+    _comp_ctx = build_component_context(state)
+    if _doc_ctx or _comp_ctx:
+        _q = incoming.strip().lower()
+        _is_q = _q.endswith("?") or _q.startswith((
+            "is ", "are ", "does ", "do ", "any ",
+            "what ", "how ", "should ", "would ", "will ", "can ",
+        ))
+        if _is_q:
+            _ctx_parts = []
+            if _comp_ctx:
+                _ctx_parts.append(_comp_ctx)
+            if _doc_ctx:
+                _ctx_parts.append(_doc_ctx)
+            _ctx_parts.append(f"User question: {incoming}")
+            _enriched = "\n\n".join(_ctx_parts)
+            logger.info("Context fallback: routing question to market_check with doc/component context")
+            answer = check_market_price(_enriched, allow_broad_estimate=True)
+            state["last_context"] = {"type": "market_check", "topic": incoming, "result": answer}
+            _comp = extract_components_from_text(incoming, "market_check")
+            if _comp:
+                state = merge_components(_comp, state)
+            return answer, state
 
     return _make_response(
         decision="TEXT RECEIVED",

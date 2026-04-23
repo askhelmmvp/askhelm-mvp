@@ -141,6 +141,16 @@ _MARKET_CHECK_SUBSTRINGS = [
     "what is the cost",
     "what's the price",
     "what is the price",
+    # price quality / good-value queries
+    "is this a good price",
+    "is that a good price",
+    "good price for",
+    "is this good value",
+    "is this value for money",
+    "is this competitive",
+    "is that competitive",
+    "is this cheap",
+    "is that cheap",
     # existing
     "what should this cost",
     "what should that cost",
@@ -155,7 +165,7 @@ _MARKET_CHECK_PATTERNS = [
     r"\bwhat should\b.{0,80}\bcost\b",                           # "what should a windlass service cost"
     r"\bwhat (would|does|will)\b.{0,60}\bcost\b",                # "what would this cost"
     r"\bhow much (should|would|does|will|is|are|for)\b",         # "how much for/is/does X"
-    r"\bis .{0,60}\b(reasonable|overpriced|fair|expensive|pricey|costly)\b",  # "is €4500 reasonable/expensive"
+    r"\bis .{0,60}\b(reasonable|overpriced|fair|expensive|pricey|costly|good value|good price|competitive)\b",  # "is €4500 reasonable/expensive"
     r"\bshould (this|that|it|these)\b.{0,40}\bcost\b",           # "should this cost €400"
     r"\bhow much should (this|that|it|these)\b",                  # "how much should this be"
 ]
