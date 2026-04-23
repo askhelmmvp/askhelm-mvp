@@ -948,6 +948,24 @@ def _enrich_with_doc_context(query: str, state: dict) -> str:
     return f"{doc_ctx}\n\nUser question: {query}"
 
 
+def _handle_market_check_clarification(
+    clarification: str, pending: dict, state: dict
+) -> Tuple[str, dict]:
+    """Re-run a pending market check using the user's clarification reply."""
+    doc_ctx = pending.get("doc_ctx", "")
+    comp_ctx = pending.get("comp_ctx", "")
+    original_query = pending.get("original_query", "")
+    logger.info(
+        "market_check_clarification: original_query=%r clarification=%r",
+        original_query[:60], clarification[:60],
+    )
+    combined_query = (
+        f"{original_query}\nUser clarification: {clarification}"
+        if original_query else clarification
+    )
+    return _handle_document_market_check(combined_query, state, doc_ctx, comp_ctx)
+
+
 def _handle_document_market_check(
     query: str, state: dict, doc_ctx: str = "", comp_ctx: str = ""
 ) -> Tuple[str, dict]:
@@ -993,6 +1011,12 @@ def _handle_document_market_check(
     if reused_quote_context and answer and "Send the quoted price" in answer:
         logger.info("followup_market_check: replacing 'send quoted price' with doc-context fallback")
         answer = _MARKET_CHECK_DOC_CONTEXT_FALLBACK
+        state["pending_clarification"] = {
+            "intent": "market_check",
+            "doc_ctx": doc_ctx,
+            "comp_ctx": comp_ctx,
+            "original_query": query,
+        }
     state["last_context"] = {"type": "market_check", "topic": query, "result": answer}
     comp = extract_components_from_text(query, "market_check")
     if comp:
@@ -1512,6 +1536,14 @@ def _handle_reminder_command(message: str, phone: str, state: dict) -> Tuple[str
 def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[str, dict]:
     intent = classify_text(incoming)
     last_ctx = state.get("last_context", {})
+
+    # Consume pending clarification before any other routing.
+    # Only fires for unrecognised messages (intent==unknown) so explicit commands
+    # like "new comparison" or "compare quotes" are never swallowed.
+    _pending = state.pop("pending_clarification", None)
+    if _pending and _pending.get("intent") == "market_check" and intent == "unknown":
+        logger.info("market_check_clarification: consuming pending clarification for incoming=%r", incoming[:60])
+        return _handle_market_check_clarification(incoming, _pending, state)
 
     if intent == "greeting":
         return "Ready.\n\nSend your question or upload a document.", state
