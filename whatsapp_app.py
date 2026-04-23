@@ -187,6 +187,15 @@ _MARKET_CHECK_CONTEXT_FALLBACK = (
     "• Or send another supplier quote for comparison"
 )
 
+_MARKET_CHECK_DOC_CONTEXT_FALLBACK = (
+    "DECISION:\nMORE DETAIL NEEDED\n\n"
+    "WHY:\nI found the quoted part and price, but I cannot judge it reliably without the component description or equipment make/model. Confidence: LOW.\n\n"
+    "RECOMMENDED ACTIONS:\n"
+    "• Confirm what the part is fitted to\n"
+    "• Send the make/model or component description\n"
+    "• Or send a second supplier quote for comparison"
+)
+
 
 # ---------------------------------------------------------------------------
 # Comparison logic helpers
@@ -979,6 +988,11 @@ def _handle_document_market_check(
     except Exception as exc:
         logger.exception("followup_market_check exception=True: %s response_built=False", exc)
         answer = _MARKET_CHECK_CONTEXT_FALLBACK
+    # We already have the quoted price in the context — never ask the user to resend it.
+    # Replace any response that asks for the quoted price with a context-aware fallback.
+    if reused_quote_context and answer and "Send the quoted price" in answer:
+        logger.info("followup_market_check: replacing 'send quoted price' with doc-context fallback")
+        answer = _MARKET_CHECK_DOC_CONTEXT_FALLBACK
     state["last_context"] = {"type": "market_check", "topic": query, "result": answer}
     comp = extract_components_from_text(query, "market_check")
     if comp:
