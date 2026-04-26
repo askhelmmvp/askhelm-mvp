@@ -497,6 +497,9 @@ def _classify_comparison(
     # Exact total match with no missing items is always HIGH confidence
     if delta == 0 and not missing_items:
         confidence = "HIGH"
+    # NO CHANGE decision means totals are confirmed identical — always HIGH
+    if decision == "MATCH CONFIRMED — NO CHANGE":
+        confidence = "HIGH"
 
     return {
         "comparison_type": (
@@ -1519,12 +1522,8 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
         d.get("fingerprint") == _fp and d.get("doc_type") == doc_type
         for d in state.get("documents", [])
     ):
-        logger.info("PDF dispatch: duplicate fingerprint=%s type=%s supplier=%s — skipping", _fp, doc_type, supplier)
-        return _make_response(
-            decision="DOCUMENT ALREADY PROCESSED",
-            why=f"This document from {supplier} has already been uploaded in this session.",
-            actions=["Upload a different document", "Or ask: what should I do?"],
-        ), state
+        logger.info("PDF dispatch: duplicate fingerprint=%s type=%s supplier=%s — silent skip", _fp, doc_type, supplier)
+        return "", state  # silently ignored by the batch loop
 
     if doc_type == "quote":
         answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
@@ -1819,9 +1818,12 @@ def whatsapp_reply():
             comparison_answer: Optional[str] = None
             for doc_record in pdf_doc_records:
                 att_answer, state = _dispatch_doc_record(doc_record, state)
+                if not att_answer:
+                    continue  # silent dedup skip — no user-facing message
                 pdf_answers.append(att_answer)
-                if "Invoice matched" in att_answer or "MATCH CONFIRMED" in att_answer:
+                if "MATCH CONFIRMED" in att_answer or "Invoice matched" in att_answer:
                     comparison_answer = att_answer
+                    break  # one comparison result = one final reply
 
             logger.info(
                 "processed_docs=%d comparison_found=%s image_threads_started=%s",
