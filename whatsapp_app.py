@@ -72,6 +72,11 @@ TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
 
 BASE_CURRENCY = "EUR"
 
+_intake_lock = threading.Lock()
+_intake_threads_active: set = set()
+_INTAKE_DEBOUNCE_SECONDS = 12
+_INTAKE_MAX_AGE_SECONDS = 60
+
 FX_RATES = {
     ("GBP", "EUR"): 1.1483,
     ("EUR", "GBP"): 1 / 1.1483,
@@ -500,8 +505,8 @@ def _classify_comparison(
     confidence = _confidence_label(match_score)
     if quote_to_invoice and ancillary_only and not missing_items:
         confidence = "HIGH"
-    # Exact total match with no missing items is always HIGH confidence
-    if delta == 0 and not missing_items:
+    # Exact total match is always HIGH confidence — matching totals confirm price
+    if delta == 0:
         confidence = "HIGH"
     # NO CHANGE decision means totals are confirmed identical — always HIGH
     if decision == "MATCH CONFIRMED — NO CHANGE":
@@ -1358,6 +1363,53 @@ def _process_images_background(file_paths: list, state: dict, user_id: str, phon
     _send_whatsapp_message(phone, body)
 
 
+def _process_intake_background(user_id: str, phone: str) -> None:
+    """
+    Process deferred PDF docs after the intake debounce window expires.
+    Loads fresh state from disk so docs from concurrent webhooks
+    (same-sender multi-file upload sent as separate requests) are batched.
+    """
+    time.sleep(_INTAKE_DEBOUNCE_SECONDS)
+    with _intake_lock:
+        _intake_threads_active.discard(user_id)
+
+    state = load_user_state(user_id)
+    _now = time.time()
+    pending = [
+        p for p in state.pop("pending_intake", [])
+        if _now - p.get("received_at", 0) <= _INTAKE_MAX_AGE_SECONDS
+    ]
+    if not pending:
+        save_user_state(user_id, state)
+        return
+
+    logger.info(
+        "intake_background: processing pending_count=%d user=%s",
+        len(pending), user_id,
+    )
+
+    pending.sort(key=lambda x: 0 if x["doc_record"].get("doc_type") == "quote" else 1)
+
+    pdf_answers: list = []
+    comparison_answer: Optional[str] = None
+    for item in pending:
+        att_answer, state = _dispatch_doc_record(item["doc_record"], state)
+        if not att_answer:
+            continue
+        pdf_answers.append(att_answer)
+        if "MATCH CONFIRMED" in att_answer or "Invoice matched" in att_answer:
+            comparison_answer = att_answer
+            break
+
+    if not pdf_answers:
+        save_user_state(user_id, state)
+        return
+
+    answer = comparison_answer if comparison_answer is not None else pdf_answers[-1]
+    save_user_state(user_id, state)
+    _send_whatsapp_message(phone, f"⚓ AskHelm \n\n{answer}")
+
+
 def _handle_images_upload(file_paths: list, state: dict) -> Tuple[str, dict]:
     """
     Extract and dispatch one or more images as a single document.
@@ -1629,6 +1681,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         state = reset_user_sessions(state)
         state.pop("last_context", None)
         state.pop("pending_invoice", None)
+        state.pop("pending_intake", None)
         return build_new_session_response(), state
 
     if intent == "quote_compare":
@@ -1835,49 +1888,78 @@ def whatsapp_reply():
                 )
                 thread.start()
 
-            # Phase 2: dispatch PDFs — quotes first so any invoice in the same
-            # message can find the freshly-created quote session.
-            pdf_doc_records.sort(key=lambda d: 0 if d.get("doc_type") == "quote" else 1)
-
+            # Phase 2: add PDFs to per-user intake buffer.
+            # If both a quote and invoice are now buffered, process immediately.
+            # Otherwise defer to a background thread after the debounce window so
+            # a second file arriving as a separate webhook request is included.
             pdf_answers: list = []
             comparison_answer: Optional[str] = None
-            for doc_record in pdf_doc_records:
-                att_answer, state = _dispatch_doc_record(doc_record, state)
-                if not att_answer:
-                    continue  # silent dedup skip — no user-facing message
-                pdf_answers.append(att_answer)
-                if "MATCH CONFIRMED" in att_answer or "Invoice matched" in att_answer:
-                    comparison_answer = att_answer
-                    break  # one comparison result = one final reply
+            _intake_deferred = False
+            if pdf_doc_records:
+                _now_ts = time.time()
+                _intake = state.get("pending_intake") or []
+                for _dr in pdf_doc_records:
+                    _intake.append({"doc_record": _dr, "received_at": _now_ts})
+                state["pending_intake"] = _intake
+
+                _types = {item["doc_record"].get("doc_type") for item in _intake}
+                if "quote" in _types and "invoice" in _types:
+                    # Both types buffered — compare immediately and clear buffer
+                    state.pop("pending_intake")
+                    _sorted_intake = sorted(
+                        _intake,
+                        key=lambda x: 0 if x["doc_record"].get("doc_type") == "quote" else 1,
+                    )
+                    for _item in _sorted_intake:
+                        att_answer, state = _dispatch_doc_record(_item["doc_record"], state)
+                        if not att_answer:
+                            continue
+                        pdf_answers.append(att_answer)
+                        if "MATCH CONFIRMED" in att_answer or "Invoice matched" in att_answer:
+                            comparison_answer = att_answer
+                            break
+                else:
+                    # Single type — defer; thread waits for debounce window then processes
+                    with _intake_lock:
+                        if user_id not in _intake_threads_active:
+                            _intake_threads_active.add(user_id)
+                            threading.Thread(
+                                target=_process_intake_background,
+                                args=(user_id, phone),
+                                daemon=True,
+                            ).start()
+                    _intake_deferred = True
+                    answer = None  # REST API sends real result after debounce window
 
             logger.info(
-                "processed_docs=%d comparison_found=%s image_threads_started=%s",
-                len(pdf_answers), comparison_answer is not None, image_started,
+                "processed_docs=%d comparison_found=%s image_threads_started=%s intake_deferred=%s",
+                len(pdf_answers), comparison_answer is not None, image_started, _intake_deferred,
             )
 
-            if comparison_answer is not None:
-                answer = comparison_answer
-            elif pdf_answers:
-                answer = pdf_answers[-1]
-            elif image_started:
-                answer = _make_response(
-                    decision="IMAGE RECEIVED",
-                    why="Processing your image now.",
-                    actions=["Wait for extraction result", "Or send another document"],
-                )
-            else:
-                answer = _make_response(
-                    decision="FILE RECEIVED",
-                    why="Document saved.",
-                    actions=[
-                        "PDF and image (JPEG, PNG) reading is enabled",
-                        "Upload another document for comparison",
-                    ],
-                )
+            if not _intake_deferred:
+                if comparison_answer is not None:
+                    answer = comparison_answer
+                elif pdf_answers:
+                    answer = pdf_answers[-1]
+                elif image_started:
+                    answer = _make_response(
+                        decision="IMAGE RECEIVED",
+                        why="Processing your image now.",
+                        actions=["Wait for extraction result", "Or send another document"],
+                    )
+                else:
+                    answer = _make_response(
+                        decision="FILE RECEIVED",
+                        why="Document saved.",
+                        actions=[
+                            "PDF and image (JPEG, PNG) reading is enabled",
+                            "Upload another document for comparison",
+                        ],
+                    )
 
-            # Only skip main-thread state save when images were uploaded without PDFs
-            # (the background thread handles state persistence in that case).
-            if image_started and not pdf_answers:
+            # Skip main-thread state save only when images were uploaded without PDFs
+            # and no intake buffer is pending (background thread handles persistence).
+            if image_started and not pdf_answers and not _intake_deferred:
                 save_state = False
         else:
             answer, state = _handle_text_message(incoming, state, phone=phone)
@@ -1897,11 +1979,13 @@ def whatsapp_reply():
     if save_state:
         save_user_state(user_id, state)
 
-    body = f"⚓ AskHelm \n\n{answer}"
-    logger.info("Twilio reply: body_length=%d save_state=%s user=%s", len(body), save_state, user_id)
-
     resp = MessagingResponse()
-    resp.message(body)
+    if answer is not None:
+        body = f"⚓ AskHelm \n\n{answer}"
+        logger.info("Twilio reply: body_length=%d save_state=%s user=%s", len(body), save_state, user_id)
+        resp.message(body)
+    else:
+        logger.info("Twilio reply: deferred (pending intake) save_state=%s user=%s", save_state, user_id)
     return str(resp), 200, {"Content-Type": "text/xml"}
 
 
