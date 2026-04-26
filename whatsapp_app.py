@@ -1063,13 +1063,11 @@ def _handle_document_market_check(
 
 def _image_received_response() -> str:
     return _make_response(
-        decision="IMAGE RECEIVED",
-        why="The image was uploaded but could not be processed successfully.",
+        decision="DOCUMENT NOT UNDERSTOOD",
+        why="I received the file but could not classify it as a quote, invoice, proforma, or technical note.",
         actions=[
-            "Try a clearer image",
-            "Crop to the relevant page only",
-            "Retry upload",
-            "Or send a PDF instead",
+            "Re-upload as PDF if possible",
+            "Or say what this document is",
         ],
     )
 
