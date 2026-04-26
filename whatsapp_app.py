@@ -4,6 +4,7 @@ import json
 import logging
 import requests
 import threading
+import time
 from typing import Optional, Tuple
 from dotenv import load_dotenv
 from flask import Flask, request
@@ -1147,6 +1148,27 @@ def _handle_quote_upload(
 
     # Default: every new quote gets its own session
     state, _ = create_quote_session(doc_record, state)
+
+    # Batch window: if an unmatched invoice was held pending, check now
+    # whether the freshly-created quote session provides a match.
+    _pending = state.get("pending_invoice")
+    if _pending and time.time() - _pending.get("stored_at", 0) <= 60:
+        _inv_record = _pending["doc_record"]
+        _sid, _score, _ = find_best_matching_session(_inv_record, state)
+        if _sid and _score >= AUTO_MATCH_THRESHOLD:
+            state.pop("pending_invoice")
+            _inv_session = next(s for s in state["sessions"] if s["session_id"] == _sid)
+            state, _inv_session = attach_invoice_to_session(_inv_record, _inv_session, state)
+            _comparison = compare_documents(doc_record, _inv_record)
+            state = store_comparison_result(_inv_session, state, doc_record, _inv_record, _comparison)
+            logger.info(
+                "pending_invoice matched: quote_supplier=%s invoice_supplier=%s score=%d",
+                supplier, _inv_record.get("supplier_name"), _score,
+            )
+            return build_comparison_response(doc_record, _inv_record, _comparison), state
+    elif _pending:
+        state.pop("pending_invoice", None)  # expired
+
     return _make_response(
         decision="QUOTE RECEIVED",
         why=(
@@ -1212,16 +1234,19 @@ def _handle_invoice_upload(
             ],
         ), state
 
-    state, _ = create_pending_session(doc_record, state)
+    # Store invoice pending for up to 60 s so an upload of the matching
+    # quote in the same or immediately following message can batch-compare.
+    state["pending_invoice"] = {"doc_record": doc_record, "stored_at": time.time()}
+    logger.info("Invoice stored as pending: supplier=%s total=%s", supplier, total)
     return _make_response(
-        decision="INVOICE RECEIVED — NO MATCHING QUOTE",
+        decision="INVOICE RECEIVED",
         why=(
-            f"Invoice from {supplier} for {total} {currency} with {line_count} line items. "
-            f"No matching quote was found in this session."
+            f"Invoice from {supplier} for {total} {currency}. "
+            f"No matching quote found — upload the quote to run a comparison."
         ),
         actions=[
-            "Upload the quote that this invoice relates to",
-            "Say 'new comparison' to start a fresh session",
+            "Upload the matching quote",
+            "Or say 'new comparison' to reset",
         ],
     ), state
 
@@ -1490,8 +1515,11 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
 
     # Duplicate detection: skip re-processing a document already in this session
     _fp = doc_record.get("fingerprint")
-    if _fp and any(d.get("fingerprint") == _fp for d in state.get("documents", [])):
-        logger.info("PDF dispatch: duplicate fingerprint=%s supplier=%s — skipping", _fp, supplier)
+    if _fp and any(
+        d.get("fingerprint") == _fp and d.get("doc_type") == doc_type
+        for d in state.get("documents", [])
+    ):
+        logger.info("PDF dispatch: duplicate fingerprint=%s type=%s supplier=%s — skipping", _fp, doc_type, supplier)
         return _make_response(
             decision="DOCUMENT ALREADY PROCESSED",
             why=f"This document from {supplier} has already been uploaded in this session.",
@@ -1576,6 +1604,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if intent == "new_session":
         state = reset_user_sessions(state)
         state.pop("last_context", None)
+        state.pop("pending_invoice", None)
         return build_new_session_response(), state
 
     if intent == "quote_compare":
