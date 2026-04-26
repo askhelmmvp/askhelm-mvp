@@ -90,6 +90,15 @@ app = Flask(__name__)
 _IMAGE_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
 
 
+def _looks_like_pdf(file_path: str) -> bool:
+    """True when file starts with PDF magic bytes (%PDF) — content-type-agnostic."""
+    try:
+        with open(file_path, "rb") as fh:
+            return fh.read(4) == b"%PDF"
+    except Exception:
+        return False
+
+
 def download_file(url: str, content_type: str) -> str:
     ext_map = {
         "application/pdf": ".pdf",
@@ -1555,6 +1564,10 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
 
     if doc_type == "quote":
         answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+        _deliv = check_invoice_delivery_address(doc_record)
+        if _deliv["checked"] and answer:
+            note = DELIVERY_MATCH_NOTE if _deliv["match"] else DELIVERY_MISMATCH_NOTE
+            answer = answer + f"\n{note}"
     elif doc_type == "invoice":
         answer, state = _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
         _addr = check_invoice_billing_address(doc_record)
@@ -1836,7 +1849,14 @@ def whatsapp_reply():
                 file_path = download_file(media_url, media_type)
                 logger.info("File saved [%d/%d]: %s", i + 1, num_media, os.path.basename(file_path))
 
-                if media_type == "application/pdf":
+                if media_type == "application/pdf" or (
+                    media_type not in _IMAGE_CONTENT_TYPES and _looks_like_pdf(file_path)
+                ):
+                    if media_type != "application/pdf":
+                        logger.info(
+                            "Media [%d/%d]: content_type=%r — PDF magic bytes found, treating as PDF",
+                            i + 1, num_media, media_type,
+                        )
                     doc_record = _extract_pdf_to_doc_record(file_path)
                     logger.info(
                         "PDF extracted [%d/%d]: type=%s supplier=%s",
@@ -1914,11 +1934,11 @@ def whatsapp_reply():
                 answer = None  # invoice stored silently; fallback thread handles response
             else:
                 answer = _make_response(
-                    decision="FILE RECEIVED",
-                    why="Document saved.",
+                    decision="DOCUMENT NOT UNDERSTOOD",
+                    why="I could not classify this as a quote, invoice, or proforma.",
                     actions=[
-                        "PDF and image (JPEG, PNG) reading is enabled",
-                        "Upload another document for comparison",
+                        "Re-upload as PDF",
+                        "Or say what this document is",
                     ],
                 )
 
