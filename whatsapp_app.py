@@ -126,7 +126,11 @@ def convert_currency(amount, from_cur, to_cur):
 
 def normalise_doc_type(doc):
     raw = (doc.get("doc_type") or "").strip().lower()
-    if raw in ["quote", "quotation", "estimate", "proposal", "offer", "proforma"]:
+    if raw in ["quote", "quotation", "estimate", "proposal", "offer",
+               "proforma", "pro forma", "pro-forma",
+               "proforma invoice", "pro forma invoice", "pro-forma invoice"]:
+        doc["doc_type"] = "quote"
+    elif "proforma" in raw or "pro forma" in raw or "pro-forma" in raw:
         doc["doc_type"] = "quote"
     elif raw in ["invoice", "tax invoice", "commercial invoice", "final invoice"]:
         doc["doc_type"] = "invoice"
@@ -186,6 +190,8 @@ _MARKET_CHECK_CONTEXT_FALLBACK = (
     "• Send the make/model or part number\n"
     "• Or send another supplier quote for comparison"
 )
+
+_COMMODITY_KEYWORDS = frozenset(["filter", "matting", "bolt", "nut", "washer"])
 
 _MARKET_CHECK_DOC_CONTEXT_FALLBACK = (
     "DECISION:\nMORE DETAIL NEEDED\n\n"
@@ -408,11 +414,7 @@ def _build_actions(doc_type_a, doc_type_b, supplier_a, supplier_b, delta):
                 "Check that nothing has been omitted or deferred",
                 "Approve only once scope and delivery are confirmed",
             ]
-        return [
-            "Approve only after confirming scope was delivered as quoted",
-            "Check exclusions and assumptions one final time",
-            "Keep the quote and invoice linked for audit trail",
-        ]
+        return ["Approve — matches agreed quotation"]
 
     if both_quotes:
         if delta is not None and delta > 0:
@@ -485,6 +487,9 @@ def _classify_comparison(
     # Confidence override: ancillary-only delta + full core match → HIGH
     confidence = _confidence_label(match_score)
     if quote_to_invoice and ancillary_only and not missing_items:
+        confidence = "HIGH"
+    # Exact total match with no missing items is always HIGH confidence
+    if delta == 0 and not missing_items:
         confidence = "HIGH"
 
     return {
@@ -1008,7 +1013,8 @@ def _handle_document_market_check(
         answer = _MARKET_CHECK_CONTEXT_FALLBACK
     # We already have the quoted price in the context — never ask the user to resend it.
     # Replace any response that asks for the quoted price with a context-aware fallback.
-    if reused_quote_context and answer and "Send the quoted price" in answer:
+    _is_commodity = any(kw in (query + " " + doc_ctx).lower() for kw in _COMMODITY_KEYWORDS)
+    if reused_quote_context and answer and "Send the quoted price" in answer and not _is_commodity:
         logger.info("followup_market_check: replacing 'send quoted price' with doc-context fallback")
         answer = _MARKET_CHECK_DOC_CONTEXT_FALLBACK
         state["pending_clarification"] = {
