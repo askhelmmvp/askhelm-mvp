@@ -22,6 +22,14 @@ _PART_NUMBER_RE = re.compile(r'\b[A-Z0-9]{2,}-[A-Z0-9]{3,}\b', re.IGNORECASE)
 
 _PART_NUMBER_MARKERS = ("p/n", "part number", "part no", "part#", "pn:", "oem code")
 
+_COMMODITY_KEYWORDS = frozenset(["filter", "matting", "bolt", "nut", "washer", "consumables"])
+
+
+def _is_commodity_item(query: str) -> bool:
+    """True when query describes a commodity/consumable — price can be estimated without exact OEM validation."""
+    q = query.lower()
+    return any(kw in q for kw in _COMMODITY_KEYWORDS)
+
 
 def _has_part_number(query: str) -> bool:
     t = query.lower()
@@ -258,6 +266,12 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
             return _INSUFFICIENT_RESPONSE
 
         if confidence == CONFIDENCE_INSUFFICIENT:
+            # For commodity items pass Claude's WHY through instead of the generic
+            # "Send the quoted price" instruction — the price is already in context.
+            if _is_commodity_item(query):
+                result = _build_response(sections)
+                if result.strip():
+                    return result
             return _enforce_insufficient(sections)
 
         if confidence == CONFIDENCE_SIMILAR:

@@ -415,7 +415,18 @@ def _should_force_compare(invoice_doc: dict, session: dict, state: dict) -> bool
         return False
 
     matched = _count_matching_quote_items(inv_items, qte_items)
-    return matched / len(qte_items) >= 0.5
+    if matched / len(qte_items) >= 0.5:
+        return True
+
+    # Also force-compare when supplier matches and totals are within 20% —
+    # handles OCR/extraction variations where item descriptions differ.
+    inv_total = invoice_doc.get("total")
+    qte_total = anchor.get("total")
+    if (inv_total is not None and qte_total is not None and qte_total != 0
+            and abs(inv_total - qte_total) / abs(qte_total) <= 0.20):
+        return True
+
+    return False
 
 
 def find_best_matching_session(

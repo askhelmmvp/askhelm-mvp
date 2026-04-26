@@ -126,14 +126,11 @@ def convert_currency(amount, from_cur, to_cur):
 
 def normalise_doc_type(doc):
     raw = (doc.get("doc_type") or "").strip().lower()
-    if raw in ["quote", "quotation", "estimate", "proposal", "offer",
-               "proforma", "pro forma", "pro-forma",
-               "proforma invoice", "pro forma invoice", "pro-forma invoice"]:
-        doc["doc_type"] = "quote"
-    elif "proforma" in raw or "pro forma" in raw or "pro-forma" in raw:
-        doc["doc_type"] = "quote"
-    elif raw in ["invoice", "tax invoice", "commercial invoice", "final invoice"]:
+    # Invoice types — proforma is invoice-like in commercial practice
+    if "invoice" in raw or "proforma" in raw or "pro forma" in raw or "pro-forma" in raw:
         doc["doc_type"] = "invoice"
+    elif raw in ["quote", "quotation", "estimate", "proposal", "offer"]:
+        doc["doc_type"] = "quote"
     return doc
 
 
@@ -191,7 +188,15 @@ _MARKET_CHECK_CONTEXT_FALLBACK = (
     "• Or send another supplier quote for comparison"
 )
 
-_COMMODITY_KEYWORDS = frozenset(["filter", "matting", "bolt", "nut", "washer"])
+_COMMODITY_KEYWORDS = frozenset(["filter", "matting", "bolt", "nut", "washer", "consumables"])
+
+_COMMODITY_PRICE_CHECK_FALLBACK = (
+    "DECISION:\nINSUFFICIENT DATA\n\n"
+    "WHY:\nThis appears to be a standard commodity item. Exact pricing varies by brand and volume. Confidence: LOW.\n\n"
+    "ACTIONS:\n"
+    "• Get a second supplier quote to compare\n"
+    "• Commodity prices are generally within a standard market range"
+)
 
 _MARKET_CHECK_DOC_CONTEXT_FALLBACK = (
     "DECISION:\nMORE DETAIL NEEDED\n\n"
@@ -1014,15 +1019,19 @@ def _handle_document_market_check(
     # We already have the quoted price in the context — never ask the user to resend it.
     # Replace any response that asks for the quoted price with a context-aware fallback.
     _is_commodity = any(kw in (query + " " + doc_ctx).lower() for kw in _COMMODITY_KEYWORDS)
-    if reused_quote_context and answer and "Send the quoted price" in answer and not _is_commodity:
-        logger.info("followup_market_check: replacing 'send quoted price' with doc-context fallback")
-        answer = _MARKET_CHECK_DOC_CONTEXT_FALLBACK
-        state["pending_clarification"] = {
-            "intent": "market_check",
-            "doc_ctx": doc_ctx,
-            "comp_ctx": comp_ctx,
-            "original_query": query,
-        }
+    if reused_quote_context and answer and "Send the quoted price" in answer:
+        if _is_commodity:
+            logger.info("followup_market_check: commodity item, using commodity fallback")
+            answer = _COMMODITY_PRICE_CHECK_FALLBACK
+        else:
+            logger.info("followup_market_check: replacing 'send quoted price' with doc-context fallback")
+            answer = _MARKET_CHECK_DOC_CONTEXT_FALLBACK
+            state["pending_clarification"] = {
+                "intent": "market_check",
+                "doc_ctx": doc_ctx,
+                "comp_ctx": comp_ctx,
+                "original_query": query,
+            }
     state["last_context"] = {"type": "market_check", "topic": query, "result": answer}
     comp = extract_components_from_text(query, "market_check")
     if comp:
@@ -1478,6 +1487,16 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
     doc_type = doc_record["doc_type"]
 
     logger.info("PDF dispatching: type=%s supplier=%s total=%s %s", doc_type, supplier, total, currency)
+
+    # Duplicate detection: skip re-processing a document already in this session
+    _fp = doc_record.get("fingerprint")
+    if _fp and any(d.get("fingerprint") == _fp for d in state.get("documents", [])):
+        logger.info("PDF dispatch: duplicate fingerprint=%s supplier=%s — skipping", _fp, supplier)
+        return _make_response(
+            decision="DOCUMENT ALREADY PROCESSED",
+            why=f"This document from {supplier} has already been uploaded in this session.",
+            actions=["Upload a different document", "Or ask: what should I do?"],
+        ), state
 
     if doc_type == "quote":
         answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
