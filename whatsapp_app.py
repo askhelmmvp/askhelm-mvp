@@ -46,9 +46,12 @@ from domain.component_memory import (
 )
 from domain.invoice_address import (
     check_invoice_billing_address,
+    check_invoice_delivery_address,
     load_invoice_address,
     save_invoice_address,
     ADDRESS_MATCH_NOTE,
+    DELIVERY_MATCH_NOTE,
+    DELIVERY_MISMATCH_NOTE,
 )
 from services.reminder_service import (
     start_reminder_scheduler,
@@ -71,11 +74,6 @@ TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
 
 BASE_CURRENCY = "EUR"
-
-_intake_lock = threading.Lock()
-_intake_threads_active: set = set()
-_INTAKE_DEBOUNCE_SECONDS = 12
-_INTAKE_MAX_AGE_SECONDS = 60
 
 FX_RATES = {
     ("GBP", "EUR"): 1.1483,
@@ -1248,21 +1246,12 @@ def _handle_invoice_upload(
             ],
         ), state
 
-    # Store invoice pending for up to 60 s so an upload of the matching
-    # quote in the same or immediately following message can batch-compare.
+    # Store invoice silently — the matching quote webhook will check here and
+    # trigger an immediate comparison.  A fallback thread (started in the
+    # webhook handler) sends INVOICE RECEIVED via REST if no quote arrives.
     state["pending_invoice"] = {"doc_record": doc_record, "stored_at": time.time()}
-    logger.info("Invoice stored as pending: supplier=%s total=%s", supplier, total)
-    return _make_response(
-        decision="INVOICE RECEIVED",
-        why=(
-            f"Invoice from {supplier} for {total} {currency}. "
-            f"No matching quote found — upload the quote to run a comparison."
-        ),
-        actions=[
-            "Upload the matching quote",
-            "Or say 'new comparison' to reset",
-        ],
-    ), state
+    logger.info("Invoice stored silently pending quote: supplier=%s total=%s", supplier, total)
+    return "", state
 
 
 def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
@@ -1363,51 +1352,32 @@ def _process_images_background(file_paths: list, state: dict, user_id: str, phon
     _send_whatsapp_message(phone, body)
 
 
-def _process_intake_background(user_id: str, phone: str) -> None:
+def _invoice_pending_fallback(user_id: str, phone: str, fingerprint: str) -> None:
     """
-    Process deferred PDF docs after the intake debounce window expires.
-    Loads fresh state from disk so docs from concurrent webhooks
-    (same-sender multi-file upload sent as separate requests) are batched.
+    Send a deferred INVOICE RECEIVED if no quote matched within the debounce window.
+    Started when an invoice is stored silently so a concurrent quote webhook can
+    claim it first; the fallback fires only if pending_invoice is still unmatched.
     """
-    time.sleep(_INTAKE_DEBOUNCE_SECONDS)
-    with _intake_lock:
-        _intake_threads_active.discard(user_id)
-
+    time.sleep(15)
     state = load_user_state(user_id)
-    _now = time.time()
-    pending = [
-        p for p in state.pop("pending_intake", [])
-        if _now - p.get("received_at", 0) <= _INTAKE_MAX_AGE_SECONDS
-    ]
-    if not pending:
-        save_user_state(user_id, state)
-        return
-
-    logger.info(
-        "intake_background: processing pending_count=%d user=%s",
-        len(pending), user_id,
+    inv = state.get("pending_invoice") or {}
+    stored_fp = (inv.get("doc_record") or {}).get("fingerprint", "")
+    if stored_fp != fingerprint:
+        return  # quote arrived and matched, or newer invoice replaced it
+    doc = inv["doc_record"]
+    supplier = doc.get("supplier_name") or "Unknown supplier"
+    total = doc.get("total")
+    currency = doc.get("currency") or ""
+    msg = _make_response(
+        decision="INVOICE RECEIVED",
+        why=(
+            f"Invoice from {supplier} for {total} {currency}. "
+            "No matching quote found — upload the quote to run a comparison."
+        ),
+        actions=["Upload the matching quote", "Or say 'new comparison' to reset"],
     )
+    _send_whatsapp_message(phone, f"⚓ AskHelm \n\n{msg}")
 
-    pending.sort(key=lambda x: 0 if x["doc_record"].get("doc_type") == "quote" else 1)
-
-    pdf_answers: list = []
-    comparison_answer: Optional[str] = None
-    for item in pending:
-        att_answer, state = _dispatch_doc_record(item["doc_record"], state)
-        if not att_answer:
-            continue
-        pdf_answers.append(att_answer)
-        if "MATCH CONFIRMED" in att_answer or "Invoice matched" in att_answer:
-            comparison_answer = att_answer
-            break
-
-    if not pdf_answers:
-        save_user_state(user_id, state)
-        return
-
-    answer = comparison_answer if comparison_answer is not None else pdf_answers[-1]
-    save_user_state(user_id, state)
-    _send_whatsapp_message(phone, f"⚓ AskHelm \n\n{answer}")
 
 
 def _handle_images_upload(file_paths: list, state: dict) -> Tuple[str, dict]:
@@ -1590,8 +1560,13 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
         _addr = check_invoice_billing_address(doc_record)
         if _addr["checked"] and not _addr["match"]:
             answer = _addr["mismatch_response"]
-        elif _addr["checked"] and _addr["match"]:
-            answer = answer + f"\n\nAddress check: {ADDRESS_MATCH_NOTE}"
+        else:
+            if _addr["checked"] and _addr["match"] and answer:
+                answer = answer + f"\n\n{ADDRESS_MATCH_NOTE}"
+            _deliv = check_invoice_delivery_address(doc_record)
+            if _deliv["checked"] and answer:
+                note = DELIVERY_MATCH_NOTE if _deliv["match"] else DELIVERY_MISMATCH_NOTE
+                answer = answer + f"\n{note}"
     else:
         state, _ = create_pending_session(doc_record, state)
         answer = _make_response(
@@ -1681,7 +1656,6 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         state = reset_user_sessions(state)
         state.pop("last_context", None)
         state.pop("pending_invoice", None)
-        state.pop("pending_intake", None)
         return build_new_session_response(), state
 
     if intent == "quote_compare":
@@ -1888,78 +1862,69 @@ def whatsapp_reply():
                 )
                 thread.start()
 
-            # Phase 2: add PDFs to per-user intake buffer.
-            # If both a quote and invoice are now buffered, process immediately.
-            # Otherwise defer to a background thread after the debounce window so
-            # a second file arriving as a separate webhook request is included.
+            # Phase 2: dispatch PDFs — quotes first so an invoice in the same
+            # batch can find the freshly-created quote session.
+            # Invoices with no matching quote return "" silently; a fallback thread
+            # sends INVOICE RECEIVED via REST if no quote webhook arrives within 15 s.
+            pdf_doc_records.sort(key=lambda d: 0 if d.get("doc_type") == "quote" else 1)
+
             pdf_answers: list = []
             comparison_answer: Optional[str] = None
-            _intake_deferred = False
-            if pdf_doc_records:
-                _now_ts = time.time()
-                _intake = state.get("pending_intake") or []
-                for _dr in pdf_doc_records:
-                    _intake.append({"doc_record": _dr, "received_at": _now_ts})
-                state["pending_intake"] = _intake
-
-                _types = {item["doc_record"].get("doc_type") for item in _intake}
-                if "quote" in _types and "invoice" in _types:
-                    # Both types buffered — compare immediately and clear buffer
-                    state.pop("pending_intake")
-                    _sorted_intake = sorted(
-                        _intake,
-                        key=lambda x: 0 if x["doc_record"].get("doc_type") == "quote" else 1,
-                    )
-                    for _item in _sorted_intake:
-                        att_answer, state = _dispatch_doc_record(_item["doc_record"], state)
-                        if not att_answer:
-                            continue
-                        pdf_answers.append(att_answer)
-                        if "MATCH CONFIRMED" in att_answer or "Invoice matched" in att_answer:
-                            comparison_answer = att_answer
-                            break
-                else:
-                    # Single type — defer; thread waits for debounce window then processes
-                    with _intake_lock:
-                        if user_id not in _intake_threads_active:
-                            _intake_threads_active.add(user_id)
+            _any_silent = False
+            for doc_record in pdf_doc_records:
+                att_answer, state = _dispatch_doc_record(doc_record, state)
+                if not att_answer:
+                    # Detect silenced invoice: pending_invoice just stored (<5 s ago)
+                    if doc_record.get("doc_type") == "invoice":
+                        _inv = state.get("pending_invoice") or {}
+                        _fp = doc_record.get("fingerprint", "")
+                        if (
+                            _inv
+                            and (_inv.get("doc_record") or {}).get("fingerprint") == _fp
+                            and time.time() - _inv.get("stored_at", 0) < 5
+                        ):
                             threading.Thread(
-                                target=_process_intake_background,
-                                args=(user_id, phone),
+                                target=_invoice_pending_fallback,
+                                args=(user_id, phone, _fp),
                                 daemon=True,
                             ).start()
-                    _intake_deferred = True
-                    answer = None  # REST API sends real result after debounce window
+                            _any_silent = True
+                    continue  # no user-facing message for this doc
+                pdf_answers.append(att_answer)
+                if "MATCH CONFIRMED" in att_answer or "Invoice matched" in att_answer:
+                    comparison_answer = att_answer
+                    break
 
             logger.info(
-                "processed_docs=%d comparison_found=%s image_threads_started=%s intake_deferred=%s",
-                len(pdf_answers), comparison_answer is not None, image_started, _intake_deferred,
+                "processed_docs=%d comparison_found=%s image_threads_started=%s silent_invoice=%s",
+                len(pdf_answers), comparison_answer is not None, image_started, _any_silent,
             )
 
-            if not _intake_deferred:
-                if comparison_answer is not None:
-                    answer = comparison_answer
-                elif pdf_answers:
-                    answer = pdf_answers[-1]
-                elif image_started:
-                    answer = _make_response(
-                        decision="IMAGE RECEIVED",
-                        why="Processing your image now.",
-                        actions=["Wait for extraction result", "Or send another document"],
-                    )
-                else:
-                    answer = _make_response(
-                        decision="FILE RECEIVED",
-                        why="Document saved.",
-                        actions=[
-                            "PDF and image (JPEG, PNG) reading is enabled",
-                            "Upload another document for comparison",
-                        ],
-                    )
+            if comparison_answer is not None:
+                answer = comparison_answer
+            elif pdf_answers:
+                answer = pdf_answers[-1]
+            elif image_started:
+                answer = _make_response(
+                    decision="IMAGE RECEIVED",
+                    why="Processing your image now.",
+                    actions=["Wait for extraction result", "Or send another document"],
+                )
+            elif _any_silent:
+                answer = None  # invoice stored silently; fallback thread handles response
+            else:
+                answer = _make_response(
+                    decision="FILE RECEIVED",
+                    why="Document saved.",
+                    actions=[
+                        "PDF and image (JPEG, PNG) reading is enabled",
+                        "Upload another document for comparison",
+                    ],
+                )
 
-            # Skip main-thread state save only when images were uploaded without PDFs
-            # and no intake buffer is pending (background thread handles persistence).
-            if image_started and not pdf_answers and not _intake_deferred:
+            # Only skip main-thread state save when images were uploaded without PDFs
+            # (the background thread handles state persistence in that case).
+            if image_started and not pdf_answers and not _any_silent:
                 save_state = False
         else:
             answer, state = _handle_text_message(incoming, state, phone=phone)

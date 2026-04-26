@@ -18,7 +18,7 @@ _DEFAULT_ADDRESS_RAW = (
     "Cayman Islands"
 )
 
-ADDRESS_MATCH_NOTE = "Invoice address matches saved billing details."
+ADDRESS_MATCH_NOTE = "\u2705 Address check: Invoice address matches saved billing details."
 
 _MISMATCH_RESPONSE = (
     "DECISION:\nINVOICE ADDRESS MISMATCH\n\n"
@@ -28,6 +28,26 @@ _MISMATCH_RESPONSE = (
     "\u2022 Confirm correct legal entity and address\n"
     "\u2022 Do not approve until corrected"
 )
+
+# ---------------------------------------------------------------------------
+# Default vessel delivery / project details
+# ---------------------------------------------------------------------------
+
+_DEFAULT_DELIVERY_RAW = (
+    "Project H3\n"
+    "c/o Oceanco\n"
+    "Marineweg 1 & 5\n"
+    "2952 BX Alblasserdam\n"
+    "The Netherlands"
+)
+
+# Key identifiers accepted as a match — any two of these present = match
+_DELIVERY_KEY_TOKENS = frozenset([
+    "h3", "oceanco", "marineweg", "alblasserdam", "netherlands",
+])
+
+DELIVERY_MATCH_NOTE = "\u2705 Delivery check: Delivery address matches saved vessel/project details."
+DELIVERY_MISMATCH_NOTE = "\u26a0\ufe0f Delivery check: Delivery address does not match saved vessel/project details."
 
 
 # ---------------------------------------------------------------------------
@@ -73,7 +93,7 @@ def save_invoice_address(raw_text: str) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Normalisation and matching
+# Normalisation and matching helpers
 # ---------------------------------------------------------------------------
 
 _PO_BOX_RE = re.compile(r'\bp\.?\s*o\.?\s*box\b', re.IGNORECASE)
@@ -107,19 +127,15 @@ def _entity_matches(extracted_entity: str, saved_address: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Public API
+# Billing address check
 # ---------------------------------------------------------------------------
 
 def check_invoice_billing_address(doc_record: dict) -> dict:
     """
     Compare billing address extracted from doc_record against the saved vessel address.
 
-    Returns:
-        checked: False when no billing address was extracted — caller must not flag mismatch.
-        match:   True when address token overlap >= 0.70 AND entity name matches.
-        score:   Raw overlap score (0.0–1.0).
-        entity:  Extracted billing entity name.
-        mismatch_response: Full WhatsApp response string if mismatch, else None.
+    Returns {checked, match, score, entity, mismatch_response}.
+    checked=False when no billing address was extracted — caller must not flag mismatch.
     """
     billing = doc_record.get("billing_address") or {}
     entity = (billing.get("entity") or "").strip()
@@ -149,3 +165,39 @@ def check_invoice_billing_address(doc_record: dict) -> dict:
         "entity": entity,
         "mismatch_response": None if match else _MISMATCH_RESPONSE,
     }
+
+
+# ---------------------------------------------------------------------------
+# Delivery address check
+# ---------------------------------------------------------------------------
+
+def check_invoice_delivery_address(doc_record: dict) -> dict:
+    """
+    Check whether the delivery/ship-to address on the invoice matches the saved
+    vessel/project details.  Uses a lenient keyword match (2+ key identifiers).
+
+    Returns {checked, match}.
+    checked=False when no delivery address was extracted — caller must not flag mismatch.
+    """
+    delivery = doc_record.get("delivery_address") or {}
+    entity = (delivery.get("entity") or "").strip()
+    address_lines = delivery.get("address_lines") or []
+    country = (delivery.get("country") or "").strip()
+
+    if not entity and not address_lines and not country:
+        logger.info("delivery_address_check=False reason=no_delivery_address_extracted")
+        return {"checked": False, "match": True}
+
+    full_text = " ".join(filter(None, [entity] + list(address_lines) + [country]))
+    normalised = _normalize(full_text)
+    tokens = set(normalised.split())
+
+    matched_keys = _DELIVERY_KEY_TOKENS & tokens
+    match = len(matched_keys) >= 2
+
+    logger.info(
+        "delivery_address_check=True matched_keys=%s delivery_match=%s",
+        matched_keys, match,
+    )
+
+    return {"checked": True, "match": match}

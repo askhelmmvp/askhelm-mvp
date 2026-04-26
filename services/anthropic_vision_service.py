@@ -65,6 +65,11 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
             '    "country": "string|null",\n'
             '    "vat_number": "string|null"\n'
             '  },\n'
+            '  "delivery_address": {\n'
+            '    "entity": "string|null",\n'
+            '    "address_lines": ["string"],\n'
+            '    "country": "string|null"\n'
+            '  },\n'
             '  "line_items": [\n'
             "    {\n"
             '      "description": "string",\n'
