@@ -44,6 +44,12 @@ from domain.component_memory import (
     merge_components,
     build_component_context,
 )
+from domain.invoice_address import (
+    check_invoice_billing_address,
+    load_invoice_address,
+    save_invoice_address,
+    ADDRESS_MATCH_NOTE,
+)
 from services.reminder_service import (
     start_reminder_scheduler,
     strip_reminder_prefix,
@@ -1529,6 +1535,11 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
         answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
     elif doc_type == "invoice":
         answer, state = _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+        _addr = check_invoice_billing_address(doc_record)
+        if _addr["checked"] and not _addr["match"]:
+            answer = _addr["mismatch_response"]
+        elif _addr["checked"] and _addr["match"]:
+            answer = answer + f"\n\nAddress check: {ADDRESS_MATCH_NOTE}"
     else:
         state, _ = create_pending_session(doc_record, state)
         answer = _make_response(
@@ -1586,6 +1597,20 @@ def _handle_reminder_command(message: str, phone: str, state: dict) -> Tuple[str
 
 
 def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[str, dict]:
+    # Invoice address commands — handled before intent classification
+    _t = incoming.strip()
+    if _t.lower() == "show invoice address":
+        return f"SAVED INVOICE ADDRESS:\n\n{load_invoice_address()}", state
+    if _t.lower().startswith("set invoice address:"):
+        _new_addr = _t[len("set invoice address:"):].strip()
+        if not _new_addr:
+            return "Please include the new address after 'set invoice address:'", state
+        try:
+            save_invoice_address(_new_addr)
+            return f"INVOICE ADDRESS UPDATED:\n\n{_new_addr}", state
+        except Exception:
+            return "Failed to save invoice address. Please try again.", state
+
     intent = classify_text(incoming)
     last_ctx = state.get("last_context", {})
 

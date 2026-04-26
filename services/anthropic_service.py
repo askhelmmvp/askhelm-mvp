@@ -44,6 +44,7 @@ def extract_commercial_document_with_claude(text: str) -> dict:
             "- Prefer partial grounded extraction over empty fields.\n"
             "\n"
             "Return exactly this JSON schema:\n"
+            "Extract billing_address from the document's bill-to / customer section.\n"
             "{\n"
             '  "doc_type": "quote|invoice|null",\n'
             '  "supplier_name": "string|null",\n'
@@ -55,6 +56,12 @@ def extract_commercial_document_with_claude(text: str) -> dict:
             '  "total": "number|null",\n'
             '  "exclusions": ["string"],\n'
             '  "assumptions": ["string"],\n'
+            '  "billing_address": {\n'
+            '    "entity": "string|null",\n'
+            '    "address_lines": ["string"],\n'
+            '    "country": "string|null",\n'
+            '    "vat_number": "string|null"\n'
+            '  },\n'
             '  "line_items": [\n'
             "    {\n"
             '      "description": "string",\n'

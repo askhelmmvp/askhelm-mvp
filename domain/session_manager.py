@@ -138,6 +138,7 @@ def make_document_record(extracted: dict, file_path: str) -> dict:
         "exclusions": extracted.get("exclusions") or [],
         "assumptions": extracted.get("assumptions") or [],
         "fingerprint": make_fingerprint(line_items),
+        "billing_address": extracted.get("billing_address") or {},
         "status": "new",
         "uploaded_at": _now(),
         "session_id": None,
