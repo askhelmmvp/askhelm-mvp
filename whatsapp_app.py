@@ -50,6 +50,7 @@ from domain.invoice_address import (
     load_invoice_address,
     save_invoice_address,
     ADDRESS_MATCH_NOTE,
+    ADDRESS_MISMATCH_NOTE,
     DELIVERY_MATCH_NOTE,
     DELIVERY_MISMATCH_NOTE,
 )
@@ -1590,22 +1591,25 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
 
     if doc_type == "quote":
         answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
-        _deliv = check_invoice_delivery_address(doc_record)
-        if _deliv["checked"] and answer:
-            note = DELIVERY_MATCH_NOTE if _deliv["match"] else DELIVERY_MISMATCH_NOTE
-            answer = answer + f"\n{note}"
+        if answer:
+            _notes = []
+            _deliv = check_invoice_delivery_address(doc_record)
+            if _deliv["checked"]:
+                _notes.append(DELIVERY_MATCH_NOTE if _deliv["match"] else DELIVERY_MISMATCH_NOTE)
+            if _notes:
+                answer = answer + "\n\n" + "\n".join(_notes)
     elif doc_type in ("invoice", "proforma"):
         answer, state = _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
-        _addr = check_invoice_billing_address(doc_record)
-        if _addr["checked"] and not _addr["match"]:
-            answer = _addr["mismatch_response"]
-        else:
-            if _addr["checked"] and _addr["match"] and answer:
-                answer = answer + f"\n\n{ADDRESS_MATCH_NOTE}"
+        if answer:
+            _notes = []
             _deliv = check_invoice_delivery_address(doc_record)
-            if _deliv["checked"] and answer:
-                note = DELIVERY_MATCH_NOTE if _deliv["match"] else DELIVERY_MISMATCH_NOTE
-                answer = answer + f"\n{note}"
+            if _deliv["checked"]:
+                _notes.append(DELIVERY_MATCH_NOTE if _deliv["match"] else DELIVERY_MISMATCH_NOTE)
+            _addr = check_invoice_billing_address(doc_record)
+            if _addr["checked"]:
+                _notes.append(ADDRESS_MATCH_NOTE if _addr["match"] else ADDRESS_MISMATCH_NOTE)
+            if _notes:
+                answer = answer + "\n\n" + "\n".join(_notes)
     else:
         state, _ = create_pending_session(doc_record, state)
         answer = _make_response(

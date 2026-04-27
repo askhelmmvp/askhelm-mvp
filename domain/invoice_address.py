@@ -19,6 +19,7 @@ _DEFAULT_ADDRESS_RAW = (
 )
 
 ADDRESS_MATCH_NOTE = "\u2705 Address check: Invoice address matches saved billing details."
+ADDRESS_MISMATCH_NOTE = "\u26a0\ufe0f Address check: Invoice address does not match saved billing details."
 
 _MISMATCH_RESPONSE = (
     "DECISION:\nINVOICE ADDRESS MISMATCH\n\n"
@@ -46,8 +47,8 @@ _DELIVERY_KEY_TOKENS = frozenset([
     "h3", "oceanco", "marineweg", "alblasserdam", "netherlands",
 ])
 
-DELIVERY_MATCH_NOTE = "\u2705 Delivery check: Delivery address matches saved vessel/project details."
-DELIVERY_MISMATCH_NOTE = "\u26a0\ufe0f Delivery check: Delivery address does not match saved vessel/project details."
+DELIVERY_MATCH_NOTE = "\u2705 Address check: Delivery address matches saved delivery details."
+DELIVERY_MISMATCH_NOTE = "\u26a0\ufe0f Address check: Delivery address does not match saved delivery details."
 
 
 # ---------------------------------------------------------------------------
