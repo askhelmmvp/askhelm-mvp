@@ -1020,9 +1020,14 @@ def _build_document_context(state: dict) -> str:
     if item_strs:
         parts.append("Items: " + "; ".join(item_strs))
 
+    subtotal = doc.get("subtotal")
+    tax = doc.get("tax")
+    if subtotal is not None:
+        parts.append(f"Subtotal: {subtotal} {currency}".strip())
+    if tax is not None and tax > 0:
+        parts.append(f"Tax: {tax} {currency}".strip())
     if total is not None:
-        total_str = f"{total} {currency}".strip()
-        parts.append(f"Total: {total_str}")
+        parts.append(f"Total: {total} {currency}".strip())
 
     return "\n".join(parts)
 
@@ -1568,17 +1573,16 @@ def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
         logger.info("Image upload: type=%s supplier=%s total=%s %s for %s",
                     doc_type, supplier, total, currency, fname)
 
-        if doc_type in ("quote", "invoice"):
-            logger.info("Image upload: branch=commercial reply=IMAGE_PROCESSED")
-            state, _ = create_pending_session(doc_record, state)
-            return _make_response(
-                decision="IMAGE PROCESSED",
-                why=f"Extracted a {doc_type} from {supplier}. Total: {total} {currency}.",
-                actions=[
-                    "show extraction",
-                    "upload another document to compare",
-                ],
-            ), state
+        line_count = len(doc_record["line_items"])
+        if doc_type == "quote":
+            logger.info("Image upload: branch=quote for %s", fname)
+            answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
+            return answer, state
+
+        if doc_type == "invoice":
+            logger.info("Image upload: branch=invoice for %s", fname)
+            answer, state = _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
+            return answer, state
 
         # doc_type is "unknown" — readable but not a recognisable commercial format
         logger.info("Image upload: branch=unknown reply=IMAGE_PROCESSED_UNKNOWN")
@@ -2038,11 +2042,7 @@ def whatsapp_reply():
             elif pdf_answers:
                 answer = pdf_answers[-1]
             elif image_started:
-                answer = _make_response(
-                    decision="IMAGE RECEIVED",
-                    why="Processing your image now.",
-                    actions=["Wait for extraction result", "Or send another document"],
-                )
+                answer = None  # ACK already sent; background thread delivers the result
             elif _any_silent:
                 answer = None  # invoice stored silently; fallback thread handles response
             elif _dup_left_no_docs:

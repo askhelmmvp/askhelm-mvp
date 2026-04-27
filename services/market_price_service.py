@@ -281,6 +281,138 @@ def _is_fully_specified_commodity(query: str) -> bool:
     return _has_quantity_and_unit(query) and _has_region(query)
 
 
+# ---------------------------------------------------------------------------
+# Query enrichment: VAT reconciliation and unit price pre-computation
+# Runs before every Claude call so LLM sees correct accounting context.
+# ---------------------------------------------------------------------------
+
+_VAT_KEYWORD_RE = re.compile(r'\b(VAT|BTW|TVA|MwSt)\b', re.IGNORECASE)
+
+# Matches labeled financial amounts at the start of a line:
+#   "Subtotal: 601.35", "Tax: 131.49 EUR", "Total: 757.84"
+_LABELED_AMOUNT_RE = re.compile(
+    r'^\s*(subtotal|sub-total|net total|grand total|tax|vat|btw|tva|mwst|'
+    r'shipping|freight|delivery|total)\b'
+    r'[^€$£\d\n]{0,20}[€$£]?\s*([\d][,\d]*\.?\d*)',
+    re.IGNORECASE | re.MULTILINE,
+)
+
+# Shipping amounts embedded in document-context item lines: "Shipping (25.00 EUR)"
+_ITEM_SHIPPING_RE = re.compile(
+    r'\b(shipping|freight|delivery)\b[^(\n]{0,30}\(\s*[€$£]?\s*([\d,]+\.?\d*)',
+    re.IGNORECASE,
+)
+
+# "3 x 20L" multi-unit quantity expression
+_MULTI_UNIT_DETAIL_RE = re.compile(
+    r'(\d+)\s*[xX×]\s*(\d+(?:\.\d+)?)\s*(L\b|litres?\b|liters?\b|kg\b)',
+    re.IGNORECASE,
+)
+
+
+def _parse_amount(s):
+    try:
+        return float(s.replace(',', '').strip())
+    except (ValueError, AttributeError):
+        return None
+
+
+def _enrich_query_with_calculations(query: str) -> str:
+    """
+    Pre-process a pricing query before passing to Claude:
+    1. Detect VAT/BTW/TVA/MwSt and reconcile totals — prevents false
+       'unexplained gap' decisions when subtotal + shipping + VAT ≈ total.
+    2. Compute per-unit and per-litre price for multi-unit orders (e.g. 3 x 20L).
+    3. Assess shipping charge reasonableness.
+    Appends a CALCULATED CONTEXT block; returns original query when nothing found.
+    """
+    notes = []
+    amounts = {}
+
+    # Parse amounts from labeled lines (e.g. "Subtotal: 601.35", "Tax: 131.49")
+    for m in _LABELED_AMOUNT_RE.finditer(query):
+        label = m.group(1).lower().strip()
+        val = _parse_amount(m.group(2))
+        if val is None or val <= 0:
+            continue
+        if label in ('vat', 'btw', 'tva', 'mwst', 'tax'):
+            amounts.setdefault('vat', val)
+        elif label in ('subtotal', 'sub-total', 'net total'):
+            amounts.setdefault('subtotal', val)
+        elif label in ('shipping', 'freight', 'delivery'):
+            amounts.setdefault('shipping', val)
+        elif label in ('grand total', 'total'):
+            amounts.setdefault('total', val)
+
+    # Fallback: shipping from document-context item format "Shipping (25.00 EUR)"
+    if 'shipping' not in amounts:
+        m_ship = _ITEM_SHIPPING_RE.search(query)
+        if m_ship:
+            val = _parse_amount(m_ship.group(2))
+            if val and val > 0:
+                amounts['shipping'] = val
+
+    subtotal = amounts.get('subtotal')
+    vat = amounts.get('vat')
+    shipping = amounts.get('shipping') or 0.0
+    total = amounts.get('total')
+
+    # VAT reconciliation
+    if subtotal and vat and total:
+        reconciled = subtotal + shipping + vat
+        tolerance = max(1.0, total * 0.01)
+        if abs(reconciled - total) <= tolerance:
+            notes.append(
+                f"VAT RECONCILIATION NOTE: Subtotal {subtotal:.2f} + shipping {shipping:.2f} "
+                f"+ VAT {vat:.2f} = {reconciled:.2f} ≈ total {total:.2f}. "
+                "VAT accounts for the difference to total. Totals are fully reconciled — "
+                "do NOT flag an unexplained gap."
+            )
+    elif _VAT_KEYWORD_RE.search(query) and subtotal:
+        notes.append(
+            f"NOTE: VAT is present. Use the subtotal ({subtotal:.2f}) as the pre-tax "
+            "base for price assessment — do not flag a discrepancy due to VAT."
+        )
+
+    # Shipping note
+    if shipping > 0:
+        if shipping <= 60:
+            ship_note = "reasonable for NL/EU short-haul"
+        elif shipping <= 150:
+            ship_note = "moderate — check if standard for this supplier location"
+        else:
+            ship_note = "high — verify this is expected for the route"
+        notes.append(
+            f"SHIPPING NOTE: Shipping {shipping:.2f} is separate from the product cost "
+            f"({ship_note})."
+        )
+
+    # Unit price and per-litre calculation for multi-unit orders
+    multi = _MULTI_UNIT_DETAIL_RE.search(query)
+    base = subtotal or (total if not vat else None)
+    if multi and base:
+        qty = int(multi.group(1))
+        unit_size = float(multi.group(2))
+        unit_label = multi.group(3).rstrip('s').lower()
+        if qty > 0:
+            unit_price = base / qty
+            notes.append(
+                f"UNIT PRICE NOTE: {base:.2f} / {qty} = {unit_price:.2f} per "
+                f"{unit_size:.0f}{unit_label.upper()} container. "
+                "Use this per-unit price for assessment, not the order total."
+            )
+            if unit_label in ('l', 'litre', 'liter') and unit_size > 0:
+                ppl = unit_price / unit_size
+                notes.append(
+                    f"PRICE PER LITRE: {unit_price:.2f} / {unit_size:.0f}L = {ppl:.2f}/L. "
+                    "Use this rate for the price judgement."
+                )
+
+    if not notes:
+        return query
+    return query + "\n\nCALCULATED CONTEXT:\n" + "\n".join(notes)
+
+
 _COMMODITY_ASSESSMENT_PROMPT = """\
 You are a Chief Engineer estimating commodity marine supply costs via WhatsApp.
 
@@ -293,6 +425,11 @@ RULES:
 - Do NOT state exact prices — use ranges (e.g. "€X\u2013€Y per unit", "€X\u2013€Y total").
 - Do NOT ask clarifying questions.
 - Use EU/NL market rates where Netherlands or European context is present.
+- If a "VAT RECONCILIATION NOTE" is present: state "VAT accounts for the difference to total."
+  Do NOT mention an unexplained discrepancy — the totals are confirmed reconciled.
+- If a "UNIT PRICE NOTE" is present: use the stated per-unit price for your assessment.
+- If a "PRICE PER LITRE" is present: use that rate for your price judgement.
+- If a "SHIPPING NOTE" is present: incorporate the shipping assessment in your WHY sentence.
 - DECISION must be one of:
     PRICE RANGE ESTIMATE
     ACCEPTABLE PRICE
@@ -356,6 +493,10 @@ Do NOT return INSUFFICIENT DATA because totals do not reconcile perfectly, VAT i
 or line-item breakdown is incomplete. Commercial judgement takes priority over accounting validation.
 If a VAT or total discrepancy is noticed: mention it briefly in WHY, use \U0001f7e0 MEDIUM confidence,
 but still return a price judgement — never block the decision.
+If a "VAT RECONCILIATION NOTE" is present: totals are confirmed reconciled — state this, do NOT flag a gap.
+If a "UNIT PRICE NOTE" is present: use the stated per-unit price, not the order total.
+If a "PRICE PER LITRE" is present: use that rate for the price judgement.
+If a "SHIPPING NOTE" is present: incorporate the shipping assessment in your WHY sentence.
 
 Pick ONE mode based on the query — nothing else:
 
@@ -492,6 +633,7 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
     so Claude can return a best-effort similar_item_estimate.
     """
     logger.info("Market check: query=%r allow_broad_estimate=%s", query[:120], allow_broad_estimate)
+    query = _enrich_query_with_calculations(query)
     query_has_part_number = _has_part_number(query)
 
     # Assembly-scope check: stern drive / transom work with no model → ask first.
