@@ -956,6 +956,31 @@ def _handle_action_request(
 
 _VAGUE_DOC_REF_WORDS = frozenset({"this", "these", "it", "them"})
 
+# Words that indicate a standalone reply rather than additional spec/context.
+_CONTINUATION_STOP_WORDS = frozenset([
+    "yes", "no", "ok", "okay", "cancel", "stop", "done", "thanks", "thank",
+])
+
+
+def _is_context_continuation(incoming: str, last_ctx: dict) -> bool:
+    """
+    True when a short, unrecognised message looks like additional detail
+    (spec, location, model number) extending a recent market_check query.
+
+    Heuristic:
+    - last_context must be a market_check
+    - message must be fewer than 8 words
+    - message must not be a stop/acknowledgement word
+    """
+    if not last_ctx or last_ctx.get("type") != "market_check":
+        return False
+    words = incoming.split()
+    if len(words) >= 8:
+        return False
+    if any(w.lower().strip("?.,!") in _CONTINUATION_STOP_WORDS for w in words):
+        return False
+    return True
+
 
 def _has_vague_document_reference(query: str) -> bool:
     """True when the query contains a pronoun that likely refers to an uploaded document."""
@@ -1706,6 +1731,22 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if _pending and _pending.get("intent") == "market_check" and intent == "unknown":
         logger.info("market_check_clarification: consuming pending clarification for incoming=%r", incoming[:60])
         return _handle_market_check_clarification(incoming, _pending, state)
+
+    # Context continuation: short additional detail (spec, location, model) that
+    # extends a recent market_check when no explicit intent was recognised.
+    # Only fires for intent=unknown so commands like "compare quotes" are never
+    # swallowed. Merges incoming detail with the stored topic and re-runs the
+    # market check with full doc/component context.
+    if intent == "unknown" and _is_context_continuation(incoming, last_ctx):
+        _orig = last_ctx.get("topic", "")
+        _combined = f"{_orig}\nUser clarification: {incoming}" if _orig else incoming
+        _doc_ctx = _build_document_context(state)
+        _comp_ctx = build_component_context(state)
+        logger.info(
+            "context_continuation: re-running market_check orig_topic=%r incoming=%r",
+            _orig[:60], incoming[:60],
+        )
+        return _handle_document_market_check(_combined, state, _doc_ctx, _comp_ctx)
 
     if intent == "greeting":
         return "Ready.\n\nSend your question or upload a document.", state
