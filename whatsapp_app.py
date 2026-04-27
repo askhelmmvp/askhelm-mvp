@@ -1580,14 +1580,18 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
 
     logger.info("PDF dispatching: type=%s supplier=%s total=%s %s", doc_type, supplier, total, currency)
 
-    # Duplicate detection: skip re-processing a document already in this session
+    # Duplicate detection: skip re-processing a document already in this session.
+    # Returns a sentinel so the batch loop can distinguish this from a silent invoice.
     _fp = doc_record.get("fingerprint")
     if _fp and any(
         d.get("fingerprint") == _fp and d.get("doc_type") == doc_type
         for d in state.get("documents", [])
     ):
-        logger.info("PDF dispatch: duplicate fingerprint=%s type=%s supplier=%s — silent skip", _fp, doc_type, supplier)
-        return "", state  # silently ignored by the batch loop
+        logger.info(
+            "PDF dispatch: duplicate_skipped=True fingerprint=%s type=%s supplier=%s",
+            _fp, doc_type, supplier,
+        )
+        return "__duplicate__", state
 
     if doc_type == "quote":
         answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
@@ -1921,8 +1925,12 @@ def whatsapp_reply():
             pdf_answers: list = []
             comparison_answer: Optional[str] = None
             _any_silent = False
+            _skipped_duplicates: list = []
             for doc_record in pdf_doc_records:
                 att_answer, state = _dispatch_doc_record(doc_record, state)
+                if att_answer == "__duplicate__":
+                    _skipped_duplicates.append(doc_record)
+                    continue
                 if not att_answer:
                     # Detect silenced invoice/proforma: pending_invoice just stored (<5 s ago)
                     if doc_record.get("doc_type") in ("invoice", "proforma"):
@@ -1945,9 +1953,15 @@ def whatsapp_reply():
                     comparison_answer = att_answer
                     break
 
+            _dup_left_no_docs = (
+                bool(_skipped_duplicates) and not pdf_answers
+                and not _any_silent and not image_started
+            )
             logger.info(
-                "processed_docs=%d comparison_found=%s image_threads_started=%s silent_invoice=%s",
+                "processed_docs=%d comparison_found=%s image_threads_started=%s "
+                "silent_invoice=%s duplicate_skipped=%s duplicate_left_no_processed_docs=%s",
                 len(pdf_answers), comparison_answer is not None, image_started, _any_silent,
+                bool(_skipped_duplicates), _dup_left_no_docs,
             )
 
             if comparison_answer is not None:
@@ -1962,6 +1976,19 @@ def whatsapp_reply():
                 )
             elif _any_silent:
                 answer = None  # invoice stored silently; fallback thread handles response
+            elif _dup_left_no_docs:
+                _dup = _skipped_duplicates[0]
+                _dup_supplier = _dup.get("supplier_name") or "Unknown supplier"
+                _dup_type = _dup.get("doc_type") or "document"
+                answer = _make_response(
+                    decision="DOCUMENT ALREADY PROCESSED",
+                    why=f"This {_dup_supplier} {_dup_type} has already been uploaded in this session.",
+                    actions=[
+                        "Upload the matching invoice or proforma",
+                        'Or say "new comparison" to reset',
+                    ],
+                )
+                logger.info("duplicate_response_sent=True supplier=%s type=%s", _dup_supplier, _dup_type)
             else:
                 answer = _make_response(
                     decision="DOCUMENT NOT UNDERSTOOD",
