@@ -239,8 +239,9 @@ def reset_user_sessions(state: dict, trigger_source: str = "unknown") -> dict:
     for s in state["sessions"]:
         s["status"] = "closed"
     state["active_session_id"] = None
+    state["documents"] = []  # clears fingerprint cache so re-uploads are not skipped as duplicates
     logger.info(
-        "All sessions reset for user %s reset_trigger_source=%s",
+        "All sessions reset for user %s reset_trigger_source=%s reset_cleared_duplicate_cache=True",
         state.get("user_id"), trigger_source,
     )
     return state

@@ -1710,6 +1710,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         state = reset_user_sessions(state, trigger_source="user_command")
         state.pop("last_context", None)
         state.pop("pending_invoice", None)
+        state.pop("pending_clarification", None)
         return build_new_session_response(), state
 
     if intent == "quote_compare":
@@ -1863,10 +1864,12 @@ def whatsapp_reply():
     )
     # For image uploads the background thread saves state; skip the main-thread save.
     save_state = True
+    _was_media = False  # True when request contained media; reply goes via REST not TwiML
 
     try:
         incoming = request.form.get("Body", "").strip()
         num_media = int(request.form.get("NumMedia") or 0)
+        _was_media = num_media > 0
 
         if num_media > 0:
             logger.info("Inbound media: media_count=%d", num_media)
@@ -2040,12 +2043,22 @@ def whatsapp_reply():
     resp = MessagingResponse()
     if answer is not None:
         body = f"⚓ AskHelm \n\n{answer}"
-        logger.info(
-            "outbound_whatsapp: method=TwiML to=%s body_length=%d body_empty=%s "
-            "save_state=%s user=%s reply_body_preview=%r",
-            phone, len(body), not body.strip(), save_state, user_id, body[:500],
-        )
-        resp.message(body)
+        if _was_media:
+            # Document/media replies go via REST so Twilio webhook can return 200 quickly.
+            logger.info(
+                "outbound_whatsapp: method=REST final_response=True to=%s body_length=%d "
+                "body_empty=%s user=%s reply_body_preview=%r",
+                phone, len(body), not body.strip(), user_id, body[:500],
+            )
+            _send_whatsapp_message(phone, body)
+            # Return empty TwiML — REST call above delivers the actual reply.
+        else:
+            logger.info(
+                "outbound_whatsapp: method=TwiML to=%s body_length=%d body_empty=%s "
+                "save_state=%s user=%s reply_body_preview=%r",
+                phone, len(body), not body.strip(), save_state, user_id, body[:500],
+            )
+            resp.message(body)
     else:
         logger.info(
             "outbound_whatsapp: method=TwiML to=%s body_empty=True deferred=True "
