@@ -204,10 +204,8 @@ def _no_comparison_response() -> str:
 
 _DOCUMENT_RECEIVED_ACK = (
     "\u2693 AskHelm\n\n"
-    "DECISION:\nDOCUMENT RECEIVED\n\n"
-    "WHY:\nProcessing now.\n\n"
-    "RECOMMENDED ACTIONS:\n"
-    "\u2022 I'll send the result shortly"
+    "Processing document\u2026\n"
+    "I'll send the result shortly."
 )
 
 _MARKET_CHECK_CONTEXT_FALLBACK = (
@@ -1827,7 +1825,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             answer = check_market_price(combined, allow_broad_estimate=True)
             state["last_context"] = {"type": "market_check", "topic": incoming, "result": answer}
             return answer, state
-        # No usable context — fall through to TEXT RECEIVED
+        # No usable context — fall through to DOCUMENT NOT UNDERSTOOD
 
     if intent == "reminder":
         return _handle_reminder_command(incoming, phone, state)
@@ -1852,7 +1850,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     # Context-aware fallback: if we have recent document or component context
     # and the message looks like a question, try to answer it using that
-    # context rather than returning a generic TEXT RECEIVED response.
+    # context rather than returning a generic fallback response.
     _doc_ctx = _build_document_context(state)
     _comp_ctx = build_component_context(state)
     if _doc_ctx or _comp_ctx:
@@ -1881,8 +1879,8 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             return answer, state
 
     return _make_response(
-        decision="TEXT RECEIVED",
-        why="No file was attached and no follow-up command was recognised.",
+        decision="DOCUMENT NOT UNDERSTOOD",
+        why="No file was attached and no recognised command was sent.",
         actions=[
             "Send a PDF to begin",
             "Or try: compare quotes",
