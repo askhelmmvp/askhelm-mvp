@@ -42,6 +42,18 @@ def _has_part_number(query: str) -> bool:
     return any(marker in t for marker in _PART_NUMBER_MARKERS)
 
 
+# Detects a specific price value in the query (currency symbol or code + digits).
+_PRICE_IN_QUERY_RE = re.compile(
+    r'(?:[€$£¥]\s*[\d,.]+|[\d,.]+\s*(?:EUR|GBP|USD|NOK|DKK|SEK|AED|SGD)\b)',
+    re.IGNORECASE,
+)
+
+
+def _has_price_in_query(query: str) -> bool:
+    """True when a specific monetary price appears in the query text."""
+    return bool(_PRICE_IN_QUERY_RE.search(query))
+
+
 # ---------------------------------------------------------------------------
 # Assembly-scope detection
 # Fired when the query covers a major mechanical assembly but has no model
@@ -337,6 +349,14 @@ def _assess_commodity_price(query: str) -> str:
 _SYSTEM_PROMPT = """\
 You are a Chief Engineer. A crew member has asked about marine parts or service pricing via WhatsApp.
 
+PRIORITY RULE:
+When a recognisable product and a specific price are both present, ALWAYS return a commercial
+price judgement (ACCEPTABLE PRICE, HIGH PRICE — QUERY, or LOW PRICE — OPPORTUNITY).
+Do NOT return INSUFFICIENT DATA because totals do not reconcile perfectly, VAT is unclear,
+or line-item breakdown is incomplete. Commercial judgement takes priority over accounting validation.
+If a VAT or total discrepancy is noticed: mention it briefly in WHY, use \U0001f7e0 MEDIUM confidence,
+but still return a price judgement — never block the decision.
+
 Pick ONE mode based on the query — nothing else:
 
 MODE A — Exact OEM part number present, cannot verify exact market price:
@@ -362,10 +382,11 @@ ACTIONS:
 
 MODE C — A specific price appears in the query:
 DECISION:
-<ACCEPTABLE PRICE | HIGH PRICE — QUERY | LOW PRICE — OPPORTUNITY | INSUFFICIENT DATA>
+<ACCEPTABLE PRICE | HIGH PRICE — QUERY | LOW PRICE — OPPORTUNITY>
 
 WHY:
 <one sentence max — end with "Confidence: \U0001f7e2 HIGH / \U0001f7e0 MEDIUM / \U0001f534 LOW">
+If totals do not reconcile (e.g. VAT gap): still give a judgement, use \U0001f7e0 MEDIUM, note briefly.
 
 ACTIONS:
 • <action 1>
@@ -375,7 +396,9 @@ RULES:
 - Use MODE A when a specific OEM part number is present and you cannot confidently price it.
 - Use MODE B when no price was given and the item is estimable (e.g. service type, general component).
 - Use MODE C when a specific price appears in the question.
-- If the query has a price but the item is too vague to assess: use MODE C with DECISION INSUFFICIENT DATA and one short clarifying question.
+- In MODE C DECISION must be ACCEPTABLE PRICE, HIGH PRICE — QUERY, or LOW PRICE — OPPORTUNITY.
+  INSUFFICIENT DATA is NOT permitted in MODE C — a price is present so always give a judgement.
+- If the query has a price but the product is vague: use MODE C, give best judgement, use \U0001f534 LOW confidence.
 - DECISION must always be one of: ACCEPTABLE PRICE, HIGH PRICE — QUERY, LOW PRICE — OPPORTUNITY, INSUFFICIENT DATA. Never use "High", "Low", "Reasonable", "Unclear", or any other label.
 - WHY: one sentence only. End with "Confidence: \U0001f7e2 HIGH", "Confidence: \U0001f7e0 MEDIUM", or "Confidence: \U0001f534 LOW". No lists, no caveats, no padding.
 - ACTIONS: max 2 bullets. For MODE B, one bullet is the clarifying question.
@@ -521,8 +544,13 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
             return _INSUFFICIENT_RESPONSE
 
         if confidence == CONFIDENCE_INSUFFICIENT:
-            # For commodity items pass Claude's WHY through instead of the generic
-            # "Send the quoted price" instruction — the price is already in context.
+            # Price present + commodity: Claude was blocked (e.g. VAT discrepancy) but
+            # enough context exists for a judgement — route to commodity assessment.
+            if _is_commodity_item(query) and _has_price_in_query(query):
+                logger.info("Market check: commodity + price → commodity assessment (overriding insufficient)")
+                return _assess_commodity_price(query)
+            # For commodity items without a specific price: pass Claude's WHY through
+            # (contains a useful range) instead of the generic "send quoted price" reply.
             if _is_commodity_item(query):
                 result = _build_response(sections)
                 if result.strip():
