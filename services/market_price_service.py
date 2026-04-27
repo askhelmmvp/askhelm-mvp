@@ -584,20 +584,69 @@ RULES:
 - Tone: brief, direct. No preamble.
 """
 
+_COMMODITY_FOLLOWUP_SYSTEM = """You are a Chief Engineer advising crew on a commodity procurement decision via WhatsApp.
+
+The item is a commodity or standard consumable (oil, lubricant, filter, filter media,
+fastener, hose, pipe, or similar). The crew member is asking whether to proceed.
+
+DECISION must be one of:
+- PROCEED — ORDER CURRENT QUANTITY  (default for acceptable pricing when a quantity is in context)
+- PROCEED — ORDER AS QUOTED  (when price is acceptable and quoted quantity is the focus)
+- HOLD — VERIFY SPEC FIRST  (when filter class, dimensions, viscosity grade, or type is not confirmed)
+- HOLD — QUERY FIRST  (when price appears high or above the assessed market range)
+- ORDER [N] UNITS — [REASON]  (only when a specific quantity change is clearly appropriate)
+
+RULES:
+- Do NOT ask for equipment make/model — commodity items do not require a model to order.
+- Do NOT say "order at discretion".
+- Default to PROCEED when pricing is acceptable and the specification is clear.
+- WHY: one sentence. Reference the specific product and pricing outcome. End with Confidence: emoji.
+  Use \U0001f7e2 HIGH when product is clearly identified and pricing is confirmed acceptable.
+  Use \U0001f7e0 MEDIUM when assumptions were made about spec, grade, or region.
+- RECOMMENDED ACTIONS: max 3 bullets, tailored to the commodity type:
+  • Oils and lubricants: reference checking onboard stock and consumption rate before ordering extra.
+  • Filters and media: reference confirming dimensions or filter class (e.g. G3/G4) before dispatch.
+  • Fasteners, hose, pipe: mention bulk ordering if the item is regularly consumed.
+- Tone: brief, practical, Chief Engineer. No preamble.
+
+Respond in this exact format:
+DECISION:
+<decision>
+
+WHY:
+<one sentence ending with Confidence: emoji>
+
+RECOMMENDED ACTIONS:
+\u2022 <action 1>
+\u2022 <action 2>
+\u2022 <action 3 — include only if genuinely useful>
+"""
+
+
+def _is_commodity_followup(context_summary: str) -> bool:
+    """True when the follow-up context describes a commodity or consumable item."""
+    return _is_commodity_item(context_summary)
+
 
 def commercial_followup_advice(query: str, context_summary: str) -> str:
     """
     Generate a procurement decision for a follow-up question such as
     "what should I do?" or "how many should I order?" using whatever
     commercial context (market price result, component details) is available.
+    Routes to a commodity-specific prompt when the context describes a consumable.
     """
+    is_commodity = bool(context_summary) and _is_commodity_followup(context_summary)
+    system = _COMMODITY_FOLLOWUP_SYSTEM if is_commodity else _COMMERCIAL_FOLLOWUP_SYSTEM
     full_query = f"{context_summary}\n\nUser follow-up: {query}" if context_summary else query
-    logger.info("Commercial followup: query=%r ctx_length=%d", query[:80], len(context_summary))
+    logger.info(
+        "Commercial followup: query=%r ctx_length=%d is_commodity=%s",
+        query[:80], len(context_summary), is_commodity,
+    )
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=300,
-            system=_COMMERCIAL_FOLLOWUP_SYSTEM,
+            system=system,
             messages=[{"role": "user", "content": full_query}],
             timeout=60.0,
         )
