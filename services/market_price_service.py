@@ -100,7 +100,7 @@ DECISION:
 INSUFFICIENT DATA
 
 WHY:
-I could not verify a market price for this exact part number. Confidence: LOW
+I could not verify a market price for this exact part number. Confidence: \U0001f534 LOW
 
 ACTIONS:
 • Send the quoted price and I'll judge it
@@ -111,7 +111,7 @@ DECISION:
 INSUFFICIENT DATA
 
 WHY:
-Typical range is €X–€Y depending on [main variable] — need more detail to assess. Confidence: MEDIUM
+Typical range is €X–€Y depending on [main variable] — need more detail to assess. Confidence: \U0001f7e0 MEDIUM
 
 ACTIONS:
 • [One short clarifying question — ask only the minimum needed]
@@ -121,7 +121,7 @@ DECISION:
 <ACCEPTABLE PRICE | HIGH PRICE — QUERY | LOW PRICE — OPPORTUNITY | INSUFFICIENT DATA>
 
 WHY:
-<one sentence max — end with "Confidence: HIGH / MEDIUM / LOW">
+<one sentence max — end with "Confidence: \U0001f7e2 HIGH / \U0001f7e0 MEDIUM / \U0001f534 LOW">
 
 ACTIONS:
 • <action 1>
@@ -133,7 +133,7 @@ RULES:
 - Use MODE C when a specific price appears in the question.
 - If the query has a price but the item is too vague to assess: use MODE C with DECISION INSUFFICIENT DATA and one short clarifying question.
 - DECISION must always be one of: ACCEPTABLE PRICE, HIGH PRICE — QUERY, LOW PRICE — OPPORTUNITY, INSUFFICIENT DATA. Never use "High", "Low", "Reasonable", "Unclear", or any other label.
-- WHY: one sentence only. End with "Confidence: HIGH", "Confidence: MEDIUM", or "Confidence: LOW". No lists, no caveats, no padding.
+- WHY: one sentence only. End with "Confidence: \U0001f7e2 HIGH", "Confidence: \U0001f7e0 MEDIUM", or "Confidence: \U0001f534 LOW". No lists, no caveats, no padding.
 - ACTIONS: max 2 bullets. For MODE B, one bullet is the clarifying question.
 - Never include CONFIDENCE: as a separate section — confidence belongs only inside the WHY sentence.
 - Tone: brief, practical. No preamble.
@@ -188,13 +188,13 @@ _INSUFFICIENT_ACTIONS = (
 
 _INSUFFICIENT_RESPONSE = (
     "DECISION:\nINSUFFICIENT DATA\n\n"
-    "WHY:\nI could not verify a market price for this exact part number. Confidence: LOW\n\n"
+    "WHY:\nI could not verify a market price for this exact part number. Confidence: \U0001f534 LOW\n\n"
     f"ACTIONS:\n{_INSUFFICIENT_ACTIONS}"
 )
 
 
 def _enforce_insufficient(sections: dict) -> str:
-    why = sections.get("WHY", "I could not verify a market price for this exact part number. Confidence: LOW")
+    why = sections.get("WHY", "I could not verify a market price for this exact part number. Confidence: \U0001f534 LOW")
     return (
         f"DECISION:\nINSUFFICIENT DATA\n\n"
         f"WHY:\n{why}\n\n"
@@ -203,7 +203,7 @@ def _enforce_insufficient(sections: dict) -> str:
 
 
 def _enforce_similar(sections: dict) -> str:
-    why = sections.get("WHY", "Pricing varies by brand, model, and urgency. Confidence: MEDIUM")
+    why = sections.get("WHY", "Pricing varies by brand, model, and urgency. Confidence: \U0001f7e0 MEDIUM")
     actions = sections.get("ACTIONS", "• Send more details for a better estimate")
     return (
         f"DECISION:\nINSUFFICIENT DATA\n\n"

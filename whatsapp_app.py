@@ -178,10 +178,10 @@ def format_item_list(items, empty_message):
 
 def _confidence_label(score: int) -> str:
     if score >= 80:
-        return "HIGH"
+        return "\U0001f7e2 HIGH"
     if score >= 50:
-        return "MEDIUM"
-    return "LOW"
+        return "\U0001f7e0 MEDIUM"
+    return "\U0001f534 LOW"
 
 
 def _make_response(*, decision, why, risks=None, actions=None):
@@ -202,9 +202,17 @@ def _no_comparison_response() -> str:
     )
 
 
+_DOCUMENT_RECEIVED_ACK = (
+    "\u2693 AskHelm\n\n"
+    "DECISION:\nDOCUMENT RECEIVED\n\n"
+    "WHY:\nProcessing now.\n\n"
+    "RECOMMENDED ACTIONS:\n"
+    "\u2022 I'll send the result shortly"
+)
+
 _MARKET_CHECK_CONTEXT_FALLBACK = (
     "DECISION:\nINSUFFICIENT DATA\n\n"
-    "WHY:\nI found the last quoted item, but I could not complete a reliable live price check from the current context. Confidence: LOW\n\n"
+    "WHY:\nI found the last quoted item, but I could not complete a reliable live price check from the current context. Confidence: \U0001f534 LOW\n\n"
     "ACTIONS:\n"
     "• Send the make/model or part number\n"
     "• Or send another supplier quote for comparison"
@@ -214,7 +222,7 @@ _COMMODITY_KEYWORDS = frozenset(["filter", "matting", "bolt", "nut", "washer", "
 
 _COMMODITY_PRICE_CHECK_FALLBACK = (
     "DECISION:\nINSUFFICIENT DATA\n\n"
-    "WHY:\nThis appears to be a standard commodity item. Exact pricing varies by brand and volume. Confidence: LOW.\n\n"
+    "WHY:\nThis appears to be a standard commodity item. Exact pricing varies by brand and volume. Confidence: \U0001f534 LOW.\n\n"
     "ACTIONS:\n"
     "• Get a second supplier quote to compare\n"
     "• Commodity prices are generally within a standard market range"
@@ -222,7 +230,7 @@ _COMMODITY_PRICE_CHECK_FALLBACK = (
 
 _MARKET_CHECK_DOC_CONTEXT_FALLBACK = (
     "DECISION:\nMORE DETAIL NEEDED\n\n"
-    "WHY:\nI found the quoted part and price, but I cannot judge it reliably without the component description or equipment make/model. Confidence: LOW.\n\n"
+    "WHY:\nI found the quoted part and price, but I cannot judge it reliably without the component description or equipment make/model. Confidence: \U0001f534 LOW.\n\n"
     "RECOMMENDED ACTIONS:\n"
     "• Confirm what the part is fitted to\n"
     "• Send the make/model or component description\n"
@@ -1272,7 +1280,7 @@ def _handle_invoice_upload(
             decision="INVOICE RECEIVED — MATCH UNCERTAIN",
             why=(
                 f"Invoice from {supplier} for {total} {currency}. "
-                f"I found a possible quote match but confidence is {_confidence_label(score).lower()}. "
+                f"I found a possible quote match but confidence is {_confidence_label(score)}. "
                 f"No automatic comparison was made."
             ),
             actions=[
@@ -1873,6 +1881,7 @@ def whatsapp_reply():
 
         if num_media > 0:
             logger.info("Inbound media: media_count=%d", num_media)
+            _send_whatsapp_message(phone, _DOCUMENT_RECEIVED_ACK)
             # Guard: warn if the message body would have triggered a session reset.
             # This catches filenames/captions like "New Quote RWO.pdf" that match the
             # new_session intent patterns — they must never cause a reset on a media upload.
