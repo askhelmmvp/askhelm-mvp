@@ -511,10 +511,12 @@ def _classify_comparison(
         if delta is None or delta == 0:
             decision = "MATCH CONFIRMED — NO CHANGE"
         elif delta > 0:
-            decision = (
-                "MATCH CONFIRMED — SCOPE DIFFERENCE" if missing_items
-                else "MATCH CONFIRMED — COST INCREASE"
-            )
+            if missing_items:
+                decision = "MATCH CONFIRMED — SCOPE DIFFERENCE"
+            elif ancillary_only and ancillary_items:
+                decision = "MATCH CONFIRMED — FREIGHT ADDED"
+            else:
+                decision = "MATCH CONFIRMED — COST INCREASE"
         else:
             decision = "MATCH CONFIRMED — COST REDUCTION"
     elif quote_to_proforma:
@@ -525,7 +527,7 @@ def _classify_comparison(
     # Confidence override: ancillary-only delta + full core match → HIGH
     confidence = _confidence_label(match_score)
     if (quote_to_invoice or quote_to_proforma) and ancillary_only and not missing_items:
-        confidence = "HIGH"
+        confidence = "\U0001f7e2 HIGH"
     # Exact total match is always HIGH confidence — matching totals confirm price
     if delta == 0:
         confidence = "HIGH"
@@ -601,25 +603,25 @@ def _build_freight_response(
     if ancillary_total:
         charge_str = f"{cur} {ancillary_total:,.2f}"
         why = (
-            f"{supplier_b} invoice matches the quote, but includes added {category} "
-            f"of {charge_str} not shown on the original quote."
+            f"The increase is driven by added {category} charges of {charge_str} "
+            f"not included in the original quote."
         )
     else:
         why = (
-            f"{supplier_b} invoice matches the quote, but includes added {category} "
-            f"not shown on the original quote."
+            f"The increase is driven by added {category} charges "
+            f"not included in the original quote."
         )
 
     if confidence_label:
         why = f"{why} Confidence: {confidence_label}."
 
     return _make_response(
-        decision="MATCH CONFIRMED — COST INCREASE",
+        decision="MATCH CONFIRMED — FREIGHT ADDED",
         why=why,
         actions=[
-            "Confirm freight was agreed under supply terms",
-            "Approve if expected",
-            "Query supplier if not pre-agreed",
+            "Confirm whether the quote was ex works or included delivery",
+            "Assess if the freight cost is reasonable for the supplier location",
+            "Approve if consistent with expected logistics cost",
         ],
     )
 
