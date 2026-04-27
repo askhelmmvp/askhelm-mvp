@@ -22,7 +22,11 @@ _PART_NUMBER_RE = re.compile(r'\b[A-Z0-9]{2,}-[A-Z0-9]{3,}\b', re.IGNORECASE)
 
 _PART_NUMBER_MARKERS = ("p/n", "part number", "part no", "part#", "pn:", "oem code")
 
-_COMMODITY_KEYWORDS = frozenset(["filter", "matting", "bolt", "nut", "washer", "consumables"])
+_COMMODITY_KEYWORDS = frozenset([
+    "filter", "matting", "bolt", "nut", "washer", "consumables",
+    "oil", "lubricant", "grease", "corena", "spirax", "rimula",
+    "media", "hose", "pipe",
+])
 
 
 def _is_commodity_item(query: str) -> bool:
@@ -189,6 +193,144 @@ def _assess_oem_part_price(query: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Fully-specified commodity detection
+# Fires when: known commodity product + numeric quantity/unit + region all present.
+# Bypasses MODE B "ask for more detail" and routes to a range-based estimate.
+# Not fired when an OEM part number is present (defer to OEM path).
+# ---------------------------------------------------------------------------
+
+# Broader keyword set for commodity detection — includes product lines and brands.
+# Not used for existing _is_commodity_item logic; only for fully-specified check.
+_COMMODITY_PRODUCT_KEYWORDS = frozenset([
+    # Lubricants and oils
+    "oil", "lubricant", "grease", "coolant", "antifreeze",
+    "hydraulic", "gear oil", "transmission oil",
+    # Oil brand / product line names
+    "shell", "castrol", "mobil", "total", "fuchs",
+    "corena", "spirax", "helix", "rimula", "delvac", "delo",
+    "morlina", "omala", "tellus", "gadus",
+    # Filters and media
+    "filter", "air filter", "oil filter", "fuel filter", "media",
+    # Fasteners and hardware
+    "bolt", "nut", "washer", "screw",
+    # Other commodities
+    "hose", "pipe", "matting",
+])
+
+# Matches a numeric quantity paired with a standard unit, including "3 x 20L" forms.
+_QUANTITY_UNIT_RE = re.compile(
+    r'\b\d+\s*(?:[xX\u00d7]\s*\d+\s*)?'
+    r'(L\b|litres?\b|liters?\b|kg\b|pcs\b|pieces?\b|units?\b|rolls?\b|drums?\b|cans?\b)',
+    re.IGNORECASE,
+)
+
+# Full country / region names (lowercase for substring matching).
+_REGION_WORDS = frozenset([
+    "netherlands", "holland", "amsterdam", "rotterdam", "alblasserdam",
+    "germany", "deutschland", "hamburg",
+    "france", "paris",
+    "spain", "barcelona",
+    "united kingdom", "england", "london",
+    "europe", "european",
+    "singapore",
+    "dubai",
+    "australia",
+    "usa", "united states",
+])
+
+# Uppercase-only country codes — avoids false positives on common English words.
+_REGION_CODE_RE = re.compile(r'\b(NL|DE|FR|ES|UK|EU|SG)\b')
+
+
+def _has_quantity_and_unit(query: str) -> bool:
+    """True when query contains a numeric quantity with a standard unit."""
+    return bool(_QUANTITY_UNIT_RE.search(query))
+
+
+def _has_region(query: str) -> bool:
+    """True when query contains a recognisable country, region, or delivery location."""
+    q = query.lower()
+    if any(r in q for r in _REGION_WORDS):
+        return True
+    return bool(_REGION_CODE_RE.search(query))
+
+
+def _is_fully_specified_commodity(query: str) -> bool:
+    """
+    True when the query has enough detail to give a range-based commodity price
+    estimate: recognisable product + numeric quantity/unit + region/location.
+    Returns False when an OEM part number is present — defer to OEM path.
+    """
+    if _has_part_number(query):
+        return False
+    q = query.lower()
+    if not any(kw in q for kw in _COMMODITY_PRODUCT_KEYWORDS):
+        return False
+    return _has_quantity_and_unit(query) and _has_region(query)
+
+
+_COMMODITY_ASSESSMENT_PROMPT = """\
+You are a Chief Engineer estimating commodity marine supply costs via WhatsApp.
+
+The query describes a commodity item with sufficient product, quantity, and location
+detail to give a practical range-based price estimate.
+Do NOT ask for more detail — give a judgement now.
+
+RULES:
+- Give a realistic price range based on product type, quantity, and region.
+- Do NOT state exact prices — use ranges (e.g. "€X\u2013€Y per unit", "€X\u2013€Y total").
+- Do NOT ask clarifying questions.
+- Use EU/NL market rates where Netherlands or European context is present.
+- DECISION must be one of:
+    PRICE RANGE ESTIMATE
+    ACCEPTABLE PRICE
+    HIGH PRICE — QUERY
+    LOW PRICE — OPPORTUNITY
+  Use PRICE RANGE ESTIMATE when no specific price was quoted in the query.
+  Use ACCEPTABLE PRICE / HIGH PRICE — QUERY / LOW PRICE — OPPORTUNITY when a price appears.
+- WHY: one sentence. State the expected range. End with:
+    "Confidence: \U0001f7e2 HIGH" when product is clearly identified and region is known.
+    "Confidence: \U0001f7e0 MEDIUM" when assumptions were made about spec or location.
+- RECOMMENDED ACTIONS: max 2 bullets. Be practical.
+- Tone: concise, Chief Engineer. No preamble.
+
+Respond in this exact format:
+DECISION:
+<decision>
+
+WHY:
+<one sentence with range, ending with Confidence: emoji>
+
+RECOMMENDED ACTIONS:
+\u2022 <action 1>
+\u2022 <action 2>
+"""
+
+
+def _assess_commodity_price(query: str) -> str:
+    """
+    Range-based price estimate for a fully-specified commodity item.
+    Used when product, quantity/unit, and region are all present.
+    """
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            system=_COMMODITY_ASSESSMENT_PROMPT,
+            messages=[{"role": "user", "content": query}],
+            timeout=60.0,
+        )
+        result = response.content[0].text.strip()
+        if result:
+            logger.info("Commodity assessment: response_length=%d", len(result))
+            return result
+        logger.warning("Commodity assessment: empty response, using fallback")
+    except Exception as exc:
+        logger.exception("Commodity assessment failed: %s", exc)
+    return _INSUFFICIENT_RESPONSE
+
+
+# ---------------------------------------------------------------------------
 # System prompt — three response modes, WhatsApp-concise
 # ---------------------------------------------------------------------------
 
@@ -335,6 +477,13 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
     if not allow_broad_estimate and _is_stern_drive_scope_without_model(query):
         logger.info("Market check: stern drive scope without model identifier → requesting context")
         return _STERN_DRIVE_CONTEXT_RESPONSE
+
+    # Fully-specified commodity: product + quantity/unit + region all present.
+    # Bypass the standard Claude call (which would pick MODE B and ask for more
+    # detail) and route directly to a range-based commodity estimate.
+    if _is_fully_specified_commodity(query):
+        logger.info("Market check: fully specified commodity → commodity assessment")
+        return _assess_commodity_price(query)
 
     try:
         response = client.messages.create(
