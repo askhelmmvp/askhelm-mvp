@@ -87,6 +87,108 @@ _STERN_DRIVE_CONTEXT_RESPONSE = (
 
 
 # ---------------------------------------------------------------------------
+# OEM context detection
+# Fired when a part number is present alongside a known brand or system type.
+# Enables a cautious OEM judgment instead of a generic "cannot verify" response.
+# ---------------------------------------------------------------------------
+
+_OEM_BRAND_KEYWORDS = frozenset([
+    "yanmar", "mtu", "caterpillar", "danfoss", "nanni",
+    "volvo penta", "kohler", "cummins", "perkins", "westerbeke",
+    "jabsco", "vetus", "wartsila", "zf marine", "twin disc",
+    "scania", "man diesel", "northern lights", "onan", "sleipner",
+    "parker", "hem", "spectra", "dessalator", "idromar",
+    "alfa laval", "facet", "racor", "fleetguard",
+    "mercruiser", "john deere", "grundfos",
+])
+
+# Marine systems and kit types specific enough to imply OEM supply
+_COMPONENT_TYPE_KEYWORDS = frozenset([
+    "watermaker", "water maker",
+    "ows", "oily water separator", "oil water separator",
+    "service kit", "overhaul kit", "repair kit", "seal kit",
+    "service pack", "service set",
+    "impeller", "injector", "turbocharger", "intercooler",
+    "heat exchanger", "gearbox", "thruster", "windlass",
+    "genset", "membrane", "shaft seal", "lip seal", "solenoid",
+])
+
+
+def _has_oem_context(query: str) -> bool:
+    """
+    True when the query contains a recognised OEM brand or marine system type
+    alongside the part number — enough context for a cautious OEM judgment.
+    """
+    q = query.lower()
+    if any(brand in q for brand in _OEM_BRAND_KEYWORDS):
+        return True
+    if any(comp in q for comp in _COMPONENT_TYPE_KEYWORDS):
+        return True
+    return False
+
+
+_OEM_ASSESSMENT_PROMPT = """\
+You are a Chief Engineer assessing OEM marine parts pricing via WhatsApp.
+
+A specific OEM part number is present. Exact market price data is unavailable,
+but you have enough context (brand, component type, or system) to give a
+cautious, grounded judgment.
+
+RULES:
+- Do NOT state or invent specific prices or price ranges.
+- Reason from the component type, OEM brand behaviour, and system criticality.
+- DECISION must be exactly one of:
+    LIKELY ACCEPTABLE — OEM PRICING
+    HIGH — CHECK REQUIRED
+    UNUSUALLY CHEAP — VERIFY SOURCE
+- Use LIKELY ACCEPTABLE when OEM parts for this component are typically
+  single-source and priced at a manufacturer premium.
+- Use HIGH — CHECK REQUIRED when the component type or brand suggests the
+  price (if given) may warrant a second quote or negotiation.
+- Use UNUSUALLY CHEAP — VERIFY SOURCE only when a price is given that seems
+  well below OEM norms for the brand — flag authenticity or supply risk.
+- When no price is given in the query, use LIKELY ACCEPTABLE — OEM PRICING.
+- WHY: one sentence. End with "Confidence: \U0001f7e0 MEDIUM".
+- RECOMMENDED ACTIONS: max 2 bullets. Be practical and specific to the part.
+- Tone: concise, Chief Engineer. No preamble.
+
+Respond in this exact format:
+DECISION:
+<decision>
+
+WHY:
+<one sentence ending with Confidence: \U0001f7e0 MEDIUM>
+
+RECOMMENDED ACTIONS:
+• <action 1>
+• <action 2>
+"""
+
+
+def _assess_oem_part_price(query: str) -> str:
+    """
+    Cautious OEM pricing judgment when brand/component context exists but
+    exact market price data is unavailable.
+    """
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=200,
+            system=_OEM_ASSESSMENT_PROMPT,
+            messages=[{"role": "user", "content": query}],
+            timeout=60.0,
+        )
+        result = response.content[0].text.strip()
+        if result:
+            logger.info("OEM assessment: response_length=%d", len(result))
+            return result
+        logger.warning("OEM assessment: empty response, using fallback")
+    except Exception as exc:
+        logger.exception("OEM assessment failed: %s", exc)
+    return _INSUFFICIENT_RESPONSE
+
+
+# ---------------------------------------------------------------------------
 # System prompt — three response modes, WhatsApp-concise
 # ---------------------------------------------------------------------------
 
@@ -259,10 +361,14 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
                 confidence = CONFIDENCE_EXACT if not query_has_part_number else CONFIDENCE_SIMILAR
 
         # Downgrade: specific part number + only similar data → insufficient.
-        # Use the fully standardized response to prevent any price ranges leaking through.
+        # Exception: when OEM brand/component context is present, use a cautious
+        # OEM assessment instead of a generic "cannot verify" response.
         # Skipped when allow_broad_estimate=True (user has explicitly asked for a best guess).
         if query_has_part_number and confidence == CONFIDENCE_SIMILAR and not allow_broad_estimate:
-            logger.info("Market check: downgrading similar→insufficient (part number present)")
+            if _has_oem_context(query):
+                logger.info("Market check: part number + OEM context → OEM assessment (similar)")
+                return _assess_oem_part_price(query)
+            logger.info("Market check: downgrading similar→insufficient (part number, no OEM context)")
             return _INSUFFICIENT_RESPONSE
 
         if confidence == CONFIDENCE_INSUFFICIENT:
@@ -272,6 +378,11 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
                 result = _build_response(sections)
                 if result.strip():
                     return result
+            # OEM part with brand/component context: give cautious judgment instead of
+            # "cannot verify" — only when not already in broad-estimate mode.
+            if query_has_part_number and _has_oem_context(query):
+                logger.info("Market check: part number + OEM context → OEM assessment (insufficient)")
+                return _assess_oem_part_price(query)
             return _enforce_insufficient(sections)
 
         if confidence == CONFIDENCE_SIMILAR:
