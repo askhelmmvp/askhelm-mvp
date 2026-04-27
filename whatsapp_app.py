@@ -1348,7 +1348,11 @@ def _send_whatsapp_message(to_phone: str, body: str) -> None:
     try:
         client = TwilioRestClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
         client.messages.create(from_=TWILIO_FROM_NUMBER, to=to_phone, body=body)
-        logger.info("Image upload: proactive message sent to %s body_length=%d", to_phone, len(body))
+        logger.info(
+            "outbound_whatsapp: method=REST to=%s body_length=%d body_empty=%s "
+            "reply_body_preview=%r",
+            to_phone, len(body), not body.strip(), body[:500],
+        )
     except Exception as exc:
         logger.exception("Image upload: proactive send failed: %s", exc)
 
@@ -1365,7 +1369,6 @@ def _process_image_background(file_path: str, state: dict, user_id: str, phone: 
         logger.exception("Image upload: background extraction failed for %s: %s", fname, exc)
         answer = _image_received_response()
     body = f"⚓ AskHelm \n\n{answer}"
-    logger.info("Image upload: sending extraction result user=%s body_length=%d", user_id, len(body))
     _send_whatsapp_message(phone, body)
 
 
@@ -2037,10 +2040,18 @@ def whatsapp_reply():
     resp = MessagingResponse()
     if answer is not None:
         body = f"⚓ AskHelm \n\n{answer}"
-        logger.info("Twilio reply: body_length=%d save_state=%s user=%s", len(body), save_state, user_id)
+        logger.info(
+            "outbound_whatsapp: method=TwiML to=%s body_length=%d body_empty=%s "
+            "save_state=%s user=%s reply_body_preview=%r",
+            phone, len(body), not body.strip(), save_state, user_id, body[:500],
+        )
         resp.message(body)
     else:
-        logger.info("Twilio reply: deferred (pending intake) save_state=%s user=%s", save_state, user_id)
+        logger.info(
+            "outbound_whatsapp: method=TwiML to=%s body_empty=True deferred=True "
+            "save_state=%s user=%s",
+            phone, save_state, user_id,
+        )
     return str(resp), 200, {"Content-Type": "text/xml"}
 
 
