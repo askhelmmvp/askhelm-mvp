@@ -29,11 +29,10 @@ def extract_commercial_document_with_claude(text: str) -> dict:
             "Do not invent values.\n"
             "Use null where unknown.\n"
             "\n"
-            "Classify doc_type carefully:\n"
-            '- Use "quote" when the document is a quotation, proposal, estimate, proforma, offer, or price offer.\n'
-            '- Use "invoice" when the document is an invoice, tax invoice, final invoice, commercial invoice, or billing request.\n'
-            '- If the document clearly says quote, quotation, estimate, proposal, offer, or proforma, set doc_type to "quote".\n'
-            '- If the document clearly says invoice, tax invoice, final invoice, commercial invoice, or invoice number, set doc_type to "invoice".\n'
+            "Classify doc_type carefully. Priority order:\n"
+            '- Use "proforma" when the document heading says "proforma invoice", "proforma", "pro forma", or "pro-forma". This overrides "quote".\n'
+            '- Use "invoice" when the document is an invoice, tax invoice, final invoice, commercial invoice, or billing request (and is NOT a proforma).\n'
+            '- Use "quote" when the document is a quotation, proposal, estimate, offer, or price offer (and is NOT a proforma or invoice).\n'
             '- If uncertain, choose the best grounded value from visible headings, labels, numbering, or wording.\n'
             "\n"
             "Extraction rules:\n"
@@ -42,13 +41,15 @@ def extract_commercial_document_with_claude(text: str) -> dict:
             "- Extract currency from symbols or currency labels.\n"
             "- Extract obvious totals even if line items are incomplete.\n"
             "- Prefer partial grounded extraction over empty fields.\n"
+            "- Extract reference_number from 'ref:', 'your ref:', 'our ref:', 'customer ref:', 'quote ref:', or 'order ref:' fields — on a proforma this is typically the original quote number.\n"
             "\n"
             "Return exactly this JSON schema:\n"
             "Extract billing_address from the document's bill-to / customer section.\n"
             "{\n"
-            '  "doc_type": "quote|invoice|null",\n'
+            '  "doc_type": "quote|invoice|proforma|null",\n'
             '  "supplier_name": "string|null",\n'
             '  "document_number": "string|null",\n'
+            '  "reference_number": "string|null",\n'
             '  "document_date": "string|null",\n'
             '  "currency": "string|null",\n'
             '  "subtotal": "number|null",\n'

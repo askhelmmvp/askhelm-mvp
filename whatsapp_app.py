@@ -145,8 +145,10 @@ def convert_currency(amount, from_cur, to_cur):
 
 def normalise_doc_type(doc):
     raw = (doc.get("doc_type") or "").strip().lower()
-    # Invoice types — proforma is invoice-like in commercial practice
-    if "invoice" in raw or "proforma" in raw or "pro forma" in raw or "pro-forma" in raw:
+    # Priority: proforma > invoice > quote
+    if "proforma" in raw or "pro forma" in raw or "pro-forma" in raw:
+        doc["doc_type"] = "proforma"
+    elif "invoice" in raw:
         doc["doc_type"] = "invoice"
     elif raw in ["quote", "quotation", "estimate", "proposal", "offer"]:
         doc["doc_type"] = "quote"
@@ -493,6 +495,7 @@ def _classify_comparison(
     _, _, delta, delta_percent = _compute_delta(total_a, total_b, currency_a, currency_b)
 
     quote_to_invoice = doc_type_a == "quote" and doc_type_b == "invoice"
+    quote_to_proforma = doc_type_a == "quote" and doc_type_b == "proforma"
     both_quotes = doc_type_a == "quote" and doc_type_b == "quote"
 
     if quote_to_invoice:
@@ -505,12 +508,14 @@ def _classify_comparison(
             )
         else:
             decision = "MATCH CONFIRMED — COST REDUCTION"
+    elif quote_to_proforma:
+        decision = "MATCH CONFIRMED — PROFORMA ALIGNED"
     else:
         decision = None  # other types resolved by _build_decision_and_why
 
     # Confidence override: ancillary-only delta + full core match → HIGH
     confidence = _confidence_label(match_score)
-    if quote_to_invoice and ancillary_only and not missing_items:
+    if (quote_to_invoice or quote_to_proforma) and ancillary_only and not missing_items:
         confidence = "HIGH"
     # Exact total match is always HIGH confidence — matching totals confirm price
     if delta == 0:
@@ -522,6 +527,7 @@ def _classify_comparison(
     return {
         "comparison_type": (
             "quote_vs_invoice" if quote_to_invoice
+            else "quote_vs_proforma" if quote_to_proforma
             else "quote_vs_quote" if both_quotes
             else "other"
         ),
@@ -632,6 +638,28 @@ def build_comparison_response(doc_a, doc_b, comparison, match_score: int = 0):
     total_a_conv, total_b_conv, _, _ = _compute_delta(total_a, total_b, currency_a, currency_b)
     added_names = _get_item_names(added_items)
     missing_names = _get_item_names(missing_items)
+
+    # Proforma: return aligned response with quote reference number if captured.
+    quote_to_proforma = outcome["comparison_type"] == "quote_vs_proforma"
+    if quote_to_proforma:
+        ref_num = (doc_b.get("reference_number") or "").strip()
+        if ref_num:
+            why = f"{supplier_b} proforma matches the quoted amount and references quote {ref_num}."
+        elif delta is None or delta == 0:
+            why = f"{supplier_b} proforma matches the quoted amount exactly."
+        elif delta > 0:
+            pct = abs(delta_percent)
+            why = f"{supplier_b} proforma is {pct:.1f}% higher than the quoted amount."
+        else:
+            pct = abs(delta_percent)
+            why = f"{supplier_b} proforma is {pct:.1f}% lower than the quoted amount."
+        if confidence_label:
+            why = f"{why} Confidence: {confidence_label}."
+        return _make_response(
+            decision="MATCH CONFIRMED — PROFORMA ALIGNED",
+            why=why,
+            actions=["Proceed with payment if the proforma is approved for order release"],
+        )
 
     # Ancillary-only uplift: all added items are freight/delivery/etc., core scope unchanged.
     quote_to_invoice = outcome["comparison_type"] == "quote_vs_invoice"
@@ -1566,7 +1594,7 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
         if _deliv["checked"] and answer:
             note = DELIVERY_MATCH_NOTE if _deliv["match"] else DELIVERY_MISMATCH_NOTE
             answer = answer + f"\n{note}"
-    elif doc_type == "invoice":
+    elif doc_type in ("invoice", "proforma"):
         answer, state = _handle_invoice_upload(doc_record, supplier, total, currency, line_count, state)
         _addr = check_invoice_billing_address(doc_record)
         if _addr["checked"] and not _addr["match"]:
@@ -1593,7 +1621,7 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
         )
 
     state = _extract_and_merge_components(doc_record, state)
-    if doc_type in ("quote", "invoice"):
+    if doc_type in ("quote", "invoice", "proforma"):
         state["last_context"] = {
             "type": "document_processed",
             "document_type": doc_type,
@@ -1892,8 +1920,8 @@ def whatsapp_reply():
             for doc_record in pdf_doc_records:
                 att_answer, state = _dispatch_doc_record(doc_record, state)
                 if not att_answer:
-                    # Detect silenced invoice: pending_invoice just stored (<5 s ago)
-                    if doc_record.get("doc_type") == "invoice":
+                    # Detect silenced invoice/proforma: pending_invoice just stored (<5 s ago)
+                    if doc_record.get("doc_type") in ("invoice", "proforma"):
                         _inv = state.get("pending_invoice") or {}
                         _fp = doc_record.get("fingerprint", "")
                         if (

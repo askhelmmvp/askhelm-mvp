@@ -129,6 +129,7 @@ def make_document_record(extracted: dict, file_path: str) -> dict:
         "doc_type": extracted.get("doc_type") or "unknown",
         "supplier_name": (extracted.get("supplier_name") or "").strip(),
         "document_number": (extracted.get("document_number") or "").strip(),
+        "reference_number": (extracted.get("reference_number") or "").strip(),
         "document_date": (extracted.get("document_date") or "").strip(),
         "currency": (extracted.get("currency") or "").strip().upper(),
         "total": extracted.get("total"),
@@ -310,13 +311,19 @@ def score_invoice_against_session(
     logger.debug("supplier_score=%d inv='%s' qte='%s'", supplier_pts, inv_sup, qte_sup)
 
     # 2. Document reference linkage (0-20)
+    # For proformas, reference_number captures the original quote number (e.g. "ref: QT5-25-...")
     inv_ref = invoice_doc.get("document_number", "").strip().lower()
+    inv_ext_ref = invoice_doc.get("reference_number", "").strip().lower()
     qte_ref = anchor.get("document_number", "").strip().lower()
-    if inv_ref and qte_ref and (
-        inv_ref == qte_ref or inv_ref in qte_ref or qte_ref in inv_ref
-    ):
-        score += 20
-        reasons.append(f"reference linkage: '{inv_ref}' ~ '{qte_ref}'")
+    if qte_ref:
+        _ref_match = (
+            (inv_ref and (inv_ref == qte_ref or inv_ref in qte_ref or qte_ref in inv_ref))
+            or (inv_ext_ref and (inv_ext_ref == qte_ref or inv_ext_ref in qte_ref or qte_ref in inv_ext_ref))
+        )
+        if _ref_match:
+            matched_ref = inv_ext_ref if (inv_ext_ref and qte_ref in inv_ext_ref) else inv_ref
+            score += 20
+            reasons.append(f"reference linkage: '{matched_ref}' ~ '{qte_ref}'")
 
     # 3. Similar totals (0-10) — secondary signal only
     # Use invoice subtotal when it is closer to the quote total — handles freight-on-top invoices
