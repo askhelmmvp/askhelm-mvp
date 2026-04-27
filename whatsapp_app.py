@@ -1774,8 +1774,8 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     comparison_data = active.get("last_comparison") if active else None
 
     # Context-aware follow-up routing:
-    if intent in ("what_to_do", "compliance_followup"):
-        if last_ctx.get("type") == "compliance":
+    if intent in ("what_to_do", "compliance_followup", "commercial_followup"):
+        if last_ctx.get("type") == "compliance" and intent in ("what_to_do", "compliance_followup"):
             topic = last_ctx.get("topic", "")
             if topic:
                 return answer_compliance_followup(topic), state
@@ -1790,9 +1790,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
                     "SOURCE: N/A\n"
                     "ACTIONS: • Ask a compliance question first, then follow up."
                 ), state
-        # what_to_do (no compliance topic) or re-routed compliance_followup → fall through
-
-    if intent == "commercial_followup":
+        # what_to_do with non-compliance context always routes to commercial follow-up.
+        if intent == "what_to_do":
+            intent = "commercial_followup"
         return _handle_action_request(incoming, last_ctx, comparison_data, state), state
 
     if intent == "why_higher":
@@ -1806,9 +1806,6 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "show_extraction":
         return build_extraction_view_response(state), state
-
-    if intent == "what_to_do":
-        return _handle_action_request(incoming, last_ctx, comparison_data, state), state
 
     if intent == "compliance_question":
         answer = answer_compliance_query(incoming)

@@ -101,7 +101,34 @@ _COMMERCIAL_FOLLOWUP_SUBSTRINGS = [
     "safe to order",
     "is it worth ordering",
     "worth ordering",
+    # Decision follow-ups: "go ahead", "approve", proceed variants
+    "should i go ahead",
+    "should we go ahead",
+    "go ahead with this",
+    "go ahead with it",
+    "shall we go ahead",
+    "ok to go ahead",
+    "should i approve",
+    "should we approve",
+    "can we approve",
+    "approve this",
+    "approve the",
+    "safe to approve",
 ]
+
+# Short decision phrases matched exactly (after stripping trailing punctuation).
+_COMMERCIAL_FOLLOWUP_EXACT = {
+    "approve",
+    "approved",
+    "go ahead",
+    "go ahead then",
+    "proceed",
+    "proceed then",
+    "let's go ahead",
+    "lets go ahead",
+    "yes go ahead",
+    "yes proceed",
+}
 
 _GREETINGS = {"hi", "hello", "start", "hey"}
 
@@ -399,6 +426,8 @@ _COMMERCIAL_GUARD = {
     "attachment",
     "order",
     "proceed",
+    "approve",
+    "go ahead",
 }
 
 # Message starters that indicate an open question.
@@ -462,6 +491,9 @@ def classify_text(text: str) -> str:
     for phrase in _COMMERCIAL_FOLLOWUP_SUBSTRINGS:
         if phrase in t:
             return "commercial_followup"
+
+    if t_core in _COMMERCIAL_FOLLOWUP_EXACT:
+        return "commercial_followup"
 
     for trigger in _QUOTE_COMPARE_SUBSTRINGS:
         if trigger in t:
