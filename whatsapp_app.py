@@ -1700,7 +1700,11 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         return "Ready.\n\nSend your question or upload a document.", state
 
     if intent == "new_session":
-        state = reset_user_sessions(state)
+        logger.info(
+            "session_reset: reset_trigger_source=user_command incoming=%r",
+            incoming[:80],
+        )
+        state = reset_user_sessions(state, trigger_source="user_command")
         state.pop("last_context", None)
         state.pop("pending_invoice", None)
         return build_new_session_response(), state
@@ -1863,6 +1867,15 @@ def whatsapp_reply():
 
         if num_media > 0:
             logger.info("Inbound media: media_count=%d", num_media)
+            # Guard: warn if the message body would have triggered a session reset.
+            # This catches filenames/captions like "New Quote RWO.pdf" that match the
+            # new_session intent patterns — they must never cause a reset on a media upload.
+            if incoming and classify_text(incoming) == "new_session":
+                logger.warning(
+                    "WARNING: unexpected session reset triggered "
+                    "reset_trigger_source=media_upload_body incoming=%r — suppressed",
+                    incoming[:80],
+                )
             image_started = False
 
             # Phase 1: download all attachments; extract PDFs eagerly so we know

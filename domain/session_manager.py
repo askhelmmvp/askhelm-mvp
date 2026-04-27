@@ -224,12 +224,25 @@ def create_pending_session(doc_record: dict, state: dict) -> Tuple[dict, dict]:
     return state, session
 
 
-def reset_user_sessions(state: dict) -> dict:
-    """Close all sessions and clear the active pointer."""
+def reset_user_sessions(state: dict, trigger_source: str = "unknown") -> dict:
+    """Close all sessions and clear the active pointer.
+
+    trigger_source must be 'user_command' for intentional resets.
+    Any other value logs a warning so unexpected resets are visible in logs.
+    """
+    if trigger_source != "user_command":
+        logger.warning(
+            "WARNING: unexpected session reset triggered "
+            "reset_trigger_source=%s user=%s",
+            trigger_source, state.get("user_id"),
+        )
     for s in state["sessions"]:
         s["status"] = "closed"
     state["active_session_id"] = None
-    logger.info("All sessions reset for user %s", state.get("user_id"))
+    logger.info(
+        "All sessions reset for user %s reset_trigger_source=%s",
+        state.get("user_id"), trigger_source,
+    )
     return state
 
 
