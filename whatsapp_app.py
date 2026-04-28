@@ -1665,10 +1665,16 @@ def _handle_inventory_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
     source = doc_record.get("file_path", "")
     eq_items = data.get("equipment") or []
     st_items = data.get("stock") or []
-    eq_added, eq_merged = merge_equipment(user_id, eq_items, source)
-    st_added, st_merged = merge_stock(user_id, st_items, source)
+    parse_error = bool(data.get("parse_error"))
+    try:
+        eq_added, eq_merged = merge_equipment(user_id, eq_items, source)
+        st_added, st_merged = merge_stock(user_id, st_items, source)
+    except Exception as exc:
+        logger.exception("inventory_doc: merge failed user=%s: %s", user_id, exc)
+        eq_added = eq_merged = st_added = st_merged = 0
+        parse_error = True
     state["last_context"] = {"type": "inventory_import", "doc_type": doc_record.get("doc_type")}
-    return format_inventory_response(eq_added, eq_merged, st_added, st_merged), state
+    return format_inventory_response(eq_added, eq_merged, st_added, st_merged, parse_error), state
 
 
 def _handle_inventory_image(image_paths: list, doc_type: str, state: dict) -> Tuple[str, dict]:
@@ -1677,13 +1683,14 @@ def _handle_inventory_image(image_paths: list, doc_type: str, state: dict) -> Tu
         data = extract_inventory_images(image_paths)
     except Exception as exc:
         logger.exception("Inventory image handler failed: %s", exc)
-        data = {"equipment": [], "stock": []}
+        data = {"equipment": [], "stock": [], "parse_error": True}
     user_id = state.get("user_id", "")
     source = image_paths[0] if image_paths else ""
+    parse_error = bool(data.get("parse_error"))
     eq_added, eq_merged = merge_equipment(user_id, data.get("equipment") or [], source)
     st_added, st_merged = merge_stock(user_id, data.get("stock") or [], source)
     state["last_context"] = {"type": "inventory_import", "doc_type": doc_type}
-    return format_inventory_response(eq_added, eq_merged, st_added, st_merged), state
+    return format_inventory_response(eq_added, eq_merged, st_added, st_merged, parse_error), state
 
 
 def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tuple[str, dict]:
@@ -1696,12 +1703,13 @@ def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tu
             data = extract_inventory_from_csv(file_path)
     except Exception as exc:
         logger.exception("Inventory file handler failed file=%s: %s", file_path, exc)
-        data = {"equipment": [], "stock": []}
+        data = {"equipment": [], "stock": [], "parse_error": True}
     user_id = state.get("user_id", "")
+    parse_error = bool(data.get("parse_error"))
     eq_added, eq_merged = merge_equipment(user_id, data.get("equipment") or [], file_path)
     st_added, st_merged = merge_stock(user_id, data.get("stock") or [], file_path)
     state["last_context"] = {"type": "inventory_import"}
-    return format_inventory_response(eq_added, eq_merged, st_added, st_merged), state
+    return format_inventory_response(eq_added, eq_merged, st_added, st_merged, parse_error), state
 
 
 # ---------------------------------------------------------------------------

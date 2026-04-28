@@ -393,8 +393,15 @@ You are extracting structured inventory data from a marine vessel document.
 The document may be an equipment list, spare parts inventory, or stock list.
 It may be a table, spreadsheet image, list, or unstructured text.
 
-Return ONLY valid JSON. No commentary, no markdown fencing.
+CRITICAL OUTPUT RULES:
+- Start your response with { and end it with }
+- Return ONLY a raw JSON object — no markdown, no code fences, no comments, no trailing text
+- Do not add ANY text before or after the JSON object
+- Ensure every string is properly escaped — no literal newlines inside string values
+- Ensure all arrays and objects are properly closed — no truncation
+- If you cannot extract structured data, return {"doc_type": null, "equipment": [], "stock": []} and nothing else
 
+JSON schema to return:
 {
   "doc_type": "equipment_list|stock_inventory|spare_parts_inventory|null",
   "equipment": [
@@ -424,61 +431,264 @@ Return ONLY valid JSON. No commentary, no markdown fencing.
   ]
 }
 
-Rules:
+Extraction rules:
 - equipment: machinery, systems, assets installed onboard (main engine, generator, OWS, etc.)
 - stock: spare parts, consumables, stores held onboard (oil, filters, gaskets, etc.)
-- If equipment list only: leave stock empty array
-- If stock/spares list only: leave equipment empty array
+- If equipment list only: leave stock as empty array []
+- If stock/spares list only: leave equipment as empty array []
 - Some documents contain both
 - Normalise headers: Qty → quantity_onboard, S/N → serial_number, Loc/Bin → storage_location
 - quantity_onboard must be a number or null — never a string
 - If quantity is a range, use the lower bound
 - linked_equipment: the equipment a spare part belongs to, if stated
-- Use null for unknown fields. Do not invent values.
+- Use null for unknown fields — do not invent values
+- Shorten notes to one line maximum — no multi-line strings
 """
 
+# Chunk size for large text documents — keeps per-call output within token budget
+_TEXT_CHUNK_SIZE = 5000
+_TOKENS_PER_CHUNK = 3000
+_TOKENS_SINGLE_CALL = 8000
 
-def _parse_json(raw: str) -> dict:
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r"^```(?:json)?\n?", "", raw)
-        raw = re.sub(r"\n?```$", "", raw)
+
+# ---------------------------------------------------------------------------
+# JSON recovery
+# ---------------------------------------------------------------------------
+
+def _fix_json_strings(s: str) -> str:
+    """Escape literal control characters that appear inside JSON string values."""
+    result = []
+    in_string = False
+    escape_next = False
+    for ch in s:
+        if escape_next:
+            result.append(ch)
+            escape_next = False
+        elif ch == "\\":
+            result.append(ch)
+            escape_next = True
+        elif ch == '"':
+            in_string = not in_string
+            result.append(ch)
+        elif in_string and ch == "\n":
+            result.append("\\n")
+        elif in_string and ch == "\r":
+            result.append("\\r")
+        elif in_string and ch == "\t":
+            result.append("\\t")
+        else:
+            result.append(ch)
+    return "".join(result)
+
+
+def _recover_partial_arrays(raw: str) -> dict:
+    """
+    Extract complete JSON objects from truncated equipment/stock arrays.
+    Used when the response was cut off before the closing brackets.
+    """
+    result: dict = {}
+    for key in ("equipment", "stock"):
+        m = re.search(r'"' + key + r'"\s*:\s*\[', raw)
+        if not m:
+            continue
+        pos = m.end()
+        depth = 0
+        obj_start: Optional[int] = None
+        items = []
+        while pos < len(raw):
+            ch = raw[pos]
+            if ch == "{":
+                if depth == 0:
+                    obj_start = pos
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0 and obj_start is not None:
+                    try:
+                        item = json.loads(raw[obj_start : pos + 1])
+                        items.append(item)
+                    except json.JSONDecodeError:
+                        pass
+                    obj_start = None
+            elif ch == "]" and depth == 0:
+                break
+            pos += 1
+        result[key] = items
+    return result
+
+
+def _parse_json_safe(raw: str) -> tuple:
+    """
+    Multi-stage JSON parser with recovery.
+    Returns (parsed_dict, parse_error: bool).
+    parse_error=True means recovery was needed or all attempts failed.
+    """
+    if not raw:
+        return {}, True
+
+    # Stage 1: strip markdown fences
+    text = raw.strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```(?:json)?\s*\n?", "", text)
+        text = re.sub(r"\n?\s*```\s*$", "", text.rstrip())
+        text = text.strip()
+
+    # Stage 2: direct parse — the happy path
     try:
-        return json.loads(raw)
-    except json.JSONDecodeError as exc:
-        logger.warning("inventory: JSON parse failed: %s raw=%r", exc, raw[:200])
-        return {}
+        return json.loads(text), False
+    except json.JSONDecodeError:
+        pass
+
+    logger.warning(
+        "inventory: direct JSON parse failed, attempting recovery. "
+        "raw_len=%d preview=%r",
+        len(raw), raw[:120],
+    )
+
+    # Stage 3: extract between first { and last }
+    start = text.find("{")
+    end = text.rfind("}")
+    if start != -1 and end > start:
+        candidate = text[start : end + 1]
+
+        # Stage 3a: parse extracted substring
+        try:
+            return json.loads(candidate), True
+        except json.JSONDecodeError:
+            pass
+
+        # Stage 3b: remove trailing commas before } or ]
+        cleaned = re.sub(r",\s*([}\]])", r"\1", candidate)
+        try:
+            return json.loads(cleaned), True
+        except json.JSONDecodeError:
+            pass
+
+        # Stage 3c: escape unescaped control characters in string values
+        fixed = _fix_json_strings(cleaned)
+        try:
+            return json.loads(fixed), True
+        except json.JSONDecodeError:
+            pass
+
+    # Stage 4: partial recovery — extract complete objects from truncated arrays
+    partial = _recover_partial_arrays(text)
+    if partial.get("equipment") or partial.get("stock"):
+        logger.warning(
+            "inventory: partial recovery succeeded: equipment=%d stock=%d",
+            len(partial.get("equipment", [])), len(partial.get("stock", [])),
+        )
+        return partial, True
+
+    logger.error(
+        "inventory: all JSON recovery attempts failed. raw_len=%d preview=%r",
+        len(raw), raw[:300],
+    )
+    return {}, True
+
+
+def _normalise_items(items: list, confidence: float) -> list:
+    """Ensure each item is a dict and has a confidence score."""
+    result = []
+    for item in items:
+        if isinstance(item, dict):
+            item.setdefault("confidence", confidence)
+            result.append(item)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Text chunking for large PDFs
+# ---------------------------------------------------------------------------
+
+def _split_text_chunks(text: str, chunk_size: int = _TEXT_CHUNK_SIZE) -> list:
+    """Split text into chunks at newline boundaries."""
+    chunks = []
+    remaining = text
+    while remaining:
+        if len(remaining) <= chunk_size:
+            chunks.append(remaining)
+            break
+        # Break at the last newline within the chunk window
+        break_at = remaining.rfind("\n", 0, chunk_size)
+        if break_at < chunk_size // 2:
+            break_at = chunk_size
+        chunks.append(remaining[:break_at])
+        remaining = remaining[break_at:].lstrip("\n")
+    return [c for c in chunks if c.strip()]
+
+
+def _call_claude_inventory(content_text: str, max_tokens: int) -> tuple:
+    """Single Claude text call. Returns (result_dict, parse_error)."""
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=max_tokens,
+        system=_INVENTORY_EXTRACT_PROMPT,
+        messages=[{"role": "user", "content": content_text}],
+        timeout=90.0,
+    )
+    raw = response.content[0].text if response.content else ""
+    return _parse_json_safe(raw)
 
 
 def extract_inventory_from_text(text: str) -> dict:
-    """Extract inventory from plain text via Claude."""
+    """
+    Extract inventory from plain text via Claude.
+    Returns {"equipment": [...], "stock": [...], "parse_error": bool}.
+    parse_error=True signals that JSON recovery was needed or some records
+    may be missing — the caller should surface a partial-success warning.
+    """
+    if not text.strip():
+        return {"equipment": [], "stock": [], "parse_error": False}
+
+    any_parse_error = False
+    all_equipment: list = []
+    all_stock: list = []
+
     try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=4000,
-            system=_INVENTORY_EXTRACT_PROMPT,
-            messages=[{"role": "user", "content": text[:12000]}],
-            timeout=90.0,
-        )
-        result = _parse_json(response.content[0].text)
-        eq = result.get("equipment") or []
-        st = result.get("stock") or []
-        for item in eq:
-            item.setdefault("confidence", 0.7)
-        for item in st:
-            item.setdefault("confidence", 0.7)
-        logger.info(
-            "inventory text extraction: doc_type=%r equipment=%d stock=%d",
-            result.get("doc_type"), len(eq), len(st),
-        )
-        return {"equipment": eq, "stock": st}
+        if len(text) <= _TEXT_CHUNK_SIZE:
+            # Single call — raise max_tokens high enough to fit the full output
+            result, parse_error = _call_claude_inventory(text, _TOKENS_SINGLE_CALL)
+            any_parse_error = parse_error
+            all_equipment = _normalise_items(result.get("equipment") or [], 0.7)
+            all_stock = _normalise_items(result.get("stock") or [], 0.7)
+            logger.info(
+                "inventory text (single): doc_type=%r equipment=%d stock=%d parse_error=%s",
+                result.get("doc_type"), len(all_equipment), len(all_stock), parse_error,
+            )
+        else:
+            # Chunked path for large documents
+            chunks = _split_text_chunks(text, _TEXT_CHUNK_SIZE)
+            logger.info("inventory text (chunked): chunks=%d total_chars=%d", len(chunks), len(text))
+            for idx, chunk in enumerate(chunks):
+                try:
+                    result, parse_error = _call_claude_inventory(chunk, _TOKENS_PER_CHUNK)
+                    if parse_error:
+                        any_parse_error = True
+                    eq = _normalise_items(result.get("equipment") or [], 0.7)
+                    st = _normalise_items(result.get("stock") or [], 0.7)
+                    all_equipment.extend(eq)
+                    all_stock.extend(st)
+                    logger.info(
+                        "inventory chunk %d/%d: equipment=%d stock=%d parse_error=%s",
+                        idx + 1, len(chunks), len(eq), len(st), parse_error,
+                    )
+                except Exception as exc:
+                    logger.warning("inventory chunk %d failed: %s", idx + 1, exc)
+                    any_parse_error = True
+
     except Exception as exc:
         logger.exception("inventory text extraction failed: %s", exc)
-        return {"equipment": [], "stock": []}
+        return {"equipment": [], "stock": [], "parse_error": True}
+
+    return {"equipment": all_equipment, "stock": all_stock, "parse_error": any_parse_error}
 
 
 def extract_inventory_from_images(image_paths: list) -> dict:
-    """Extract inventory from image files via Claude vision."""
+    """
+    Extract inventory from image files via Claude vision.
+    Returns {"equipment": [...], "stock": [...], "parse_error": bool}.
+    """
     content = []
     for path in image_paths[:4]:
         media_type = "image/png" if path.lower().endswith(".png") else "image/jpeg"
@@ -493,36 +703,36 @@ def extract_inventory_from_images(image_paths: list) -> dict:
             logger.warning("inventory image: failed to read %s: %s", path, exc)
 
     if not content:
-        return {"equipment": [], "stock": []}
+        return {"equipment": [], "stock": [], "parse_error": False}
 
     content.append({
         "type": "text",
-        "text": "Extract structured inventory data from this document. Return only the JSON object.",
+        "text": (
+            "Extract structured inventory data from this document. "
+            "Return only the raw JSON object — start with { and end with }. "
+            "No markdown, no code fences, no commentary."
+        ),
     })
 
     try:
         response = client.messages.create(
             model="claude-sonnet-4-6",
-            max_tokens=4000,
+            max_tokens=_TOKENS_SINGLE_CALL,
             system=_INVENTORY_EXTRACT_PROMPT,
             messages=[{"role": "user", "content": content}],
             timeout=90.0,
         )
-        result = _parse_json(response.content[0].text)
-        eq = result.get("equipment") or []
-        st = result.get("stock") or []
-        for item in eq:
-            item.setdefault("confidence", 0.65)
-        for item in st:
-            item.setdefault("confidence", 0.65)
+        result, parse_error = _parse_json_safe(response.content[0].text)
+        eq = _normalise_items(result.get("equipment") or [], 0.65)
+        st = _normalise_items(result.get("stock") or [], 0.65)
         logger.info(
-            "inventory image extraction: doc_type=%r equipment=%d stock=%d",
-            result.get("doc_type"), len(eq), len(st),
+            "inventory image extraction: doc_type=%r equipment=%d stock=%d parse_error=%s",
+            result.get("doc_type"), len(eq), len(st), parse_error,
         )
-        return {"equipment": eq, "stock": st}
+        return {"equipment": eq, "stock": st, "parse_error": parse_error}
     except Exception as exc:
         logger.exception("inventory image extraction failed: %s", exc)
-        return {"equipment": [], "stock": []}
+        return {"equipment": [], "stock": [], "parse_error": True}
 
 
 # ---------------------------------------------------------------------------
@@ -558,9 +768,30 @@ def make_inventory_doc_record(data: dict, doc_type: str, file_path: str) -> dict
 # WhatsApp response formatter
 # ---------------------------------------------------------------------------
 
-def format_inventory_response(eq_added: int, eq_merged: int, st_added: int, st_merged: int) -> str:
+_INVENTORY_NEEDS_REVIEW = (
+    "DECISION:\nINVENTORY EXTRACTION NEEDS REVIEW\n\n"
+    "WHY:\nI could read the file but could not safely structure all equipment records.\n\n"
+    "RECOMMENDED ACTIONS:\n"
+    "• Try exporting the list as Excel or CSV\n"
+    "• Or upload the equipment list in smaller sections"
+)
+
+
+def format_inventory_response(
+    eq_added: int,
+    eq_merged: int,
+    st_added: int,
+    st_merged: int,
+    parse_error: bool = False,
+) -> str:
     eq_total = eq_added + eq_merged
     st_total = st_added + st_merged
+    total_records = eq_total + st_total
+
+    # Total failure — could not extract any records and parsing errored
+    if total_records == 0 and parse_error:
+        return _INVENTORY_NEEDS_REVIEW
+
     parts = []
     if eq_total:
         parts.append(f"{eq_added} new + {eq_merged} updated equipment records")
@@ -570,11 +801,15 @@ def format_inventory_response(eq_added: int, eq_merged: int, st_added: int, st_m
         parts.append("no records recognised")
 
     summary = "; ".join(parts)
+    partial_note = (
+        "\n\nNote: some records may be missing due to formatting issues in the source. "
+        "If the count looks low, try re-uploading as Excel or CSV."
+    ) if parse_error else ""
 
     return (
         "DECISION:\nINVENTORY IMPORTED\n\n"
         f"WHY:\nImported {summary}. "
-        "Fields have been normalised from source data.\n\n"
+        f"Fields have been normalised from source data.{partial_note}\n\n"
         "RECOMMENDED ACTIONS:\n"
         "• Ask \"do we have <part> onboard?\"\n"
         "• Ask \"show spares for <system>\"\n"
