@@ -44,6 +44,7 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
             '- Use "proforma" when the document heading says "proforma invoice", "proforma", "pro forma", or "pro-forma". This overrides "quote".\n'
             '- Use "invoice" when the document is an invoice, tax invoice, final invoice, commercial invoice, or billing request (and is NOT a proforma).\n'
             '- Use "quote" when the document is a quotation, proposal, estimate, offer, or price offer (and is NOT a proforma or invoice).\n'
+            '- Use "service_report" when the document is a service report, field service report, attendance report, work report, inspection report, maintenance report, or commissioning report — even if it lacks pricing. NOT a quote or invoice from a service company.\n'
             '- If uncertain, choose the best grounded value from visible headings, labels, numbering, or wording.\n'
             "- Extract reference_number from 'ref:', 'your ref:', 'our ref:', 'customer ref:', 'quote ref:', or 'order ref:' fields — on a proforma this is typically the original quote number.\n"
             "\n"

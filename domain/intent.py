@@ -41,6 +41,17 @@ _FOLLOW_UPS = {
     "show extraction": "show_extraction",
     "show extracted data": "show_extraction",
     "what did you extract": "show_extraction",
+    # Service report / handover retrieval
+    "show handover notes": "show_handover_notes",
+    "show handover note": "show_handover_notes",
+    "handover notes": "show_handover_notes",
+    "show service reports": "show_handover_notes",
+    "show service report": "show_handover_notes",
+    "service reports": "show_handover_notes",
+    "show open actions": "show_open_actions",
+    "open actions": "show_open_actions",
+    "list open actions": "show_open_actions",
+    "outstanding actions": "show_open_actions",
 }
 
 # Phrases that request follow-up actions/clarification after a compliance answer.
@@ -129,6 +140,21 @@ _COMMERCIAL_FOLLOWUP_EXACT = {
     "yes go ahead",
     "yes proceed",
 }
+
+# Substring triggers for service report / handover retrieval.
+# "handover for OWS", "service reports for main engine", etc.
+_HANDOVER_SUBSTRINGS = [
+    "handover for ",
+    "service reports for ",
+    "service report for ",
+    "show handover for ",
+    "handover note for ",
+]
+
+_OPEN_ACTIONS_SUBSTRINGS = [
+    "open action",
+    "outstanding action",
+]
 
 _GREETINGS = {"hi", "hello", "start", "hey"}
 
@@ -428,6 +454,9 @@ _COMMERCIAL_GUARD = {
     "proceed",
     "approve",
     "go ahead",
+    "handover",
+    "service report",
+    "open action",
 }
 
 # Message starters that indicate an open question.
@@ -494,6 +523,14 @@ def classify_text(text: str) -> str:
 
     if t_core in _COMMERCIAL_FOLLOWUP_EXACT:
         return "commercial_followup"
+
+    for phrase in _HANDOVER_SUBSTRINGS:
+        if phrase in t:
+            return "show_handover_notes"
+
+    for phrase in _OPEN_ACTIONS_SUBSTRINGS:
+        if phrase in t:
+            return "show_open_actions"
 
     for trigger in _QUOTE_COMPARE_SUBSTRINGS:
         if trigger in t:

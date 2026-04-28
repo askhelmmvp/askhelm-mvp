@@ -61,6 +61,20 @@ from services.reminder_service import (
     create_reminder,
     format_due_datetime,
 )
+from services.service_report_service import (
+    is_service_report_text,
+    extract_service_report_from_text,
+    extract_service_report_from_images,
+    build_handover_note,
+    format_whatsapp_response as format_service_report_response,
+    make_service_report_doc_record,
+)
+from domain.handover_store import (
+    save_service_report,
+    get_all_open_actions,
+    get_all_reports,
+    get_reports_for_system,
+)
 import config
 
 load_dotenv(dotenv_path=".env")
@@ -1479,6 +1493,9 @@ def _handle_images_upload(file_paths: list, state: dict) -> Tuple[str, dict]:
         return _image_received_response(), state
 
     if _is_operational_note(extracted):
+        if (extracted.get("doc_type") or "").lower() == "service_report":
+            logger.info("Image upload (multi-page): branch=service_report pages=%d", len(file_paths))
+            return _handle_service_report_image(file_paths, state)
         try:
             reply = summarise_operational_note_from_image(file_paths[0])
             return reply, state
@@ -1549,8 +1566,12 @@ def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
 
     logger.info("Image upload: extraction succeeded for %s", fname)
 
-    # --- Step 2: operational note ---
+    # --- Step 2: operational note / service report ---
     if _is_operational_note(extracted):
+        # Service report takes priority over generic operational note summary.
+        if (extracted.get("doc_type") or "").lower() == "service_report":
+            logger.info("Image upload: branch=service_report for %s", fname)
+            return _handle_service_report_image([file_path], state)
         logger.info("Image upload: branch=operational_note for %s", fname)
         try:
             reply = summarise_operational_note_from_image(file_path)
@@ -1594,12 +1615,126 @@ def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
         return _image_received_response(), state
 
 
+def _handle_service_report_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
+    """Handle a service_report doc_record produced by _extract_pdf_to_doc_record."""
+    report = doc_record.get("service_report_data") or {}
+    user_id = state.get("user_id", "")
+    handover_note = build_handover_note(report)
+    save_service_report(user_id, report, handover_note, doc_record.get("file_path", ""))
+    state["last_context"] = {
+        "type": "service_report",
+        "system": report.get("system") or report.get("equipment") or "",
+        "supplier": report.get("supplier") or "",
+    }
+    return format_service_report_response(report, handover_note), state
+
+
+def _handle_service_report_image(image_paths: list, state: dict) -> Tuple[str, dict]:
+    """Extract, store, and format a service report from image files."""
+    try:
+        report = extract_service_report_from_images(image_paths)
+    except Exception as exc:
+        logger.exception("Service report image handler failed: %s", exc)
+        report = {}
+    user_id = state.get("user_id", "")
+    handover_note = build_handover_note(report)
+    save_service_report(user_id, report, handover_note, image_paths[0] if image_paths else "")
+    state["last_context"] = {
+        "type": "service_report",
+        "system": report.get("system") or report.get("equipment") or "",
+        "supplier": report.get("supplier") or "",
+    }
+    return format_service_report_response(report, handover_note), state
+
+
+def _parse_system_from_query(query: str) -> str:
+    """Extract the system name from retrieval queries like 'handover for OWS'."""
+    t = query.lower().strip()
+    for prefix in (
+        "handover for ", "service reports for ", "service report for ",
+        "show handover for ", "handover note for ", "reports for ",
+    ):
+        if prefix in t:
+            idx = t.index(prefix) + len(prefix)
+            return query[idx:].strip()
+    return ""
+
+
+def _handle_show_handover_notes(query: str, state: dict) -> Tuple[str, dict]:
+    """Return saved service report handover notes, optionally filtered by system."""
+    user_id = state.get("user_id", "")
+    system_filter = _parse_system_from_query(query)
+    if system_filter:
+        reports = get_reports_for_system(user_id, system_filter)
+    else:
+        reports = get_all_reports(user_id)
+
+    if not reports:
+        label = f" for '{system_filter}'" if system_filter else ""
+        return _make_response(
+            decision="NO SERVICE REPORTS FOUND",
+            why=f"No service reports have been saved{label}.",
+            actions=["Upload a service report to create a handover note"],
+        ), state
+
+    lines = [f"HANDOVER NOTES ({len(reports)} report(s)):\n"]
+    for r in reports[-5:]:  # most recent five
+        system_label = r.get("system") or r.get("equipment") or "Unknown system"
+        date = r.get("date") or ""
+        supplier = r.get("supplier") or ""
+        header = " — ".join(filter(None, [date, supplier, system_label]))
+        lines.append(header)
+        note = (r.get("handover_note") or r.get("summary") or "").strip()
+        if note:
+            lines.append(note)
+        lines.append("")
+
+    return "\n".join(lines).strip(), state
+
+
+def _handle_show_open_actions(state: dict) -> Tuple[str, dict]:
+    """Return all open actions grouped by system."""
+    user_id = state.get("user_id", "")
+    grouped = get_all_open_actions(user_id)
+
+    if not grouped:
+        return _make_response(
+            decision="NO OPEN ACTIONS",
+            why="No open actions found in saved service reports.",
+            actions=["Upload a service report to track open actions"],
+        ), state
+
+    lines = ["OPEN ACTIONS:\n"]
+    for group in grouped:
+        system = group["system"]
+        date = group.get("date") or ""
+        header = system + (f" ({date})" if date else "")
+        lines.append(header + ":")
+        for action in group["open_actions"]:
+            lines.append(f"• {action.strip()}")
+        lines.append("")
+
+    return "\n".join(lines).strip(), state
+
+
 def _extract_pdf_to_doc_record(file_path: str) -> dict:
     """Extract text/images from a PDF and return a normalised doc_record. Does NOT touch state."""
     text = extract_pdf_text(file_path)
+
+    # Service report pre-screen: check raw text BEFORE commercial extraction.
+    if text.strip() and is_service_report_text(text):
+        logger.info("PDF: service report detected in raw text, routing to service report extraction")
+        report = extract_service_report_from_text(text)
+        return make_service_report_doc_record(report, file_path)
+
     if not text.strip():
         image_paths = render_pdf_pages_to_images(file_path)
         extracted = extract_commercial_document_from_images(image_paths)
+        # Vision model may also classify as service_report (doc_type option added to prompt)
+        if isinstance(extracted, dict) and (extracted.get("doc_type") or "").lower() == "service_report":
+            logger.info("PDF (image path): service report detected by vision, running structured extraction")
+            report = extract_service_report_from_images(image_paths)
+            return make_service_report_doc_record(report, file_path)
     else:
         extracted = extract_commercial_document_with_claude(text)
 
@@ -1632,6 +1767,10 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
             _fp, doc_type, supplier,
         )
         return "__duplicate__", state
+
+    if doc_type == "service_report":
+        answer, state = _handle_service_report_doc(doc_record, state)
+        return answer, state
 
     if doc_type == "quote":
         answer, state = _handle_quote_upload(doc_record, supplier, total, currency, line_count, state)
@@ -1830,6 +1969,12 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "reminder":
         return _handle_reminder_command(incoming, phone, state)
+
+    if intent == "show_handover_notes":
+        return _handle_show_handover_notes(incoming, state)
+
+    if intent == "show_open_actions":
+        return _handle_show_open_actions(state)
 
     if intent == "market_check":
         # If we have document or component context, use the dedicated enriched handler
