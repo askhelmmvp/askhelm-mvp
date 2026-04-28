@@ -75,6 +75,24 @@ from domain.handover_store import (
     get_all_reports,
     get_reports_for_system,
 )
+from domain.inventory_store import (
+    merge_equipment,
+    merge_stock,
+    get_all_equipment,
+    get_all_stock,
+    find_stock_by_query,
+    find_stock_for_system,
+    find_equipment_by_query,
+)
+from services.inventory_service import (
+    classify_inventory_text,
+    extract_inventory_from_text,
+    extract_inventory_from_images as extract_inventory_images,
+    extract_inventory_from_excel,
+    extract_inventory_from_csv,
+    make_inventory_doc_record,
+    format_inventory_response,
+)
 import config
 
 load_dotenv(dotenv_path=".env")
@@ -103,6 +121,12 @@ app = Flask(__name__)
 # ---------------------------------------------------------------------------
 
 _IMAGE_CONTENT_TYPES = {"image/jpeg", "image/jpg", "image/png"}
+_EXCEL_CONTENT_TYPES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel",
+    "application/excel",
+}
+_CSV_CONTENT_TYPES = {"text/csv", "application/csv", "text/comma-separated-values"}
 
 
 def _looks_like_pdf(file_path: str) -> bool:
@@ -121,6 +145,12 @@ def download_file(url: str, content_type: str) -> str:
         "image/jpg": ".jpg",
         "image/png": ".png",
         "image/webp": ".webp",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.ms-excel": ".xls",
+        "application/excel": ".xlsx",
+        "text/csv": ".csv",
+        "application/csv": ".csv",
+        "text/comma-separated-values": ".csv",
     }
     ext = ext_map.get(content_type, ".bin")
 
@@ -1377,6 +1407,8 @@ _COMMERCIAL_DOC_TYPES = {
     "invoice", "tax invoice", "commercial invoice", "final invoice",
 }
 
+_INVENTORY_DOC_TYPES = {"equipment_list", "stock_inventory", "spare_parts_inventory"}
+
 
 def _is_operational_note(extracted: dict) -> bool:
     """Return True when an extraction has no commercial structure — no pricing, no totals, no explicit commercial doc type."""
@@ -1493,9 +1525,13 @@ def _handle_images_upload(file_paths: list, state: dict) -> Tuple[str, dict]:
         return _image_received_response(), state
 
     if _is_operational_note(extracted):
-        if (extracted.get("doc_type") or "").lower() == "service_report":
+        raw_type = (extracted.get("doc_type") or "").lower()
+        if raw_type == "service_report":
             logger.info("Image upload (multi-page): branch=service_report pages=%d", len(file_paths))
             return _handle_service_report_image(file_paths, state)
+        if raw_type in _INVENTORY_DOC_TYPES:
+            logger.info("Image upload (multi-page): branch=inventory doc_type=%s pages=%d", raw_type, len(file_paths))
+            return _handle_inventory_image(file_paths, raw_type, state)
         try:
             reply = summarise_operational_note_from_image(file_paths[0])
             return reply, state
@@ -1566,12 +1602,15 @@ def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
 
     logger.info("Image upload: extraction succeeded for %s", fname)
 
-    # --- Step 2: operational note / service report ---
+    # --- Step 2: operational note / service report / inventory ---
     if _is_operational_note(extracted):
-        # Service report takes priority over generic operational note summary.
-        if (extracted.get("doc_type") or "").lower() == "service_report":
+        raw_type = (extracted.get("doc_type") or "").lower()
+        if raw_type == "service_report":
             logger.info("Image upload: branch=service_report for %s", fname)
             return _handle_service_report_image([file_path], state)
+        if raw_type in _INVENTORY_DOC_TYPES:
+            logger.info("Image upload: branch=inventory doc_type=%s for %s", raw_type, fname)
+            return _handle_inventory_image([file_path], raw_type, state)
         logger.info("Image upload: branch=operational_note for %s", fname)
         try:
             reply = summarise_operational_note_from_image(file_path)
@@ -1613,6 +1652,311 @@ def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
         logger.exception("Image upload: commercial processing failed for %s: %s", fname, exc)
         logger.info("Image upload: branch=failed reply=IMAGE_RECEIVED")
         return _image_received_response(), state
+
+
+# ---------------------------------------------------------------------------
+# Inventory handlers
+# ---------------------------------------------------------------------------
+
+def _handle_inventory_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
+    """Handle an inventory doc_record produced by _extract_pdf_to_doc_record."""
+    user_id = state.get("user_id", "")
+    data = doc_record.get("inventory_data") or {}
+    source = doc_record.get("file_path", "")
+    eq_items = data.get("equipment") or []
+    st_items = data.get("stock") or []
+    eq_added, eq_merged = merge_equipment(user_id, eq_items, source)
+    st_added, st_merged = merge_stock(user_id, st_items, source)
+    state["last_context"] = {"type": "inventory_import", "doc_type": doc_record.get("doc_type")}
+    return format_inventory_response(eq_added, eq_merged, st_added, st_merged), state
+
+
+def _handle_inventory_image(image_paths: list, doc_type: str, state: dict) -> Tuple[str, dict]:
+    """Extract, store, and format an inventory from image files."""
+    try:
+        data = extract_inventory_images(image_paths)
+    except Exception as exc:
+        logger.exception("Inventory image handler failed: %s", exc)
+        data = {"equipment": [], "stock": []}
+    user_id = state.get("user_id", "")
+    source = image_paths[0] if image_paths else ""
+    eq_added, eq_merged = merge_equipment(user_id, data.get("equipment") or [], source)
+    st_added, st_merged = merge_stock(user_id, data.get("stock") or [], source)
+    state["last_context"] = {"type": "inventory_import", "doc_type": doc_type}
+    return format_inventory_response(eq_added, eq_merged, st_added, st_merged), state
+
+
+def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tuple[str, dict]:
+    """Process an Excel or CSV inventory file uploaded directly."""
+    lower_ct = content_type.lower()
+    try:
+        if lower_ct in _EXCEL_CONTENT_TYPES or file_path.lower().endswith((".xlsx", ".xls")):
+            data = extract_inventory_from_excel(file_path)
+        else:
+            data = extract_inventory_from_csv(file_path)
+    except Exception as exc:
+        logger.exception("Inventory file handler failed file=%s: %s", file_path, exc)
+        data = {"equipment": [], "stock": []}
+    user_id = state.get("user_id", "")
+    eq_added, eq_merged = merge_equipment(user_id, data.get("equipment") or [], file_path)
+    st_added, st_merged = merge_stock(user_id, data.get("stock") or [], file_path)
+    state["last_context"] = {"type": "inventory_import"}
+    return format_inventory_response(eq_added, eq_merged, st_added, st_merged), state
+
+
+# ---------------------------------------------------------------------------
+# Inventory retrieval helpers
+# ---------------------------------------------------------------------------
+
+def _handle_show_equipment(state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    items = get_all_equipment(user_id)
+    if not items:
+        return _make_response(
+            decision="NO EQUIPMENT RECORDS",
+            why="No equipment has been imported yet.",
+            actions=["Upload an equipment list (Excel, CSV, or PDF)"],
+        ), state
+    lines = [f"EQUIPMENT ({len(items)} records):\n"]
+    for item in items[:20]:
+        name = item.get("equipment_name") or item.get("system") or "Unknown"
+        make = item.get("make") or ""
+        model = item.get("model") or ""
+        loc = item.get("location") or ""
+        sys = item.get("system") or ""
+        detail_parts = [p for p in [make, model] if p]
+        detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        loc_str = f" — {loc}" if loc else ""
+        sys_str = f" [{sys}]" if sys and sys != name else ""
+        lines.append(f"• {name}{detail}{sys_str}{loc_str}")
+    if len(items) > 20:
+        lines.append(f"... and {len(items) - 20} more")
+    return "\n".join(lines).strip(), state
+
+
+def _handle_show_stock(state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    items = get_all_stock(user_id)
+    if not items:
+        return _make_response(
+            decision="NO STOCK RECORDS",
+            why="No stock has been imported yet.",
+            actions=["Upload a stock list or spare parts inventory"],
+        ), state
+    lines = [f"STOCK ({len(items)} items):\n"]
+    for item in items[:25]:
+        desc = item.get("description") or item.get("part_number") or "Unknown"
+        qty = item.get("quantity_onboard")
+        unit = item.get("unit") or ""
+        loc = item.get("storage_location") or ""
+        pn = item.get("part_number") or ""
+        qty_str = f" — Qty: {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
+        loc_str = f" [{loc}]" if loc else ""
+        pn_str = f" ({pn})" if pn and pn != desc else ""
+        lines.append(f"• {desc}{pn_str}{qty_str}{loc_str}")
+    if len(items) > 25:
+        lines.append(f"... and {len(items) - 25} more")
+    return "\n".join(lines).strip(), state
+
+
+def _extract_subject_from_query(query: str, prefixes: list) -> str:
+    t = query.lower().strip()
+    for prefix in sorted(prefixes, key=len, reverse=True):
+        if prefix in t:
+            idx = t.index(prefix) + len(prefix)
+            return query[idx:].strip().rstrip("?").strip()
+    return query.strip()
+
+
+def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    subject = _extract_subject_from_query(query, [
+        "do we have ", "do we stock ", "have we got ", "is there any ",
+        "do we carry ", "how many do we have ", "how much do we have ",
+        "how many have we got ", "do we have any ",
+    ])
+    if not subject:
+        subject = query
+    results = find_stock_by_query(user_id, subject)
+    if not results:
+        return _make_response(
+            decision="NO ONBOARD STOCK MATCH",
+            why=f"No onboard stock match found for '{subject}'.",
+            actions=["Check spelling", "Upload your stock list to build onboard memory"],
+        ), state
+    lines = [f"STOCK FOUND — '{subject}':\n"]
+    for item in results[:8]:
+        desc = item.get("description") or item.get("part_number") or "Unknown"
+        qty = item.get("quantity_onboard")
+        unit = item.get("unit") or ""
+        loc = item.get("storage_location") or ""
+        pn = item.get("part_number") or ""
+        conf = item.get("confidence", 0.7)
+        conf_label = "✓" if conf >= 0.75 else "~"
+        qty_str = f"Qty: {qty}{(' ' + unit).rstrip()}" if qty is not None else "Qty: unknown"
+        loc_str = f" | Location: {loc}" if loc else ""
+        pn_str = f" | P/N: {pn}" if pn else ""
+        lines.append(f"{conf_label} {desc}{pn_str} — {qty_str}{loc_str}")
+    return "\n".join(lines).strip(), state
+
+
+def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    system = _extract_subject_from_query(query, [
+        "show spares for ", "spares for ", "spare parts for ",
+        "what spares for ", "what spares do we have for ", "parts for ",
+    ])
+    if not system:
+        system = query
+    results = find_stock_for_system(user_id, system)
+    if not results:
+        return _make_response(
+            decision="NO SPARES FOUND",
+            why=f"No spare parts found linked to '{system}'. "
+                "This may mean no spares are recorded or the system name doesn't match.",
+            actions=[
+                "Check the system name matches your stock list",
+                "Upload a spare parts list to build onboard memory",
+            ],
+        ), state
+    lines = [f"SPARES FOR '{system.upper()}' ({len(results)} items):\n"]
+    for item in results[:10]:
+        desc = item.get("description") or "Unknown"
+        qty = item.get("quantity_onboard")
+        unit = item.get("unit") or ""
+        loc = item.get("storage_location") or ""
+        pn = item.get("part_number") or ""
+        qty_str = f"Qty: {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
+        loc_str = f" [{loc}]" if loc else ""
+        pn_str = f" ({pn})" if pn else ""
+        lines.append(f"• {desc}{pn_str} — {qty_str}{loc_str}")
+    return "\n".join(lines).strip(), state
+
+
+def _handle_equipment_query(query: str, state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    subject = _extract_subject_from_query(query, [
+        "what equipment from ", "what equipment by ", "equipment from ",
+        "what is fitted to ", "what is installed on ", "fitted to ",
+    ])
+    if not subject:
+        subject = query
+
+    # "fitted to" queries: find stock linked to that equipment
+    if any(p in query.lower() for p in ("fitted to", "installed on", "what is this fitted", "what is that fitted")):
+        results = find_stock_for_system(user_id, subject)
+        if not results:
+            return (
+                f"No parts found linked to '{subject}' in onboard stock records.\n"
+                "Upload your stock list to build this context."
+            ), state
+        lines = [f"PARTS FITTED TO '{subject.upper()}':\n"]
+        for item in results[:8]:
+            lines.append(f"• {item.get('description') or item.get('part_number') or 'Unknown'}")
+        return "\n".join(lines).strip(), state
+
+    # "equipment from/by <make>" queries
+    results = find_equipment_by_query(user_id, subject)
+    if not results:
+        return _make_response(
+            decision="NO EQUIPMENT MATCH",
+            why=f"No equipment found matching '{subject}'.",
+            actions=["Upload an equipment list to build onboard memory"],
+        ), state
+    lines = [f"EQUIPMENT MATCHING '{subject.upper()}' ({len(results)} items):\n"]
+    for item in results[:10]:
+        name = item.get("equipment_name") or "Unknown"
+        make = item.get("make") or ""
+        model = item.get("model") or ""
+        sys = item.get("system") or ""
+        sn = item.get("serial_number") or ""
+        detail = ", ".join(p for p in [make, model] if p)
+        sn_str = f" SN:{sn}" if sn else ""
+        sys_str = f" [{sys}]" if sys else ""
+        lines.append(f"• {name} — {detail}{sn_str}{sys_str}" if detail else f"• {name}{sn_str}{sys_str}")
+    return "\n".join(lines).strip(), state
+
+
+def _get_stock_ordering_note(query: str, state: dict) -> Optional[str]:
+    """
+    If we have onboard stock for the item the user is asking about ordering,
+    return a 'check stock first' message. Returns None if no match.
+    """
+    user_id = state.get("user_id", "")
+    last_ctx = state.get("last_context", {})
+
+    # Try to derive the subject from document context first
+    subject = ""
+    doc_ctx = _build_document_context(state)
+    if doc_ctx:
+        m = re.search(r'(?:description|item)[:\s]+([^\n,]{3,60})', doc_ctx, re.IGNORECASE)
+        if m:
+            subject = m.group(1).strip()
+
+    if not subject:
+        subject = _extract_subject_from_query(query, [
+            "how many should i order", "how many should we order",
+            "how many to order", "should i order", "should we order",
+        ])
+
+    if not subject or len(subject) < 3:
+        return None
+
+    results = find_stock_by_query(user_id, subject)
+    if not results:
+        return None
+
+    best = results[0]
+    qty = best.get("quantity_onboard")
+    loc = best.get("storage_location") or ""
+    desc = best.get("description") or subject
+    qty_str = f"quantity {qty}" if qty is not None else "quantity unknown"
+    loc_str = f" in {loc}" if loc else ""
+
+    return (
+        "DECISION:\nCHECK STOCK BEFORE ORDERING\n\n"
+        f"WHY:\n'{desc}' appears to be held onboard with {qty_str}{loc_str}. "
+        "Verify current stock before placing an order.\n\n"
+        "RECOMMENDED ACTIONS:\n"
+        f"• Physically verify stock in{loc_str if loc_str else ' storage'}\n"
+        "• Order only the shortfall if stock is below minimum level\n"
+        "• Update stock records after consumption"
+    )
+
+
+def _build_equipment_context(state: dict) -> str:
+    """
+    Return a brief equipment context note if we have onboard records that
+    match the last uploaded document's subject — for enriching market checks.
+    """
+    user_id = state.get("user_id", "")
+    last_ctx = state.get("last_context", {})
+    supplier = last_ctx.get("supplier", "")
+    doc_ctx = _build_document_context(state)
+    if not doc_ctx:
+        return ""
+
+    # Try to find a match from document context line items / supplier
+    search_terms = []
+    if supplier:
+        search_terms.append(supplier)
+    for m in re.finditer(r'(?:description|item|equipment)[:\s]+([^\n,]{3,60})', doc_ctx, re.IGNORECASE):
+        search_terms.append(m.group(1).strip())
+
+    for term in search_terms[:3]:
+        eq = find_equipment_by_query(user_id, term)
+        if eq:
+            item = eq[0]
+            name = item.get("equipment_name") or item.get("system") or term
+            make = item.get("make") or ""
+            model = item.get("model") or ""
+            detail = ", ".join(p for p in [make, model] if p)
+            note = f"Onboard equipment match: {name}"
+            if detail:
+                note += f" ({detail})"
+            return note
+
+    return ""
 
 
 def _handle_service_report_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
@@ -1721,20 +2065,34 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
     """Extract text/images from a PDF and return a normalised doc_record. Does NOT touch state."""
     text = extract_pdf_text(file_path)
 
-    # Service report pre-screen: check raw text BEFORE commercial extraction.
-    if text.strip() and is_service_report_text(text):
-        logger.info("PDF: service report detected in raw text, routing to service report extraction")
-        report = extract_service_report_from_text(text)
-        return make_service_report_doc_record(report, file_path)
+    if text.strip():
+        # Inventory pre-screen: check raw text BEFORE service report / commercial extraction.
+        inv_type = classify_inventory_text(text)
+        if inv_type:
+            logger.info("PDF: inventory detected doc_type=%s, routing to inventory extraction", inv_type)
+            data = extract_inventory_from_text(text)
+            return make_inventory_doc_record(data, inv_type, file_path)
+
+        # Service report pre-screen: check raw text BEFORE commercial extraction.
+        if is_service_report_text(text):
+            logger.info("PDF: service report detected in raw text, routing to service report extraction")
+            report = extract_service_report_from_text(text)
+            return make_service_report_doc_record(report, file_path)
 
     if not text.strip():
         image_paths = render_pdf_pages_to_images(file_path)
         extracted = extract_commercial_document_from_images(image_paths)
-        # Vision model may also classify as service_report (doc_type option added to prompt)
-        if isinstance(extracted, dict) and (extracted.get("doc_type") or "").lower() == "service_report":
-            logger.info("PDF (image path): service report detected by vision, running structured extraction")
-            report = extract_service_report_from_images(image_paths)
-            return make_service_report_doc_record(report, file_path)
+        if isinstance(extracted, dict):
+            raw_type = (extracted.get("doc_type") or "").lower()
+            if raw_type in _INVENTORY_DOC_TYPES:
+                logger.info("PDF (image): inventory detected doc_type=%s, running extraction", raw_type)
+                data = extract_inventory_images(image_paths)
+                return make_inventory_doc_record(data, raw_type, file_path)
+            # Vision model may also classify as service_report (doc_type option added to prompt)
+            if raw_type == "service_report":
+                logger.info("PDF (image path): service report detected by vision, running structured extraction")
+                report = extract_service_report_from_images(image_paths)
+                return make_service_report_doc_record(report, file_path)
     else:
         extracted = extract_commercial_document_with_claude(text)
 
@@ -1767,6 +2125,10 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
             _fp, doc_type, supplier,
         )
         return "__duplicate__", state
+
+    if doc_type in _INVENTORY_DOC_TYPES:
+        answer, state = _handle_inventory_doc(doc_record, state)
+        return answer, state
 
     if doc_type == "service_report":
         answer, state = _handle_service_report_doc(doc_record, state)
@@ -1914,6 +2276,14 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     # Context-aware follow-up routing:
     if intent in ("what_to_do", "compliance_followup", "commercial_followup"):
+        # Stock check: intercept ordering queries before the normal commercial flow.
+        _t_lower = incoming.lower()
+        if any(p in _t_lower for p in (
+            "how many should i order", "how many should we order", "how many to order",
+        )):
+            _stock_note = _get_stock_ordering_note(incoming, state)
+            if _stock_note:
+                return _stock_note, state
         if last_ctx.get("type") == "compliance" and intent in ("what_to_do", "compliance_followup"):
             topic = last_ctx.get("topic", "")
             if topic:
@@ -1976,11 +2346,31 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if intent == "show_open_actions":
         return _handle_show_open_actions(state)
 
+    if intent == "show_equipment":
+        return _handle_show_equipment(state)
+
+    if intent == "show_stock":
+        return _handle_show_stock(state)
+
+    if intent == "stock_query":
+        return _handle_stock_query(incoming, state)
+
+    if intent == "spares_query":
+        return _handle_spares_query(incoming, state)
+
+    if intent == "equipment_query":
+        return _handle_equipment_query(incoming, state)
+
     if intent == "market_check":
         # If we have document or component context, use the dedicated enriched handler
         # which guards against empty responses and logs diagnostic fields.
         doc_ctx = _build_document_context(state)
         comp_ctx = build_component_context(state)
+        eq_ctx = _build_equipment_context(state)
+        if eq_ctx and doc_ctx:
+            doc_ctx = doc_ctx + "\n" + eq_ctx
+        elif eq_ctx:
+            doc_ctx = eq_ctx
         if doc_ctx or comp_ctx:
             return _handle_document_market_check(incoming, state, doc_ctx, comp_ctx)
         # No context — enrich vague pronoun references and call directly.
@@ -2086,6 +2476,7 @@ def whatsapp_reply():
             # message can be sent to Claude together as one multi-page document.
             pdf_doc_records: list = []
             image_file_paths: list = []
+            _spreadsheet_answers: list = []
             for i in range(num_media):
                 media_url = request.form.get(f"MediaUrl{i}")
                 media_type = (request.form.get(f"MediaContentType{i}") or "").strip().lower()
@@ -2117,6 +2508,18 @@ def whatsapp_reply():
                     image_file_paths.append(file_path)
                     image_started = True
 
+                elif (
+                    media_type in _EXCEL_CONTENT_TYPES
+                    or media_type in _CSV_CONTENT_TYPES
+                    or file_path.lower().endswith((".xlsx", ".xls", ".csv"))
+                ):
+                    logger.info(
+                        "Media [%d/%d]: spreadsheet detected content_type=%r",
+                        i + 1, num_media, media_type,
+                    )
+                    inv_answer, state = _handle_inventory_file(file_path, media_type, state)
+                    _spreadsheet_answers.append(inv_answer)
+
                 else:
                     logger.warning("Unsupported media type [%d/%d]: %r", i + 1, num_media, media_type)
 
@@ -2137,7 +2540,7 @@ def whatsapp_reply():
             # sends INVOICE RECEIVED via REST if no quote webhook arrives within 15 s.
             pdf_doc_records.sort(key=lambda d: 0 if d.get("doc_type") == "quote" else 1)
 
-            pdf_answers: list = []
+            pdf_answers: list = list(_spreadsheet_answers)
             comparison_answer: Optional[str] = None
             _any_silent = False
             _skipped_duplicates: list = []

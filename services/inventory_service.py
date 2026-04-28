@@ -1,0 +1,583 @@
+"""
+Inventory ingestion: classify, extract, and normalise equipment lists
+and stock inventories from Excel, CSV, PDF text, and images.
+"""
+import io
+import re
+import os
+import csv
+import json
+import uuid
+import base64
+import hashlib
+import logging
+from typing import Optional
+from dotenv import load_dotenv
+from anthropic import Anthropic
+
+load_dotenv(dotenv_path=".env")
+logger = logging.getLogger(__name__)
+client = Anthropic(api_key=os.environ.get("ANTHROPIC_API_KEY"))
+
+# ---------------------------------------------------------------------------
+# Classification signals
+# ---------------------------------------------------------------------------
+
+_EQUIPMENT_HEADING_KW = frozenset([
+    "equipment list", "machinery list", "asset list", "asset register",
+    "equipment register", "machinery register", "equipment inventory",
+    "installed equipment", "onboard equipment", "vessel equipment",
+])
+
+_STOCK_HEADING_KW = frozenset([
+    "stock list", "spare parts list", "spare parts inventory", "spares list",
+    "inventory", "stores list", "parts list", "parts inventory",
+    "stock inventory", "consumables", "bonded stores",
+])
+
+_EQUIPMENT_BODY_KW = frozenset([
+    "serial number", "s/n", "installed", "asset", "machinery",
+    "make", "model",
+])
+
+_STOCK_BODY_KW = frozenset([
+    "part number", "p/n", "qty", "quantity", "bin", "onboard",
+    "storage location", "spare", "consumable",
+])
+
+
+def classify_inventory_text(text: str) -> Optional[str]:
+    """
+    Return 'equipment_list', 'stock_inventory', 'spare_parts_inventory', or None.
+    Uses keyword signals — no Claude call.
+    """
+    t = text.lower()
+
+    # Heading-level signals — one match is enough.
+    for kw in _STOCK_HEADING_KW:
+        if kw in t:
+            doc_type = "spare_parts_inventory" if "spare" in kw else "stock_inventory"
+            logger.debug("inventory_classify: heading match kw=%r → %s", kw, doc_type)
+            return doc_type
+
+    for kw in _EQUIPMENT_HEADING_KW:
+        if kw in t:
+            logger.debug("inventory_classify: heading match kw=%r → equipment_list", kw)
+            return "equipment_list"
+
+    # Body signals — 2+ required.
+    stock_hits = sum(1 for kw in _STOCK_BODY_KW if kw in t)
+    equip_hits = sum(1 for kw in _EQUIPMENT_BODY_KW if kw in t)
+
+    if stock_hits >= 2 and stock_hits >= equip_hits:
+        return "stock_inventory"
+    if equip_hits >= 2:
+        return "equipment_list"
+
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Column header normalisation
+# ---------------------------------------------------------------------------
+
+_EQUIPMENT_COL_MAP = {
+    "system": "system",
+    "equipment": "equipment_name",
+    "equipment name": "equipment_name",
+    "equipment_name": "equipment_name",
+    "name": "equipment_name",
+    "description": "equipment_name",
+    "machinery": "equipment_name",
+    "asset": "equipment_name",
+    "item": "equipment_name",
+    "make": "make",
+    "maker": "make",
+    "brand": "make",
+    "manufacturer": "make",
+    "mfr": "make",
+    "model": "model",
+    "type": "model",
+    "serial": "serial_number",
+    "serial number": "serial_number",
+    "serial no": "serial_number",
+    "serial no.": "serial_number",
+    "s/n": "serial_number",
+    "sn": "serial_number",
+    "serial_number": "serial_number",
+    "location": "location",
+    "loc": "location",
+    "position": "location",
+    "installed at": "location",
+    "notes": "notes",
+    "remarks": "notes",
+    "comment": "notes",
+    "comments": "notes",
+}
+
+_STOCK_COL_MAP = {
+    "part number": "part_number",
+    "part no": "part_number",
+    "part no.": "part_number",
+    "p/n": "part_number",
+    "pn": "part_number",
+    "part_number": "part_number",
+    "code": "part_number",
+    "item code": "part_number",
+    "part code": "part_number",
+    "ref": "part_number",
+    "reference": "part_number",
+    "description": "description",
+    "desc": "description",
+    "item": "description",
+    "item description": "description",
+    "name": "description",
+    "qty": "quantity_onboard",
+    "quantity": "quantity_onboard",
+    "qty onboard": "quantity_onboard",
+    "qty on board": "quantity_onboard",
+    "stock": "quantity_onboard",
+    "on hand": "quantity_onboard",
+    "in stock": "quantity_onboard",
+    "onboard": "quantity_onboard",
+    "unit": "unit",
+    "uom": "unit",
+    "units": "unit",
+    "location": "storage_location",
+    "loc": "storage_location",
+    "bin": "storage_location",
+    "storage location": "storage_location",
+    "store": "storage_location",
+    "storage": "storage_location",
+    "storeroom": "storage_location",
+    "storage_location": "storage_location",
+    "equipment": "linked_equipment",
+    "linked equipment": "linked_equipment",
+    "linked_equipment": "linked_equipment",
+    "fitted to": "linked_equipment",
+    "for": "linked_equipment",
+    "applicable to": "linked_equipment",
+    "system": "linked_equipment",
+    "make": "make",
+    "manufacturer": "make",
+    "brand": "make",
+    "model": "model",
+    "supplier": "supplier",
+    "vendor": "supplier",
+    "notes": "notes",
+    "remarks": "notes",
+    "comment": "notes",
+    "comments": "notes",
+}
+
+# Fields unique to each type (used for voting)
+_EQUIPMENT_ONLY_FIELDS = {"serial_number", "system"}
+_STOCK_ONLY_FIELDS = {"part_number", "quantity_onboard", "storage_location", "linked_equipment"}
+
+
+def _normalise_col(raw: str) -> str:
+    return raw.strip().lower().replace("_", " ").replace("-", " ")
+
+
+def _map_headers(raw_headers: list) -> dict:
+    """
+    Given a list of raw column header strings, return a dict mapping
+    col_index → canonical_field_name for all recognised columns.
+    """
+    mapping = {}
+    for i, h in enumerate(raw_headers):
+        norm = _normalise_col(str(h))
+        # Try stock map first (more specific for combined docs)
+        if norm in _STOCK_COL_MAP:
+            mapping[i] = _STOCK_COL_MAP[norm]
+        elif norm in _EQUIPMENT_COL_MAP:
+            mapping[i] = _EQUIPMENT_COL_MAP[norm]
+    return mapping
+
+
+def _classify_mapped_columns(col_mapping: dict) -> str:
+    """Vote on table type from canonical field names."""
+    fields = set(col_mapping.values())
+    stock_votes = len(fields & _STOCK_ONLY_FIELDS)
+    equip_votes = len(fields & _EQUIPMENT_ONLY_FIELDS)
+    if "description" in fields and "part_number" in fields:
+        return "stock"
+    if stock_votes >= equip_votes and ("quantity_onboard" in fields or "part_number" in fields):
+        return "stock"
+    return "equipment"
+
+
+def _parse_qty(val) -> Optional[float]:
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s or s in ("-", "N/A", "n/a", ""):
+        return None
+    # extract leading number from strings like "3 pcs" or "3.5L"
+    m = re.match(r"^([\d]+(?:[.,]\d+)?)", s)
+    if m:
+        try:
+            return float(m.group(1).replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Tabular extraction (shared by Excel and CSV)
+# ---------------------------------------------------------------------------
+
+def _extract_stock_row(row: dict) -> dict:
+    item = {
+        "part_number": (row.get("part_number") or "").strip() or None,
+        "description": (row.get("description") or row.get("equipment_name") or "").strip(),
+        "quantity_onboard": _parse_qty(row.get("quantity_onboard")),
+        "unit": (row.get("unit") or "").strip() or None,
+        "storage_location": (row.get("storage_location") or row.get("location") or "").strip() or None,
+        "linked_equipment": (row.get("linked_equipment") or row.get("system") or "").strip() or None,
+        "make": (row.get("make") or "").strip() or None,
+        "model": (row.get("model") or "").strip() or None,
+        "supplier": (row.get("supplier") or "").strip() or None,
+        "notes": (row.get("notes") or "").strip() or None,
+    }
+    return item if item["description"] or item["part_number"] else {}
+
+
+def _extract_equipment_row(row: dict) -> dict:
+    item = {
+        "system": (row.get("system") or row.get("linked_equipment") or "").strip() or None,
+        "equipment_name": (
+            row.get("equipment_name") or row.get("description") or ""
+        ).strip() or None,
+        "make": (row.get("make") or "").strip() or None,
+        "model": (row.get("model") or "").strip() or None,
+        "serial_number": (row.get("serial_number") or "").strip() or None,
+        "location": (row.get("location") or row.get("storage_location") or "").strip() or None,
+        "notes": (row.get("notes") or "").strip() or None,
+    }
+    return item if item["equipment_name"] or item["system"] else {}
+
+
+def extract_inventory_from_tabular(headers: list, rows: list, confidence: float = 0.8) -> dict:
+    """
+    Convert a list of header strings and row dicts (keyed by header index)
+    into a normalised inventory dict {equipment: [...], stock: [...]}.
+    """
+    col_mapping = _map_headers(headers)
+    if not col_mapping:
+        logger.warning("inventory: no recognisable columns in headers=%r", headers[:10])
+        return {"equipment": [], "stock": []}
+
+    table_type = _classify_mapped_columns(col_mapping)
+    logger.info("inventory tabular: table_type=%s cols_recognised=%d", table_type, len(col_mapping))
+
+    equipment_items = []
+    stock_items = []
+
+    for raw_row in rows:
+        # Map column indices to canonical field names
+        mapped: dict = {}
+        for col_idx, canon_field in col_mapping.items():
+            if col_idx < len(raw_row):
+                val = raw_row[col_idx]
+                if val is not None and str(val).strip():
+                    mapped[canon_field] = str(val).strip()
+
+        if not mapped:
+            continue
+
+        if table_type == "stock":
+            item = _extract_stock_row(mapped)
+            if item:
+                item["confidence"] = confidence
+                stock_items.append(item)
+        else:
+            item = _extract_equipment_row(mapped)
+            if item:
+                item["confidence"] = confidence
+                equipment_items.append(item)
+
+    return {"equipment": equipment_items, "stock": stock_items}
+
+
+# ---------------------------------------------------------------------------
+# Excel extraction
+# ---------------------------------------------------------------------------
+
+def extract_inventory_from_excel(file_path: str) -> dict:
+    """Parse an Excel file into an inventory dict using pandas."""
+    try:
+        import pandas as pd
+    except ImportError:
+        logger.error("inventory: pandas not available")
+        return {"equipment": [], "stock": []}
+
+    all_equipment: list = []
+    all_stock: list = []
+
+    try:
+        xl = pd.ExcelFile(file_path, engine="openpyxl")
+    except Exception:
+        try:
+            xl = pd.ExcelFile(file_path, engine="xlrd")
+        except Exception as exc:
+            logger.warning("inventory: failed to open Excel file=%s: %s", file_path, exc)
+            return {"equipment": [], "stock": []}
+
+    for sheet_name in xl.sheet_names:
+        try:
+            df = xl.parse(sheet_name, header=0, dtype=str)
+        except Exception as exc:
+            logger.warning("inventory: failed to parse sheet=%r: %s", sheet_name, exc)
+            continue
+
+        df = df.dropna(how="all")
+        if df.empty:
+            continue
+
+        headers = [str(h) for h in df.columns.tolist()]
+        rows = [row.tolist() for _, row in df.iterrows()]
+
+        result = extract_inventory_from_tabular(headers, rows, confidence=0.8)
+        all_equipment.extend(result["equipment"])
+        all_stock.extend(result["stock"])
+
+    logger.info(
+        "inventory excel: equipment=%d stock=%d file=%s",
+        len(all_equipment), len(all_stock), os.path.basename(file_path),
+    )
+    return {"equipment": all_equipment, "stock": all_stock}
+
+
+# ---------------------------------------------------------------------------
+# CSV extraction
+# ---------------------------------------------------------------------------
+
+def extract_inventory_from_csv(file_path: str) -> dict:
+    """Parse a CSV file into an inventory dict."""
+    try:
+        with open(file_path, newline="", encoding="utf-8-sig") as f:
+            sample = f.read(2048)
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except Exception:
+        dialect = csv.excel
+
+    try:
+        with open(file_path, newline="", encoding="utf-8-sig") as f:
+            reader = csv.reader(f, dialect)
+            all_rows = list(reader)
+    except Exception as exc:
+        logger.warning("inventory: CSV read failed file=%s: %s", file_path, exc)
+        return {"equipment": [], "stock": []}
+
+    if len(all_rows) < 2:
+        return {"equipment": [], "stock": []}
+
+    headers = all_rows[0]
+    rows = all_rows[1:]
+
+    result = extract_inventory_from_tabular(headers, rows, confidence=0.8)
+    logger.info(
+        "inventory csv: equipment=%d stock=%d file=%s",
+        len(result["equipment"]), len(result["stock"]), os.path.basename(file_path),
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Claude extraction prompt (text and images)
+# ---------------------------------------------------------------------------
+
+_INVENTORY_EXTRACT_PROMPT = """\
+You are extracting structured inventory data from a marine vessel document.
+The document may be an equipment list, spare parts inventory, or stock list.
+It may be a table, spreadsheet image, list, or unstructured text.
+
+Return ONLY valid JSON. No commentary, no markdown fencing.
+
+{
+  "doc_type": "equipment_list|stock_inventory|spare_parts_inventory|null",
+  "equipment": [
+    {
+      "system": "string|null",
+      "equipment_name": "string|null",
+      "make": "string|null",
+      "model": "string|null",
+      "serial_number": "string|null",
+      "location": "string|null",
+      "notes": "string|null"
+    }
+  ],
+  "stock": [
+    {
+      "part_number": "string|null",
+      "description": "string",
+      "quantity_onboard": "number|null",
+      "unit": "string|null",
+      "storage_location": "string|null",
+      "linked_equipment": "string|null",
+      "make": "string|null",
+      "model": "string|null",
+      "supplier": "string|null",
+      "notes": "string|null"
+    }
+  ]
+}
+
+Rules:
+- equipment: machinery, systems, assets installed onboard (main engine, generator, OWS, etc.)
+- stock: spare parts, consumables, stores held onboard (oil, filters, gaskets, etc.)
+- If equipment list only: leave stock empty array
+- If stock/spares list only: leave equipment empty array
+- Some documents contain both
+- Normalise headers: Qty → quantity_onboard, S/N → serial_number, Loc/Bin → storage_location
+- quantity_onboard must be a number or null — never a string
+- If quantity is a range, use the lower bound
+- linked_equipment: the equipment a spare part belongs to, if stated
+- Use null for unknown fields. Do not invent values.
+"""
+
+
+def _parse_json(raw: str) -> dict:
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```(?:json)?\n?", "", raw)
+        raw = re.sub(r"\n?```$", "", raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as exc:
+        logger.warning("inventory: JSON parse failed: %s raw=%r", exc, raw[:200])
+        return {}
+
+
+def extract_inventory_from_text(text: str) -> dict:
+    """Extract inventory from plain text via Claude."""
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4000,
+            system=_INVENTORY_EXTRACT_PROMPT,
+            messages=[{"role": "user", "content": text[:12000]}],
+            timeout=90.0,
+        )
+        result = _parse_json(response.content[0].text)
+        eq = result.get("equipment") or []
+        st = result.get("stock") or []
+        for item in eq:
+            item.setdefault("confidence", 0.7)
+        for item in st:
+            item.setdefault("confidence", 0.7)
+        logger.info(
+            "inventory text extraction: doc_type=%r equipment=%d stock=%d",
+            result.get("doc_type"), len(eq), len(st),
+        )
+        return {"equipment": eq, "stock": st}
+    except Exception as exc:
+        logger.exception("inventory text extraction failed: %s", exc)
+        return {"equipment": [], "stock": []}
+
+
+def extract_inventory_from_images(image_paths: list) -> dict:
+    """Extract inventory from image files via Claude vision."""
+    content = []
+    for path in image_paths[:4]:
+        media_type = "image/png" if path.lower().endswith(".png") else "image/jpeg"
+        try:
+            with open(path, "rb") as f:
+                data = base64.b64encode(f.read()).decode()
+            content.append({
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": data},
+            })
+        except Exception as exc:
+            logger.warning("inventory image: failed to read %s: %s", path, exc)
+
+    if not content:
+        return {"equipment": [], "stock": []}
+
+    content.append({
+        "type": "text",
+        "text": "Extract structured inventory data from this document. Return only the JSON object.",
+    })
+
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=4000,
+            system=_INVENTORY_EXTRACT_PROMPT,
+            messages=[{"role": "user", "content": content}],
+            timeout=90.0,
+        )
+        result = _parse_json(response.content[0].text)
+        eq = result.get("equipment") or []
+        st = result.get("stock") or []
+        for item in eq:
+            item.setdefault("confidence", 0.65)
+        for item in st:
+            item.setdefault("confidence", 0.65)
+        logger.info(
+            "inventory image extraction: doc_type=%r equipment=%d stock=%d",
+            result.get("doc_type"), len(eq), len(st),
+        )
+        return {"equipment": eq, "stock": st}
+    except Exception as exc:
+        logger.exception("inventory image extraction failed: %s", exc)
+        return {"equipment": [], "stock": []}
+
+
+# ---------------------------------------------------------------------------
+# doc_record builder (compatible with _dispatch_doc_record)
+# ---------------------------------------------------------------------------
+
+def make_inventory_doc_record(data: dict, doc_type: str, file_path: str) -> dict:
+    fp = hashlib.md5(file_path.encode()).hexdigest()
+    return {
+        "document_id": str(uuid.uuid4()),
+        "file_path": file_path,
+        "doc_type": doc_type,
+        "supplier_name": "",
+        "document_number": "",
+        "reference_number": "",
+        "document_date": "",
+        "currency": "",
+        "total": None,
+        "subtotal": None,
+        "tax": None,
+        "line_items": [],
+        "exclusions": [],
+        "assumptions": [],
+        "fingerprint": fp,
+        "billing_address": {},
+        "delivery_address": {},
+        "status": "new",
+        "inventory_data": data,
+    }
+
+
+# ---------------------------------------------------------------------------
+# WhatsApp response formatter
+# ---------------------------------------------------------------------------
+
+def format_inventory_response(eq_added: int, eq_merged: int, st_added: int, st_merged: int) -> str:
+    eq_total = eq_added + eq_merged
+    st_total = st_added + st_merged
+    parts = []
+    if eq_total:
+        parts.append(f"{eq_added} new + {eq_merged} updated equipment records")
+    if st_total:
+        parts.append(f"{st_added} new + {st_merged} updated stock items")
+    if not parts:
+        parts.append("no records recognised")
+
+    summary = "; ".join(parts)
+
+    return (
+        "DECISION:\nINVENTORY IMPORTED\n\n"
+        f"WHY:\nImported {summary}. "
+        "Fields have been normalised from source data.\n\n"
+        "RECOMMENDED ACTIONS:\n"
+        "• Ask \"do we have <part> onboard?\"\n"
+        "• Ask \"show spares for <system>\"\n"
+        "• Ask \"show equipment\" or \"show stock\"\n"
+        "• Ask \"what is this fitted to?\""
+    )

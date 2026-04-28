@@ -45,12 +45,15 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
             '- Use "invoice" when the document is an invoice, tax invoice, final invoice, commercial invoice, or billing request (and is NOT a proforma).\n'
             '- Use "quote" when the document is a quotation, proposal, estimate, offer, or price offer (and is NOT a proforma or invoice).\n'
             '- Use "service_report" when the document is a service report, field service report, attendance report, work report, inspection report, maintenance report, or commissioning report — even if it lacks pricing. NOT a quote or invoice from a service company.\n'
+            '- Use "equipment_list" when the document is an equipment list, machinery list, asset register, or installed equipment inventory.\n'
+            '- Use "stock_inventory" when the document is a stock list, inventory, stores list, or consumables list.\n'
+            '- Use "spare_parts_inventory" when the document is a spare parts list, spares inventory, or parts inventory.\n'
             '- If uncertain, choose the best grounded value from visible headings, labels, numbering, or wording.\n'
             "- Extract reference_number from 'ref:', 'your ref:', 'our ref:', 'customer ref:', 'quote ref:', or 'order ref:' fields — on a proforma this is typically the original quote number.\n"
             "\n"
             "Return exactly this JSON schema:\n"
             "{\n"
-            '  "doc_type": "quote|invoice|proforma|null",\n'
+            '  "doc_type": "quote|invoice|proforma|equipment_list|stock_inventory|spare_parts_inventory|null",\n'
             '  "supplier_name": "string|null",\n'
             '  "document_number": "string|null",\n'
             '  "reference_number": "string|null",\n'

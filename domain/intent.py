@@ -52,6 +52,21 @@ _FOLLOW_UPS = {
     "open actions": "show_open_actions",
     "list open actions": "show_open_actions",
     "outstanding actions": "show_open_actions",
+    # Inventory retrieval — exact phrases
+    "show equipment": "show_equipment",
+    "list equipment": "show_equipment",
+    "show machinery": "show_equipment",
+    "show all equipment": "show_equipment",
+    "equipment list": "show_equipment",
+    "machinery list": "show_equipment",
+    "what equipment do we have": "show_equipment",
+    "show stock": "show_stock",
+    "show inventory": "show_stock",
+    "show spares": "show_stock",
+    "show spare parts": "show_stock",
+    "what stock do we have": "show_stock",
+    "list stock": "show_stock",
+    "list spares": "show_stock",
 }
 
 # Phrases that request follow-up actions/clarification after a compliance answer.
@@ -154,6 +169,39 @@ _HANDOVER_SUBSTRINGS = [
 _OPEN_ACTIONS_SUBSTRINGS = [
     "open action",
     "outstanding action",
+]
+
+# Inventory query substrings — matched after handover/open-action checks.
+_STOCK_QUERY_SUBSTRINGS = [
+    "do we have ",
+    "do we stock ",
+    "have we got ",
+    "is there any ",
+    "do we carry ",
+    "how many do we have",
+    "how much do we have",
+    "how many have we got",
+    "do we have any",
+]
+
+_SPARES_QUERY_SUBSTRINGS = [
+    "show spares for ",
+    "spares for ",
+    "spare parts for ",
+    "what spares for ",
+    "what spares do we have for ",
+    "parts for ",
+]
+
+_EQUIPMENT_QUERY_SUBSTRINGS = [
+    "what equipment from ",
+    "what equipment by ",
+    "equipment from ",
+    "what is fitted to ",
+    "what is installed on ",
+    "fitted to ",
+    "what is this fitted to",
+    "what is that fitted to",
 ]
 
 _GREETINGS = {"hi", "hello", "start", "hey"}
@@ -457,6 +505,15 @@ _COMMERCIAL_GUARD = {
     "handover",
     "service report",
     "open action",
+    "onboard",
+    "stock",
+    "inventory",
+    "spares",
+    "spare parts",
+    "equipment",
+    "machinery",
+    "fitted to",
+    "installed",
 }
 
 # Message starters that indicate an open question.
@@ -486,6 +543,8 @@ def classify_text(text: str) -> str:
       new_session | quote_compare | why_higher | show_added |
       show_missing | what_to_do | show_extraction | compliance_followup |
       commercial_followup | compliance_question | market_check | reminder |
+      show_handover_notes | show_open_actions |
+      show_equipment | show_stock | stock_query | spares_query | equipment_query |
       greeting | unknown
     """
     t = text.strip().lower()
@@ -531,6 +590,18 @@ def classify_text(text: str) -> str:
     for phrase in _OPEN_ACTIONS_SUBSTRINGS:
         if phrase in t:
             return "show_open_actions"
+
+    for phrase in _SPARES_QUERY_SUBSTRINGS:
+        if phrase in t:
+            return "spares_query"
+
+    for phrase in _EQUIPMENT_QUERY_SUBSTRINGS:
+        if phrase in t:
+            return "equipment_query"
+
+    for phrase in _STOCK_QUERY_SUBSTRINGS:
+        if phrase in t:
+            return "stock_query"
 
     for trigger in _QUOTE_COMPARE_SUBSTRINGS:
         if trigger in t:

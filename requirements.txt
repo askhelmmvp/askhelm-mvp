@@ -2,6 +2,7 @@ anthropic
 flask
 gunicorn
 openai
+openpyxl
 pandas
 PyMuPDF
 pypdf
