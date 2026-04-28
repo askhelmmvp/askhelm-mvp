@@ -2126,6 +2126,23 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
         raise ValueError("Document extraction did not return a JSON object")
 
     extracted = normalise_doc_type(extracted)
+
+    # Second-chance inventory screen: the commercial extractor schema only emits
+    # quote/invoice/proforma/null.  If it returned null/unknown and the PDF has
+    # extractable text, re-run inventory classification with the full keyword set
+    # before falling through to DOCUMENT EXTRACTED.
+    _commercial_type = (extracted.get("doc_type") or "").lower()
+    if _commercial_type not in ("quote", "invoice", "proforma") and text.strip():
+        _inv_type = classify_inventory_text(text)
+        if _inv_type:
+            logger.info(
+                "PDF: inventory detected in second-chance screen doc_type=%s, "
+                "routing to inventory extraction",
+                _inv_type,
+            )
+            data = extract_inventory_from_text(text)
+            return make_inventory_doc_record(data, _inv_type, file_path)
+
     return make_document_record(extracted, file_path)
 
 

@@ -27,6 +27,7 @@ _EQUIPMENT_HEADING_KW = frozenset([
     "equipment list", "machinery list", "asset list", "asset register",
     "equipment register", "machinery register", "equipment inventory",
     "installed equipment", "onboard equipment", "vessel equipment",
+    "main machinery",
 ])
 
 _STOCK_HEADING_KW = frozenset([
@@ -36,8 +37,8 @@ _STOCK_HEADING_KW = frozenset([
 ])
 
 _EQUIPMENT_BODY_KW = frozenset([
-    "serial number", "s/n", "installed", "asset", "machinery",
-    "make", "model",
+    "serial number", "serial no", "s/n", "installed", "asset", "machinery",
+    "make", "maker", "manufacturer", "model", "location", "system",
 ])
 
 _STOCK_BODY_KW = frozenset([
@@ -834,6 +835,27 @@ def format_inventory_response(
     if total_records == 0 and parse_error:
         return _INVENTORY_NEEDS_REVIEW
 
+    # Equipment-only import — use focused equipment messages
+    if eq_total > 0 and st_total == 0:
+        if parse_error:
+            return (
+                "DECISION:\nEQUIPMENT LIST PARTIALLY IMPORTED\n\n"
+                f"WHY:\nI imported {eq_total} equipment records, "
+                "but some rows could not be structured safely.\n\n"
+                "RECOMMENDED ACTIONS:\n"
+                "• Upload Excel or CSV for better results\n"
+                "• Or upload the list in smaller sections"
+            )
+        return (
+            "DECISION:\nEQUIPMENT LIST IMPORTED\n\n"
+            f"WHY:\nImported {eq_total} equipment records into vessel memory.\n\n"
+            "RECOMMENDED ACTIONS:\n"
+            "• Ask \"show equipment\"\n"
+            "• Ask \"what equipment do we have from <make>?\"\n"
+            "• Ask \"what is <model/serial>?\""
+        )
+
+    # Stock-only or mixed import
     parts = []
     if eq_total:
         parts.append(f"{eq_added} new + {eq_merged} updated equipment records")
