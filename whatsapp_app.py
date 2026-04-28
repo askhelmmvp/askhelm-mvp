@@ -2089,7 +2089,25 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
 
     if not text.strip():
         image_paths = render_pdf_pages_to_images(file_path)
-        extracted = extract_commercial_document_from_images(image_paths)
+        try:
+            extracted = extract_commercial_document_from_images(image_paths)
+        except json.JSONDecodeError as exc:
+            # The classification call returned malformed JSON (typically a large inventory
+            # list that was truncated). Fall back to page-by-page inventory extraction
+            # so the user gets a partial import instead of FILE ERROR.
+            logger.warning(
+                "PDF image classification: inventory_json_parse_failed=True "
+                "file=%s error=%s — falling back to page-by-page inventory extraction",
+                os.path.basename(file_path), exc,
+            )
+            data = extract_inventory_images(image_paths)
+            partial_records_imported = (
+                len(data.get("equipment") or []) + len(data.get("stock") or [])
+            )
+            logger.info(
+                "PDF image fallback: partial_records_imported=%d", partial_records_imported,
+            )
+            return make_inventory_doc_record(data, "equipment_list", file_path)
         if isinstance(extracted, dict):
             raw_type = (extracted.get("doc_type") or "").lower()
             if raw_type in _INVENTORY_DOC_TYPES:

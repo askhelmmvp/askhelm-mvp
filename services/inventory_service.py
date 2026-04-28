@@ -664,75 +664,117 @@ def extract_inventory_from_text(text: str) -> dict:
                 try:
                     result, parse_error = _call_claude_inventory(chunk, _TOKENS_PER_CHUNK)
                     if parse_error:
+                        logger.warning(
+                            "inventory text: inventory_json_parse_failed=True chunk_index=%d/%d",
+                            idx + 1, len(chunks),
+                        )
                         any_parse_error = True
                     eq = _normalise_items(result.get("equipment") or [], 0.7)
                     st = _normalise_items(result.get("stock") or [], 0.7)
                     all_equipment.extend(eq)
                     all_stock.extend(st)
                     logger.info(
-                        "inventory chunk %d/%d: equipment=%d stock=%d parse_error=%s",
+                        "inventory text: chunk_index=%d/%d equipment=%d stock=%d parse_error=%s",
                         idx + 1, len(chunks), len(eq), len(st), parse_error,
                     )
                 except Exception as exc:
-                    logger.warning("inventory chunk %d failed: %s", idx + 1, exc)
+                    logger.warning(
+                        "inventory text: chunk_index=%d/%d inventory_json_parse_failed=True skipped error=%s",
+                        idx + 1, len(chunks), exc,
+                    )
                     any_parse_error = True
 
     except Exception as exc:
         logger.exception("inventory text extraction failed: %s", exc)
         return {"equipment": [], "stock": [], "parse_error": True}
 
+    partial_records_imported = len(all_equipment) + len(all_stock)
+    logger.info(
+        "inventory text complete: partial_records_imported=%d equipment=%d stock=%d any_parse_error=%s",
+        partial_records_imported, len(all_equipment), len(all_stock), any_parse_error,
+    )
     return {"equipment": all_equipment, "stock": all_stock, "parse_error": any_parse_error}
 
 
 def extract_inventory_from_images(image_paths: list) -> dict:
     """
-    Extract inventory from image files via Claude vision.
+    Extract inventory from image files one page at a time to avoid JSON truncation.
     Returns {"equipment": [...], "stock": [...], "parse_error": bool}.
     """
-    content = []
-    for path in image_paths[:4]:
+    if not image_paths:
+        return {"equipment": [], "stock": [], "parse_error": False}
+
+    all_equipment: list = []
+    all_stock: list = []
+    any_parse_error = False
+
+    for chunk_idx, path in enumerate(image_paths):
         media_type = "image/png" if path.lower().endswith(".png") else "image/jpeg"
         try:
             with open(path, "rb") as f:
-                data = base64.b64encode(f.read()).decode()
-            content.append({
-                "type": "image",
-                "source": {"type": "base64", "media_type": media_type, "data": data},
-            })
+                img_data = base64.b64encode(f.read()).decode()
         except Exception as exc:
-            logger.warning("inventory image: failed to read %s: %s", path, exc)
+            logger.warning(
+                "inventory image: chunk_index=%d read_failed path=%s: %s",
+                chunk_idx, path, exc,
+            )
+            any_parse_error = True
+            continue
 
-    if not content:
-        return {"equipment": [], "stock": [], "parse_error": False}
+        content = [
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": media_type, "data": img_data},
+            },
+            {
+                "type": "text",
+                "text": (
+                    "Extract structured inventory data from this page. "
+                    "Return only the raw JSON object — start with { and end with }. "
+                    "No markdown, no code fences, no commentary."
+                ),
+            },
+        ]
 
-    content.append({
-        "type": "text",
-        "text": (
-            "Extract structured inventory data from this document. "
-            "Return only the raw JSON object — start with { and end with }. "
-            "No markdown, no code fences, no commentary."
-        ),
-    })
+        try:
+            response = client.messages.create(
+                model="claude-sonnet-4-6",
+                max_tokens=_TOKENS_PER_CHUNK,
+                system=_INVENTORY_EXTRACT_PROMPT,
+                messages=[{"role": "user", "content": content}],
+                timeout=90.0,
+            )
+            raw = response.content[0].text if response.content else ""
+            result, parse_error = _parse_json_safe(raw)
+            if parse_error:
+                logger.warning(
+                    "inventory image: inventory_json_parse_failed=True chunk_index=%d",
+                    chunk_idx,
+                )
+                any_parse_error = True
+            eq = _normalise_items(result.get("equipment") or [], 0.65)
+            st = _normalise_items(result.get("stock") or [], 0.65)
+            all_equipment.extend(eq)
+            all_stock.extend(st)
+            logger.info(
+                "inventory image: chunk_index=%d equipment=%d stock=%d parse_error=%s",
+                chunk_idx, len(eq), len(st), parse_error,
+            )
+        except Exception as exc:
+            logger.warning(
+                "inventory image: chunk_index=%d inventory_json_parse_failed=True skipped error=%s",
+                chunk_idx, exc,
+            )
+            any_parse_error = True
 
-    try:
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=_TOKENS_SINGLE_CALL,
-            system=_INVENTORY_EXTRACT_PROMPT,
-            messages=[{"role": "user", "content": content}],
-            timeout=90.0,
-        )
-        result, parse_error = _parse_json_safe(response.content[0].text)
-        eq = _normalise_items(result.get("equipment") or [], 0.65)
-        st = _normalise_items(result.get("stock") or [], 0.65)
-        logger.info(
-            "inventory image extraction: doc_type=%r equipment=%d stock=%d parse_error=%s",
-            result.get("doc_type"), len(eq), len(st), parse_error,
-        )
-        return {"equipment": eq, "stock": st, "parse_error": parse_error}
-    except Exception as exc:
-        logger.exception("inventory image extraction failed: %s", exc)
-        return {"equipment": [], "stock": [], "parse_error": True}
+    partial_records_imported = len(all_equipment) + len(all_stock)
+    logger.info(
+        "inventory image complete: partial_records_imported=%d equipment=%d stock=%d "
+        "any_parse_error=%s pages=%d",
+        partial_records_imported, len(all_equipment), len(all_stock),
+        any_parse_error, len(image_paths),
+    )
+    return {"equipment": all_equipment, "stock": all_stock, "parse_error": any_parse_error}
 
 
 # ---------------------------------------------------------------------------
