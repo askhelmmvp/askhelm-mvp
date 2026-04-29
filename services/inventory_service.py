@@ -122,6 +122,12 @@ _EQUIPMENT_COL_MAP = {
     "installed at": "location",
     "area": "location",
     "room": "location",
+    # specification (maps to notes — no separate schema field)
+    "specification": "notes",
+    "specifications": "notes",
+    "spec": "notes",
+    # serial number variants with special characters
+    "serial #": "serial_number",
     # notes
     "notes": "notes",
     "remarks": "notes",
@@ -386,11 +392,82 @@ def extract_inventory_from_excel(file_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# CSV header detection helpers
+# ---------------------------------------------------------------------------
+
+# Tokens whose presence in a cell strongly suggests it is a header cell, not
+# a data value.  Used by _find_header_row for scoring candidate rows.
+_HEADER_SIGNAL_TOKENS = frozenset({
+    "name", "description", "equipment", "machinery", "asset",
+    "make", "maker", "manufacturer", "brand",
+    "model", "type", "designation",
+    "serial", "serial number", "serial no", "s/n", "sn",
+    "location", "area", "room", "position",
+    "system", "group", "category",
+    "specification", "spec", "supplier", "vendor",
+    "unit", "qty", "quantity", "notes", "remarks",
+    "part number", "part no",
+})
+
+
+def _flatten_csv_header(raw: str) -> str:
+    """
+    Resolve a compound CSV header like 'Serial # / Type' or 'Make / Supplier'
+    to the first slash-separated part that maps to a known column name.
+    Non-compound headers are returned unchanged so _map_headers processes them
+    normally.  If no part maps, the original string is returned.
+    """
+    if "/" not in raw:
+        return raw
+    for part in raw.split("/"):
+        part_norm = _normalise_col(part)
+        if part_norm in _STOCK_COL_MAP or part_norm in _EQUIPMENT_COL_MAP:
+            return part.strip()
+    return raw  # nothing mapped — pass through unchanged
+
+
+def _find_header_row(all_rows: list, max_scan: int = 10) -> int:
+    """
+    Scan the first max_scan rows and return the index of the row most likely
+    to be the header row.
+
+    Each candidate row is scored by the number of its cells that resolve to a
+    known column name (after compound-header flattening).  Direct map hits
+    score 2; cells that contain a header-signal token score 1.  Blank rows and
+    single-cell title rows (e.g. 'Components') score 0 and are skipped.
+
+    Returns 0 if no row scores above the default of -1 (safe fallback: use
+    the first row as header, which is the original behaviour).
+    """
+    best_idx = 0
+    best_score = -1
+
+    for idx, row in enumerate(all_rows[:max_scan]):
+        non_empty = [str(c).strip() for c in row if str(c).strip()]
+        if not non_empty:
+            continue
+
+        score = 0
+        for cell in non_empty:
+            flat_norm = _normalise_col(_flatten_csv_header(cell))
+            if flat_norm in _STOCK_COL_MAP or flat_norm in _EQUIPMENT_COL_MAP:
+                score += 2
+            elif any(tok in _normalise_col(cell) for tok in _HEADER_SIGNAL_TOKENS):
+                score += 1
+
+        if score > best_score:
+            best_score = score
+            best_idx = idx
+
+    return best_idx
+
+
+# ---------------------------------------------------------------------------
 # CSV extraction
 # ---------------------------------------------------------------------------
 
 def extract_inventory_from_csv(file_path: str) -> dict:
-    """Parse a CSV file into an inventory dict."""
+    """Parse a CSV file into an inventory dict, auto-detecting the header row."""
     try:
         with open(file_path, newline="", encoding="utf-8-sig") as f:
             sample = f.read(2048)
@@ -409,8 +486,17 @@ def extract_inventory_from_csv(file_path: str) -> dict:
     if len(all_rows) < 2:
         return {"equipment": [], "stock": []}
 
-    headers = all_rows[0]
-    rows = all_rows[1:]
+    header_idx = _find_header_row(all_rows)
+    if header_idx > 0:
+        logger.info(
+            "inventory csv: header_row_detected=%d skipped_title_rows=%d file=%s",
+            header_idx, header_idx, os.path.basename(file_path),
+        )
+
+    # Flatten compound headers (e.g. 'Serial # / Type' → 'Serial #') so that
+    # _map_headers can resolve them to canonical field names.
+    headers = [_flatten_csv_header(h) for h in all_rows[header_idx]]
+    rows = all_rows[header_idx + 1:]
 
     result = extract_inventory_from_tabular(headers, rows, confidence=0.8)
     logger.info(
