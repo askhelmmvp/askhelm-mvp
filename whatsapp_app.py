@@ -83,6 +83,7 @@ from domain.inventory_store import (
     find_stock_by_query,
     find_stock_for_system,
     find_equipment_by_query,
+    clear_equipment,
 )
 from services.inventory_service import (
     classify_inventory_text,
@@ -2260,11 +2261,26 @@ def _handle_reminder_command(message: str, phone: str, state: dict) -> Tuple[str
 
 
 def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[str, dict]:
-    # Invoice address commands — handled before intent classification
+    # Commands handled before intent classification to avoid mis-routing.
     _t = incoming.strip()
-    if _t.lower() == "show invoice address":
+    _tl = _t.lower()
+
+    # Equipment memory reset — checked before classify_text because "reset equipment"
+    # starts with "reset" which would otherwise trigger new_session.
+    if _tl in ("reset equipment", "clear equipment", "reset equipment memory"):
+        clear_equipment(state.get("user_id", ""))
+        logger.info("equipment_reset: user=%s", state.get("user_id", ""))
+        return (
+            "DECISION:\nEQUIPMENT MEMORY RESET\n\n"
+            "WHY:\nCleared saved equipment records.\n\n"
+            "RECOMMENDED ACTIONS:\n"
+            "• Upload the main machinery list again to rebuild equipment memory"
+        ), state
+
+    # Invoice address commands
+    if _tl == "show invoice address":
         return f"SAVED INVOICE ADDRESS:\n\n{load_invoice_address()}", state
-    if _t.lower().startswith("set invoice address:"):
+    if _tl.startswith("set invoice address:"):
         _new_addr = _t[len("set invoice address:"):].strip()
         if not _new_addr:
             return "Please include the new address after 'set invoice address:'", state

@@ -1,6 +1,8 @@
 import json
 import logging
+import datetime
 from pathlib import Path
+from typing import Optional
 
 from config import USERS_DIR
 
@@ -60,17 +62,93 @@ def _write_stock(user_id: str, data: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Dedup keys
+# Equipment matching — multi-strategy
 # ---------------------------------------------------------------------------
 
-def _equipment_key(item: dict) -> tuple:
-    return (
-        (item.get("system") or "").lower().strip(),
-        (item.get("equipment_name") or "").lower().strip(),
-        (item.get("make") or "").lower().strip(),
-        (item.get("model") or "").lower().strip(),
-    )
+def _build_equipment_indices(existing: list) -> tuple:
+    """
+    Build four lookup dicts from the existing equipment list for O(1) matching.
+    Returns (serial_idx, name_make_idx, name_model_idx, system_name_idx).
+    Each maps a normalised key → list index.
+    """
+    serial_idx: dict = {}
+    name_make_idx: dict = {}
+    name_model_idx: dict = {}
+    system_name_idx: dict = {}
 
+    for i, e in enumerate(existing):
+        serial = (e.get("serial_number") or "").lower().strip()
+        name = (e.get("equipment_name") or "").lower().strip()
+        make = (e.get("make") or "").lower().strip()
+        model = (e.get("model") or "").lower().strip()
+        system = (e.get("system") or "").lower().strip()
+
+        if serial:
+            serial_idx.setdefault(serial, i)
+        if name and make:
+            name_make_idx.setdefault((name, make), i)
+        if name and model:
+            name_model_idx.setdefault((name, model), i)
+        if system and name:
+            system_name_idx.setdefault((system, name), i)
+
+    return serial_idx, name_make_idx, name_model_idx, system_name_idx
+
+
+def _find_equipment_match(
+    item: dict,
+    serial_idx: dict,
+    name_make_idx: dict,
+    name_model_idx: dict,
+    system_name_idx: dict,
+) -> Optional[int]:
+    """
+    Return the index of the best-matching existing record, or None.
+
+    Priority order (strongest signal first):
+      1. serial_number  — unique hardware identifier
+      2. equipment_name + make  — same model from same manufacturer
+      3. equipment_name + model  — same named item, same model designation
+      4. system + equipment_name  — weakest: same name within the same system
+    """
+    serial = (item.get("serial_number") or "").lower().strip()
+    name = (item.get("equipment_name") or "").lower().strip()
+    make = (item.get("make") or "").lower().strip()
+    model = (item.get("model") or "").lower().strip()
+    system = (item.get("system") or "").lower().strip()
+
+    if serial and serial in serial_idx:
+        return serial_idx[serial]
+    if name and make and (name, make) in name_make_idx:
+        return name_make_idx[(name, make)]
+    if name and model and (name, model) in name_model_idx:
+        return name_model_idx[(name, model)]
+    if system and name and (system, name) in system_name_idx:
+        return system_name_idx[(system, name)]
+    return None
+
+
+def _merge_equipment_fields(old: dict, new_item: dict, source_file: str) -> None:
+    """
+    Update `old` in-place with values from `new_item`.
+    For each field: keep the more complete (longer non-empty) value.
+    Always update source_file and last_seen_at.
+    """
+    for field in ("equipment_name", "make", "model", "serial_number", "location", "system", "notes"):
+        new_val = (new_item.get(field) or "").strip()
+        old_val = (old.get(field) or "").strip()
+        if new_val and (not old_val or len(new_val) > len(old_val)):
+            old[field] = new_item[field]
+    old["confidence"] = round(
+        min(old.get("confidence", 0.7), new_item.get("confidence", 0.7)), 2
+    )
+    old["source_file"] = source_file
+    old["last_seen_at"] = datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Stock dedup key
+# ---------------------------------------------------------------------------
 
 def _stock_key(item: dict) -> tuple:
     pn = (item.get("part_number") or "").strip()
@@ -84,28 +162,59 @@ def _stock_key(item: dict) -> tuple:
 # ---------------------------------------------------------------------------
 
 def merge_equipment(user_id: str, new_items: list, source_file: str) -> tuple:
-    """Upsert equipment records. Returns (added, merged)."""
+    """
+    Upsert equipment records using multi-strategy matching. Returns (added, merged).
+
+    Matching priority:
+      1. serial_number
+      2. equipment_name + make
+      3. equipment_name + model
+      4. system + equipment_name (weakest)
+
+    On match: update all fields, keeping the more complete value.
+    No match: append as a new record.
+    """
     data = load_equipment(user_id)
     existing = data["equipment"]
-    key_map = {_equipment_key(e): i for i, e in enumerate(existing)}
+    serial_idx, name_make_idx, name_model_idx, system_name_idx = _build_equipment_indices(existing)
 
+    now = datetime.datetime.now(datetime.timezone.utc).isoformat()
     added = merged = 0
+
     for item in new_items:
-        key = _equipment_key(item)
-        if all(k == "" for k in key):
+        name = (item.get("equipment_name") or "").lower().strip()
+        system = (item.get("system") or "").lower().strip()
+
+        if not name and not system:
             continue
-        if key in key_map:
-            old = existing[key_map[key]]
-            for field in ("location", "serial_number", "notes", "make", "model"):
-                if item.get(field) and not old.get(field):
-                    old[field] = item[field]
-            old["confidence"] = round(min(old.get("confidence", 0.7), item.get("confidence", 0.7)), 2)
+
+        match_idx = _find_equipment_match(
+            item, serial_idx, name_make_idx, name_model_idx, system_name_idx
+        )
+
+        if match_idx is not None:
+            _merge_equipment_fields(existing[match_idx], item, source_file)
             merged += 1
         else:
+            item = dict(item)
             item["source_file"] = source_file
+            item["last_seen_at"] = now
             item.setdefault("confidence", 0.7)
             existing.append(item)
-            key_map[key] = len(existing) - 1
+            idx = len(existing) - 1
+
+            # Update indices so later items in the same batch can match this one
+            serial = (item.get("serial_number") or "").lower().strip()
+            make = (item.get("make") or "").lower().strip()
+            model = (item.get("model") or "").lower().strip()
+            if serial:
+                serial_idx.setdefault(serial, idx)
+            if name and make:
+                name_make_idx.setdefault((name, make), idx)
+            if name and model:
+                name_model_idx.setdefault((name, model), idx)
+            if system and name:
+                system_name_idx.setdefault((system, name), idx)
             added += 1
 
     _write_equipment(user_id, data)
@@ -154,6 +263,16 @@ def merge_stock(user_id: str, new_items: list, source_file: str) -> tuple:
         added, merged, user_id,
     )
     return added, merged
+
+
+# ---------------------------------------------------------------------------
+# Reset
+# ---------------------------------------------------------------------------
+
+def clear_equipment(user_id: str) -> None:
+    """Wipe equipment memory for a user. Does not touch stock or any other data."""
+    _write_equipment(user_id, {"equipment": []})
+    logger.info("inventory_store: equipment cleared user=%s", user_id)
 
 
 # ---------------------------------------------------------------------------

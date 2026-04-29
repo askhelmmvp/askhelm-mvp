@@ -1003,6 +1003,13 @@ def format_inventory_response(
 
     skip_note = f" Skipped {skipped_rows} header/section rows." if skipped_rows > 0 else ""
 
+    _eq_actions = (
+        "RECOMMENDED ACTIONS:\n"
+        "• Ask \"show equipment\"\n"
+        "• Ask \"what equipment do we have from <make>?\"\n"
+        "• Ask \"what is <model/serial>?\""
+    )
+
     # Equipment-only import — use focused equipment messages
     if eq_total > 0 and st_total == 0:
         if parse_error:
@@ -1014,31 +1021,21 @@ def format_inventory_response(
                 "• Upload Excel or CSV for better results\n"
                 "• Or upload the list in smaller sections"
             )
-        if eq_added == 0:
-            # All duplicates — nothing new was added to memory
-            return (
-                "DECISION:\nEQUIPMENT LIST ALREADY IN MEMORY\n\n"
-                f"WHY:\nAll {eq_merged} records matched existing vessel memory — "
-                f"no new equipment added.{skip_note}\n\n"
-                "RECOMMENDED ACTIONS:\n"
-                "• Ask \"show equipment\" to see the full list\n"
-                "• Ask \"what equipment do we have from <make>?\""
-            )
         if eq_merged > 0:
-            why = (
-                f"Imported {eq_added} new equipment records, updated {eq_merged} existing "
-                f"into vessel memory.{skip_note}"
-            )
-        else:
-            why = f"Imported {eq_added} new equipment records into vessel memory.{skip_note}"
-        return (
-            "DECISION:\nEQUIPMENT LIST IMPORTED\n\n"
-            f"WHY:\n{why}\n\n"
-            "RECOMMENDED ACTIONS:\n"
-            "• Ask \"show equipment\"\n"
-            "• Ask \"what equipment do we have from <make>?\"\n"
-            "• Ask \"what is <model/serial>?\""
-        )
+            # Second or later import — some existing records were matched/updated
+            if eq_added > 0:
+                why = (
+                    f"Added {eq_added} new equipment records and updated {eq_merged} "
+                    f"existing records.{skip_note}"
+                )
+            else:
+                why = (
+                    f"Updated {eq_merged} existing records — no new equipment added.{skip_note}"
+                )
+            return f"DECISION:\nEQUIPMENT LIST UPDATED\n\nWHY:\n{why}\n\n{_eq_actions}"
+        # eq_merged == 0: all records are new (first import or entirely new equipment)
+        why = f"Imported {eq_added} new equipment records into vessel memory.{skip_note}"
+        return f"DECISION:\nEQUIPMENT LIST IMPORTED\n\nWHY:\n{why}\n\n{_eq_actions}"
 
     # Stock-only or mixed import
     parts = []
