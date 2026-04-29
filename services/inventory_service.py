@@ -83,7 +83,11 @@ def classify_inventory_text(text: str) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 _EQUIPMENT_COL_MAP = {
+    # system / group
     "system": "system",
+    "group": "system",
+    "category": "system",
+    # equipment name
     "equipment": "equipment_name",
     "equipment name": "equipment_name",
     "equipment_name": "equipment_name",
@@ -92,13 +96,18 @@ _EQUIPMENT_COL_MAP = {
     "machinery": "equipment_name",
     "asset": "equipment_name",
     "item": "equipment_name",
+    "unit": "equipment_name",        # "Unit" is often used as the item-name column
+    # make / manufacturer
     "make": "make",
     "maker": "make",
     "brand": "make",
     "manufacturer": "make",
     "mfr": "make",
+    # model / type
     "model": "model",
     "type": "model",
+    "designation": "model",
+    # serial number
     "serial": "serial_number",
     "serial number": "serial_number",
     "serial no": "serial_number",
@@ -106,10 +115,14 @@ _EQUIPMENT_COL_MAP = {
     "s/n": "serial_number",
     "sn": "serial_number",
     "serial_number": "serial_number",
+    # location
     "location": "location",
     "loc": "location",
     "position": "location",
     "installed at": "location",
+    "area": "location",
+    "room": "location",
+    # notes
     "notes": "notes",
     "remarks": "notes",
     "comment": "notes",
@@ -247,8 +260,10 @@ def _extract_stock_row(row: dict) -> dict:
 def _extract_equipment_row(row: dict) -> dict:
     item = {
         "system": (row.get("system") or row.get("linked_equipment") or "").strip() or None,
+        # "unit" shadows the stock UOM field when _map_headers resolves it from _STOCK_COL_MAP;
+        # fall back to it here so CSVs that use "Unit" as the item-name column are not lost.
         "equipment_name": (
-            row.get("equipment_name") or row.get("description") or ""
+            row.get("equipment_name") or row.get("description") or row.get("unit") or ""
         ).strip() or None,
         "make": (row.get("make") or "").strip() or None,
         "model": (row.get("model") or "").strip() or None,
@@ -265,12 +280,27 @@ def extract_inventory_from_tabular(headers: list, rows: list, confidence: float 
     into a normalised inventory dict {equipment: [...], stock: [...]}.
     """
     col_mapping = _map_headers(headers)
+
+    mapped_indices = set(col_mapping.keys())
+    unmapped_columns = [
+        str(headers[i]) for i in range(len(headers))
+        if i not in mapped_indices and str(headers[i]).strip()
+    ]
+
     if not col_mapping:
-        logger.warning("inventory: no recognisable columns in headers=%r", headers[:10])
+        logger.warning(
+            "inventory tabular: no recognisable columns "
+            "rows_detected=%d unmapped_columns=%r",
+            len(rows), headers[:10],
+        )
         return {"equipment": [], "stock": []}
 
     table_type = _classify_mapped_columns(col_mapping)
-    logger.info("inventory tabular: table_type=%s cols_recognised=%d", table_type, len(col_mapping))
+    logger.info(
+        "inventory tabular: table_type=%s cols_recognised=%d rows_detected=%d "
+        "unmapped_columns=%r",
+        table_type, len(col_mapping), len(rows), unmapped_columns,
+    )
 
     equipment_items = []
     stock_items = []
@@ -298,6 +328,11 @@ def extract_inventory_from_tabular(headers: list, rows: list, confidence: float 
                 item["confidence"] = confidence
                 equipment_items.append(item)
 
+    rows_mapped = len(equipment_items) + len(stock_items)
+    logger.info(
+        "inventory tabular complete: table_type=%s rows_detected=%d rows_mapped=%d",
+        table_type, len(rows), rows_mapped,
+    )
     return {"equipment": equipment_items, "stock": stock_items}
 
 
@@ -831,8 +866,8 @@ def format_inventory_response(
     st_total = st_added + st_merged
     total_records = eq_total + st_total
 
-    # Total failure — could not extract any records and parsing errored
-    if total_records == 0 and parse_error:
+    # Total failure — no records extracted regardless of parse state
+    if total_records == 0:
         return _INVENTORY_NEEDS_REVIEW
 
     # Equipment-only import — use focused equipment messages
