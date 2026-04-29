@@ -67,6 +67,15 @@ _FOLLOW_UPS = {
     "what stock do we have": "show_stock",
     "list stock": "show_stock",
     "list spares": "show_stock",
+    # Equipment memory reset — must live in _FOLLOW_UPS so it is checked BEFORE
+    # the _NEW_SESSION_EXACT startswith loop ("reset equipment" starts with "reset"
+    # which is in that set with len > 4).
+    "reset equipment": "reset_equipment",
+    "clear equipment": "reset_equipment",
+    "reset machinery": "reset_equipment",
+    "clear machinery": "reset_equipment",
+    "reset equipment memory": "reset_equipment",
+    "clear equipment memory": "reset_equipment",
 }
 
 # Phrases that request follow-up actions/clarification after a compliance answer.
@@ -545,7 +554,7 @@ def classify_text(text: str) -> str:
       commercial_followup | compliance_question | market_check | reminder |
       show_handover_notes | show_open_actions |
       show_equipment | show_stock | stock_query | spares_query | equipment_query |
-      greeting | unknown
+      reset_equipment | greeting | unknown
     """
     t = text.strip().lower()
     # Strip trailing punctuation for exact-match lookups so "what should i do?"
@@ -559,12 +568,16 @@ def classify_text(text: str) -> str:
     if t in _NEW_SESSION_EXACT:
         return "new_session"
 
+    # _FOLLOW_UPS exact match is checked BEFORE the _NEW_SESSION_EXACT startswith
+    # loop. This is intentional: some _FOLLOW_UPS phrases (e.g. "reset equipment")
+    # start with a word that is also in _NEW_SESSION_EXACT ("reset"), and must not
+    # be swallowed by the generic startswith check.
+    if t_core in _FOLLOW_UPS:
+        return _FOLLOW_UPS[t_core]
+
     for phrase in _NEW_SESSION_EXACT:
         if len(phrase) > 4 and t.startswith(phrase):
             return "new_session"
-
-    if t_core in _FOLLOW_UPS:
-        return _FOLLOW_UPS[t_core]
 
     if t_core in _COMPLIANCE_FOLLOWUP_EXACT:
         return "compliance_followup"

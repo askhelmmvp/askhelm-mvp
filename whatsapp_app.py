@@ -1716,6 +1716,20 @@ def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tu
 
 
 # ---------------------------------------------------------------------------
+# Inventory reset helpers
+# ---------------------------------------------------------------------------
+
+def _equipment_reset_response() -> str:
+    return (
+        "DECISION:\nEQUIPMENT MEMORY RESET\n\n"
+        "WHY:\nCleared saved equipment records.\n\n"
+        "RECOMMENDED ACTIONS:\n"
+        "• Upload a machinery list to rebuild equipment memory\n"
+        "• Ask \"show equipment\" after upload"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Inventory retrieval helpers
 # ---------------------------------------------------------------------------
 
@@ -2265,17 +2279,17 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     _t = incoming.strip()
     _tl = _t.lower()
 
-    # Equipment memory reset — checked before classify_text because "reset equipment"
-    # starts with "reset" which would otherwise trigger new_session.
-    if _tl in ("reset equipment", "clear equipment", "reset equipment memory"):
+    # Equipment memory reset — checked before classify_text so these phrases are
+    # never captured by the generic "reset"/"clear" new_session startswith rule.
+    # Routing priority: equipment reset > stock reset (future) > comparison reset.
+    if _tl in (
+        "reset equipment", "clear equipment",
+        "reset machinery", "clear machinery",
+        "reset equipment memory", "clear equipment memory",
+    ):
         clear_equipment(state.get("user_id", ""))
         logger.info("equipment_reset: user=%s", state.get("user_id", ""))
-        return (
-            "DECISION:\nEQUIPMENT MEMORY RESET\n\n"
-            "WHY:\nCleared saved equipment records.\n\n"
-            "RECOMMENDED ACTIONS:\n"
-            "• Upload the main machinery list again to rebuild equipment memory"
-        ), state
+        return _equipment_reset_response(), state
 
     # Invoice address commands
     if _tl == "show invoice address":
@@ -2330,6 +2344,14 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         state.pop("pending_invoice", None)
         state.pop("pending_clarification", None)
         return build_new_session_response(), state
+
+    # Belt-and-suspenders: classify_text now returns reset_equipment for these
+    # phrases, but this handler also covers any edge case that slips the pre-intent
+    # check above (e.g. trailing punctuation stripped by t_core).
+    if intent == "reset_equipment":
+        clear_equipment(state.get("user_id", ""))
+        logger.info("equipment_reset: user=%s", state.get("user_id", ""))
+        return _equipment_reset_response(), state
 
     if intent == "quote_compare":
         return _handle_quote_compare_intent(state)
