@@ -195,6 +195,42 @@ _EQUIPMENT_ONLY_FIELDS = {"serial_number", "system"}
 _STOCK_ONLY_FIELDS = {"part_number", "quantity_onboard", "storage_location", "linked_equipment"}
 
 
+# ---------------------------------------------------------------------------
+# Junk row filter
+# ---------------------------------------------------------------------------
+
+_JUNK_EQUIPMENT_NAMES = frozenset({
+    "component tags", "component tag",
+    "emergency stops", "emergency stop",
+    "notes", "note",
+    "remarks",
+    "section", "sub-section", "subsection",
+    "description", "item", "items",
+    "equipment", "equipment name",
+    "name",
+    "yes", "no", "n/a", "na", "tbc", "tbd",
+    "-", "–", "—",
+})
+
+# Matches date/timestamp values like "29.04.2026 05:48:37" or "2026-04-29"
+_TIMESTAMP_RE = re.compile(
+    r"^\d{1,2}[./\-]\d{1,2}[./\-]\d{2,4}"
+    r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?)?$"
+)
+
+
+def is_junk_equipment_name(name: str) -> bool:
+    """Return True if name is a junk row (section header, timestamp, placeholder)."""
+    n = name.strip().lower()
+    if not n:
+        return True
+    if n in _JUNK_EQUIPMENT_NAMES:
+        return True
+    if _TIMESTAMP_RE.match(name.strip()):
+        return True
+    return False
+
+
 def _normalise_col(raw: str) -> str:
     return raw.strip().lower().replace("_", " ").replace("-", " ")
 
@@ -310,6 +346,7 @@ def extract_inventory_from_tabular(headers: list, rows: list, confidence: float 
 
     equipment_items = []
     stock_items = []
+    junk_skipped = 0
 
     for raw_row in rows:
         # Map column indices to canonical field names
@@ -331,15 +368,20 @@ def extract_inventory_from_tabular(headers: list, rows: list, confidence: float 
         else:
             item = _extract_equipment_row(mapped)
             if item:
+                name = item.get("equipment_name") or ""
+                if name and is_junk_equipment_name(name):
+                    junk_skipped += 1
+                    logger.debug("inventory tabular: junk row skipped name=%r", name)
+                    continue
                 item["confidence"] = confidence
                 equipment_items.append(item)
 
     rows_mapped = len(equipment_items) + len(stock_items)
     logger.info(
-        "inventory tabular complete: table_type=%s rows_detected=%d rows_mapped=%d",
-        table_type, len(rows), rows_mapped,
+        "inventory tabular complete: table_type=%s rows_detected=%d rows_mapped=%d junk_skipped=%d",
+        table_type, len(rows), rows_mapped, junk_skipped,
     )
-    return {"equipment": equipment_items, "stock": stock_items}
+    return {"equipment": equipment_items, "stock": stock_items, "skipped_rows": junk_skipped}
 
 
 # ---------------------------------------------------------------------------
@@ -356,6 +398,7 @@ def extract_inventory_from_excel(file_path: str) -> dict:
 
     all_equipment: list = []
     all_stock: list = []
+    all_skipped: int = 0
 
     try:
         xl = pd.ExcelFile(file_path, engine="openpyxl")
@@ -383,12 +426,13 @@ def extract_inventory_from_excel(file_path: str) -> dict:
         result = extract_inventory_from_tabular(headers, rows, confidence=0.8)
         all_equipment.extend(result["equipment"])
         all_stock.extend(result["stock"])
+        all_skipped += result.get("skipped_rows", 0)
 
     logger.info(
-        "inventory excel: equipment=%d stock=%d file=%s",
-        len(all_equipment), len(all_stock), os.path.basename(file_path),
+        "inventory excel: equipment=%d stock=%d skipped=%d file=%s",
+        len(all_equipment), len(all_stock), all_skipped, os.path.basename(file_path),
     )
-    return {"equipment": all_equipment, "stock": all_stock}
+    return {"equipment": all_equipment, "stock": all_stock, "skipped_rows": all_skipped}
 
 
 # ---------------------------------------------------------------------------
@@ -947,6 +991,7 @@ def format_inventory_response(
     st_added: int,
     st_merged: int,
     parse_error: bool = False,
+    skipped_rows: int = 0,
 ) -> str:
     eq_total = eq_added + eq_merged
     st_total = st_added + st_merged
@@ -956,20 +1001,39 @@ def format_inventory_response(
     if total_records == 0:
         return _INVENTORY_NEEDS_REVIEW
 
+    skip_note = f" Skipped {skipped_rows} header/section rows." if skipped_rows > 0 else ""
+
     # Equipment-only import — use focused equipment messages
     if eq_total > 0 and st_total == 0:
         if parse_error:
             return (
                 "DECISION:\nEQUIPMENT LIST PARTIALLY IMPORTED\n\n"
                 f"WHY:\nI imported {eq_total} equipment records, "
-                "but some rows could not be structured safely.\n\n"
+                f"but some rows could not be structured safely.{skip_note}\n\n"
                 "RECOMMENDED ACTIONS:\n"
                 "• Upload Excel or CSV for better results\n"
                 "• Or upload the list in smaller sections"
             )
+        if eq_added == 0:
+            # All duplicates — nothing new was added to memory
+            return (
+                "DECISION:\nEQUIPMENT LIST ALREADY IN MEMORY\n\n"
+                f"WHY:\nAll {eq_merged} records matched existing vessel memory — "
+                f"no new equipment added.{skip_note}\n\n"
+                "RECOMMENDED ACTIONS:\n"
+                "• Ask \"show equipment\" to see the full list\n"
+                "• Ask \"what equipment do we have from <make>?\""
+            )
+        if eq_merged > 0:
+            why = (
+                f"Imported {eq_added} new equipment records, updated {eq_merged} existing "
+                f"into vessel memory.{skip_note}"
+            )
+        else:
+            why = f"Imported {eq_added} new equipment records into vessel memory.{skip_note}"
         return (
             "DECISION:\nEQUIPMENT LIST IMPORTED\n\n"
-            f"WHY:\nImported {eq_total} equipment records into vessel memory.\n\n"
+            f"WHY:\n{why}\n\n"
             "RECOMMENDED ACTIONS:\n"
             "• Ask \"show equipment\"\n"
             "• Ask \"what equipment do we have from <make>?\"\n"

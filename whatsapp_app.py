@@ -92,6 +92,7 @@ from services.inventory_service import (
     extract_inventory_from_csv,
     make_inventory_doc_record,
     format_inventory_response,
+    is_junk_equipment_name,
 )
 import config
 
@@ -1706,10 +1707,11 @@ def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tu
         data = {"equipment": [], "stock": [], "parse_error": True}
     user_id = state.get("user_id", "")
     parse_error = bool(data.get("parse_error"))
+    skipped_rows = data.get("skipped_rows", 0)
     eq_added, eq_merged = merge_equipment(user_id, data.get("equipment") or [], file_path)
     st_added, st_merged = merge_stock(user_id, data.get("stock") or [], file_path)
     state["last_context"] = {"type": "inventory_import"}
-    return format_inventory_response(eq_added, eq_merged, st_added, st_merged, parse_error), state
+    return format_inventory_response(eq_added, eq_merged, st_added, st_merged, parse_error, skipped_rows), state
 
 
 # ---------------------------------------------------------------------------
@@ -1718,7 +1720,8 @@ def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tu
 
 def _handle_show_equipment(state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
-    items = get_all_equipment(user_id)
+    all_items = get_all_equipment(user_id)
+    items = [it for it in all_items if not is_junk_equipment_name(it.get("equipment_name") or "")]
     if not items:
         return _make_response(
             decision="NO EQUIPMENT RECORDS",
@@ -1730,13 +1733,15 @@ def _handle_show_equipment(state: dict) -> Tuple[str, dict]:
         name = item.get("equipment_name") or item.get("system") or "Unknown"
         make = item.get("make") or ""
         model = item.get("model") or ""
+        serial = item.get("serial_number") or ""
         loc = item.get("location") or ""
         sys = item.get("system") or ""
         detail_parts = [p for p in [make, model] if p]
         detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
+        serial_str = f" s/n {serial}" if serial else ""
         loc_str = f" — {loc}" if loc else ""
         sys_str = f" [{sys}]" if sys and sys != name else ""
-        lines.append(f"• {name}{detail}{sys_str}{loc_str}")
+        lines.append(f"• {name}{detail}{serial_str}{sys_str}{loc_str}")
     if len(items) > 20:
         lines.append(f"... and {len(items) - 20} more")
     return "\n".join(lines).strip(), state
