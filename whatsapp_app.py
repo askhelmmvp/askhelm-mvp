@@ -1963,7 +1963,7 @@ def _handle_equipment_query(query: str, state: dict) -> Tuple[str, dict]:
             lines.append(f"• {item.get('description') or item.get('part_number') or 'Unknown'}")
         return "\n".join(lines).strip(), state
 
-    results = find_equipment_by_query(user_id, subject)
+    results, broad_note = find_equipment_by_query(user_id, subject)
 
     if not results:
         return _make_response(
@@ -1975,76 +1975,60 @@ def _handle_equipment_query(query: str, state: dict) -> Tuple[str, dict]:
             ],
         ), state
 
-    # --- Count response ---
-    if is_count_query:
-        count = len(results)
-        lines = [
-            "DECISION:",
-            f"EQUIPMENT COUNT — {subject.upper()}",
-            "",
-            "WHY:",
-            f"Found {count} record{'s' if count != 1 else ''} matching '{subject}' in vessel memory.",
-            "",
-            "EQUIPMENT:",
-        ]
-        for item in results[:10]:
+    def _eq_lines(items, limit, show_serial=False):
+        """Build the EQUIPMENT bullet lines."""
+        lines = []
+        for item in items[:limit]:
             name = item.get("equipment_name") or "Unknown"
             make = item.get("make") or ""
             model = item.get("model") or ""
+            sn = item.get("serial_number") or ""
+            sys = item.get("system") or ""
             loc = item.get("location") or ""
             detail = f" — {' '.join(p for p in [make, model] if p)}" if (make or model) else ""
+            if show_serial:
+                sn_str = f", Serial: {sn}" if sn else ", Serial: not recorded"
+                sys_str = ""
+            else:
+                sn_str = f" s/n {sn}" if sn else ""
+                sys_str = f" [{sys}]" if sys and sys.lower() != name.lower() else ""
             loc_str = f" ({loc})" if loc else ""
-            lines.append(f"• {name}{detail}{loc_str}")
+            lines.append(f"• {name}{detail}{sn_str}{sys_str}{loc_str}")
+        return lines
+
+    # --- Count response ---
+    if is_count_query:
+        count = len(results)
+        why = f"Found {count} record{'s' if count != 1 else ''} matching '{subject}' in vessel memory."
+        if broad_note:
+            why += f"\n{broad_note}"
+        lines = [
+            "DECISION:", f"EQUIPMENT COUNT — {subject.upper()}", "",
+            "WHY:", why, "", "EQUIPMENT:",
+        ] + _eq_lines(results, 10)
         return "\n".join(lines), state
 
     # --- Serial number response ---
     if is_serial_query:
         decision = "EQUIPMENT FOUND" if len(results) == 1 else "MULTIPLE EQUIPMENT MATCHES"
         why = "Found matching equipment in vessel memory." if len(results) == 1 else f"Found {len(results)} matching records."
+        if broad_note:
+            why += f"\n{broad_note}"
         lines = [
-            "DECISION:",
-            decision,
-            "",
-            "WHY:",
-            why,
-            "",
-            "EQUIPMENT:",
-        ]
-        for item in results[:5]:
-            name = item.get("equipment_name") or "Unknown"
-            make = item.get("make") or ""
-            model = item.get("model") or ""
-            sn = item.get("serial_number") or ""
-            loc = item.get("location") or ""
-            detail = f" — {' '.join(p for p in [make, model] if p)}" if (make or model) else ""
-            sn_str = f", Serial: {sn}" if sn else ", Serial: not recorded"
-            loc_str = f" ({loc})" if loc else ""
-            lines.append(f"• {name}{detail}{sn_str}{loc_str}")
+            "DECISION:", decision, "",
+            "WHY:", why, "", "EQUIPMENT:",
+        ] + _eq_lines(results, 5, show_serial=True)
         return "\n".join(lines), state
 
     # --- Spec / general response ---
     decision = "EQUIPMENT FOUND" if len(results) == 1 else "MULTIPLE EQUIPMENT MATCHES"
+    why = f"Found {len(results)} record{'s' if len(results) != 1 else ''} matching '{subject}' in vessel memory."
+    if broad_note:
+        why += f"\n{broad_note}"
     lines = [
-        "DECISION:",
-        decision,
-        "",
-        "WHY:",
-        f"Found {len(results)} record{'s' if len(results) != 1 else ''} matching '{subject}' in vessel memory.",
-        "",
-        "EQUIPMENT:",
-    ]
-    for item in results[:10]:
-        name = item.get("equipment_name") or "Unknown"
-        make = item.get("make") or ""
-        model = item.get("model") or ""
-        sn = item.get("serial_number") or ""
-        sys = item.get("system") or ""
-        loc = item.get("location") or ""
-        detail = f" — {' '.join(p for p in [make, model] if p)}" if (make or model) else ""
-        sn_str = f" s/n {sn}" if sn else ""
-        sys_str = f" [{sys}]" if sys and sys.lower() != name.lower() else ""
-        loc_str = f" ({loc})" if loc else ""
-        lines.append(f"• {name}{detail}{sn_str}{sys_str}{loc_str}")
+        "DECISION:", decision, "",
+        "WHY:", why, "", "EQUIPMENT:",
+    ] + _eq_lines(results, 10)
     return "\n".join(lines), state
 
 
@@ -2115,7 +2099,7 @@ def _build_equipment_context(state: dict) -> str:
         search_terms.append(m.group(1).strip())
 
     for term in search_terms[:3]:
-        eq = find_equipment_by_query(user_id, term)
+        eq, _ = find_equipment_by_query(user_id, term)
         if eq:
             item = eq[0]
             name = item.get("equipment_name") or item.get("system") or term

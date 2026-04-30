@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import datetime
 from pathlib import Path
 from typing import Optional
@@ -318,78 +319,172 @@ def find_stock_for_system(user_id: str, query: str) -> list:
     return results
 
 
-def _eq_field_match(item: dict, q: str) -> bool:
-    """True if q appears as a substring in any searchable equipment field."""
-    system = (item.get("system") or "").lower()
-    name = (item.get("equipment_name") or "").lower()
-    make = (item.get("make") or "").lower()
-    model = (item.get("model") or "").lower()
-    serial = (item.get("serial_number") or "").lower()
-    return (
-        q in system or (system and system in q)
-        or q in name or (name and name in q)
-        or (make and q in make)
-        or (model and (q in model or model in q))
-        or (serial and q in serial)
-    )
+# ---------------------------------------------------------------------------
+# Equipment search — normalisation + token scoring
+# ---------------------------------------------------------------------------
+
+# Compiled alias substitutions applied to both query and field values.
+# Order matters: multi-word patterns must come before their abbreviations.
+_ALIAS_SUBS = (
+    (re.compile(r'\([^)]*\)'), ' '),                         # strip parenthetical content
+    (re.compile(r'\bsea[-\s]water\b'), 'seawater'),
+    (re.compile(r'\bfresh[-\s]water\b'), 'freshwater'),
+    (re.compile(r'\bblack[-\s]water\b'), 'blackwater'),
+    (re.compile(r'\bgr[ae]y[-\s]water\b'), 'greywater'),
+    (re.compile(r'\bair[-\s]conditioning\b'), 'airconditioning'),
+    (re.compile(r'\bs/w\b'), 'seawater'),
+    (re.compile(r'\bf/w\b'), 'freshwater'),
+    (re.compile(r'\bb/w\b'), 'blackwater'),
+    (re.compile(r'\bg/w\b'), 'greywater'),
+    (re.compile(r'\ba/c\b'), 'airconditioning'),
+    (re.compile(r'\bstabili[sz]ers?\b'), 'stabilizer'),
+    (re.compile(r'\bsterili[sz]ers?\b'), 'sterilizer'),
+    (re.compile(r'\baircon\b'), 'airconditioning'),
+    (re.compile(r'\s+'), ' '),                               # collapse whitespace
+)
 
 
-_EQ_STOPWORDS = frozenset({
-    # 1–2 char common English words (keep marine abbreviations: "uv", "ac")
-    "a", "am", "an", "as", "at", "be", "by", "do", "go", "he",
-    "hi", "i", "if", "in", "is", "it", "me", "my", "no", "of",
-    "ok", "on", "or", "re", "so", "to", "up", "us", "we",
-    # 3-char noise words
-    "all", "any", "are", "did", "for", "get", "has", "had",
-    "her", "him", "his", "how", "its", "its", "let", "not",
-    "our", "out", "own", "see", "she", "the", "was", "who",
-    # Longer query noise
-    "and", "been", "but", "can", "could", "does", "find", "from",
-    "give", "have", "just", "know", "like", "look", "made",
-    "make", "many", "more", "much", "must", "need", "now", "show",
-    "some", "than", "that", "them", "then", "there", "they",
-    "this", "unit", "very", "want", "what", "when", "where",
-    "which", "who", "will", "with", "would", "your",
+def _normalise(s: str) -> str:
+    """Lower-case and apply alias/spelling normalisations."""
+    s = s.lower()
+    for pattern, repl in _ALIAS_SUBS:
+        s = pattern.sub(repl, s)
+    return s.strip()
+
+
+# Tokens that carry no equipment-identity signal and should not trigger matches.
+# Includes English question words ("what model is…") that describe the query
+# intent rather than identifying the equipment.
+# "ac" alone is excluded: it appears inside words like "vacuum" / "reactor",
+# whereas "a/c" (typed by a user) normalises to "airconditioning" (meaningful).
+_SEARCH_WEAK_TOKENS = frozenset({
+    # User-specified weak tokens
+    "what", "are", "the", "specs", "spec", "specification", "specifications",
+    "of", "for", "unit", "equipment", "system",
+    # Question-intent words (tell me the X, not search for named-X)
+    "model", "type", "make", "manufacturer", "number", "serial",
+    # Common English query noise
+    "a", "an", "is", "in", "on", "to", "at", "by", "do", "we", "me",
+    "our", "how", "many", "have", "get", "and", "or", "with", "its",
+    "this", "that", "there", "any", "all", "show",
+    # "ac" alone is ambiguous
+    "ac",
 })
 
+# (field_key, score_weight) — higher weight → stronger ranking signal.
+_FIELD_WEIGHTS = (("name", 3), ("model", 2), ("sys", 1), ("make", 1))
 
-def find_equipment_by_query(user_id: str, query: str) -> list:
+
+def _score_norm(norm: dict, tokens: list) -> tuple:
     """
-    Fuzzy match against system, equipment_name, make, model, serial_number.
+    Score a pre-normalised field dict against search tokens.
+    Returns (total_score: float, matched_token_count: int).
+    Per token, the highest-weighted field that matches is counted once.
+    """
+    score = 0.0
+    matched = 0
+    for token in tokens:
+        best = 0.0
+        for field, weight in _FIELD_WEIGHTS:
+            if norm[field] and token in norm[field]:
+                best = max(best, float(weight))
+        if best == 0.0 and norm["serial"] and token in norm["serial"]:
+            best = 1.0
+        score += best
+        if best > 0.0:
+            matched += 1
+    return score, matched
+
+
+def find_equipment_by_query(user_id: str, query: str) -> tuple:
+    """
+    Search equipment records with normalisation and token scoring.
+
+    Returns (results: list, broad_note: str | None).
 
     Strategy:
-      1. Full-phrase match across all fields.
-      2. If no results, try each significant word individually (len >= 4,
-         not a stopword). Also tries the singular form (trailing 's' stripped)
-         to handle plurals like 'stabilisers' → 'stabiliser'.
+      Phase 1 — exact normalised-phrase match: returns immediately if any
+                 field contains (or is contained by) the full normalised query.
+      Phase 2 — single-token: direct match + singular-form fallback.
+      Phase 3 — multi-token scoring: each item is scored by how many
+                 meaningful tokens match and in which fields.  Items must
+                 match at least 2 distinct tokens when the query has 3+.
+                 Results are trimmed to 10 with a note when >10 match weakly.
     """
-    q = query.lower().strip()
+    q_norm = _normalise(query)
     all_items = get_all_equipment(user_id)
-    seen: set = set()
-    results: list = []
 
-    for i, item in enumerate(all_items):
-        if _eq_field_match(item, q):
-            seen.add(i)
-            results.append(item)
-
-    if results:
-        return results
-
-    # Word-level fallback: try each significant word from the query.
-    # Threshold is 2 chars (not 4) so marine abbreviations like "uv", "ac",
-    # "ow" are included; common English 2-char words live in _EQ_STOPWORDS.
-    words = [
-        w for w in q.split()
-        if len(w) >= 2 and w not in _EQ_STOPWORDS
+    # Pre-compute normalised fields once for all items
+    norms = [
+        {
+            "name":   _normalise(it.get("equipment_name") or ""),
+            "model":  _normalise(it.get("model") or ""),
+            "sys":    _normalise(it.get("system") or ""),
+            "make":   _normalise(it.get("make") or ""),
+            "serial": (it.get("serial_number") or "").lower(),
+        }
+        for it in all_items
     ]
-    for word in words:
-        singular = word[:-1] if word.endswith("s") and len(word) > 4 else None
-        for i, item in enumerate(all_items):
-            if i in seen:
-                continue
-            if _eq_field_match(item, word) or (singular and _eq_field_match(item, singular)):
-                seen.add(i)
-                results.append(item)
 
-    return results
+    # ── Phase 1: exact normalised phrase ──────────────────────────────────
+    # Unidirectional: q_norm must appear IN a field (not the other way round).
+    # Bidirectional matching caused false positives — e.g. "seawater cooling pump"
+    # appearing as a substring of the query "chiller seawater cooling pump".
+    exact = [
+        item for item, norm in zip(all_items, norms)
+        if (norm["name"]   and q_norm in norm["name"])
+        or (norm["sys"]    and q_norm in norm["sys"])
+        or (norm["make"]   and q_norm in norm["make"])
+        or (norm["model"]  and q_norm in norm["model"])
+        or (norm["serial"] and q_norm in norm["serial"])
+    ]
+    if exact:
+        return exact, None
+
+    # ── Extract meaningful tokens ─────────────────────────────────────────
+    # Strip trailing punctuation so "pump?" is treated as "pump".
+    raw_tokens = [t.rstrip("?!.,;:") for t in q_norm.split()]
+    tokens = [
+        t for t in raw_tokens
+        if len(t) >= 2 and t not in _SEARCH_WEAK_TOKENS
+    ]
+    if not tokens:
+        return [], None
+
+    # ── Phase 2: single token (+ singular fallback) ───────────────────────
+    if len(tokens) == 1:
+        tok = tokens[0]
+        singular = tok[:-1] if tok.endswith("s") and len(tok) > 4 else None
+        results = []
+        for item, norm in zip(all_items, norms):
+            hit = any(norm[f] and tok in norm[f] for f in ("name", "model", "sys", "make", "serial"))
+            if not hit and singular:
+                hit = any(norm[f] and singular in norm[f] for f in ("name", "model", "sys", "make"))
+            if hit:
+                results.append(item)
+        return results, None
+
+    # ── Phase 3: multi-token scoring ──────────────────────────────────────
+    # Require ALL meaningful tokens to match — this keeps results precise
+    # for specific queries like "chiller seawater cooling pump" while
+    # correctly excluding items that share only some tokens.
+    min_matched = len(tokens)
+    scored = []
+    for item, norm in zip(all_items, norms):
+        sc, matched = _score_norm(norm, tokens)
+        if matched >= min_matched:
+            scored.append((sc, matched, item))
+
+    scored.sort(key=lambda x: (-x[0], -x[1]))
+
+    broad_note = None
+    if len(scored) > 10:
+        weak = sum(1 for sc, m, _ in scored if m == min_matched)
+        if weak >= 5:
+            broad_note = (
+                f"Found {len(scored)} matches — showing the top 10. "
+                "Refine by make, model, or system for a more specific result."
+            )
+            scored = scored[:10]
+
+    return [item for _, _, item in scored], broad_note
