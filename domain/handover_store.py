@@ -68,6 +68,44 @@ def save_service_report(
     return report_id
 
 
+def save_notes_summary(
+    user_id: str, summary_data: dict, source_file: str
+) -> str:
+    """
+    Save an operational or technical note summary to the handover store.
+    summary_data must contain: doc_subtype, summary, issues, open_actions.
+    Returns the new entry ID.
+    """
+    import uuid as _uuid
+    notes = load_handover_notes(user_id)
+    entry_id = str(_uuid.uuid4())[:8]
+
+    entry = {
+        "id": entry_id,
+        "record_type": summary_data.get("doc_subtype") or "operational_notes",
+        "date": summary_data.get("date") or datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "supplier": "",
+        "system": summary_data.get("system") or "",
+        "equipment": "",
+        "vessel": "",
+        "make_model": "",
+        "summary": summary_data.get("summary") or "",
+        "handover_note": summary_data.get("summary") or "",
+        "open_actions": summary_data.get("open_actions") or [],
+        "findings": summary_data.get("issues") or [],
+        "recommendations": [],
+        "source_file": source_file,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    notes["service_reports"].append(entry)
+    _write(user_id, notes)
+    logger.info(
+        "handover_store: notes_summary saved id=%s type=%r open_actions=%d",
+        entry_id, entry["record_type"], len(entry["open_actions"]),
+    )
+    return entry_id
+
+
 def get_all_open_actions(user_id: str) -> list:
     """Return all open action groups (one per report that has open actions)."""
     notes = load_handover_notes(user_id)

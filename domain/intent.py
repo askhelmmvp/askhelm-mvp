@@ -84,6 +84,15 @@ _FOLLOW_UPS = {
     "clear machinery": "reset_equipment",
     "reset equipment memory": "reset_equipment",
     "clear equipment memory": "reset_equipment",
+    # Explicit handover save — after a note or service report summary
+    "add to handover notes": "add_to_handover",
+    "add to handover": "add_to_handover",
+    "save to handover": "add_to_handover",
+    "save to handover notes": "add_to_handover",
+    "add this to handover": "add_to_handover",
+    "add this to handover notes": "add_to_handover",
+    "save this to handover": "add_to_handover",
+    "save this to handover notes": "add_to_handover",
 }
 
 # Phrases that request follow-up actions/clarification after a compliance answer.

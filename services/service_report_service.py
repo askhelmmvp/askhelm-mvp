@@ -226,12 +226,12 @@ def format_whatsapp_response(report: dict, handover_note: str) -> str:
 
     return (
         f"DECISION:\nSERVICE REPORT SUMMARISED\n\n"
-        f"WHY:\n{supplier} report for {system} has been converted into a handover note.\n\n"
+        f"WHY:\n{supplier} report for {system} has been converted into a service summary.\n\n"
         f"HANDOVER NOTE:\n{handover_note}\n\n"
         f"OPEN ACTIONS:\n{action_lines}\n\n"
         f"RECOMMENDED ACTIONS:\n"
         f"• File report under {equipment} service records\n"
-        f"• Review open actions before next handover"
+        f'• Reply "add to handover notes" if this should be included in handover'
     )
 
 

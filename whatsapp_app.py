@@ -72,6 +72,7 @@ from services.service_report_service import (
 )
 from domain.handover_store import (
     save_service_report,
+    save_notes_summary,
     get_all_open_actions,
     get_all_reports,
     get_reports_for_system,
@@ -1531,18 +1532,15 @@ def _handle_images_upload(file_paths: list, state: dict) -> Tuple[str, dict]:
 
     if _is_operational_note(extracted):
         raw_type = (extracted.get("doc_type") or "").lower()
-        if raw_type == "service_report":
-            logger.info("Image upload (multi-page): branch=service_report pages=%d", len(file_paths))
-            return _handle_service_report_image(file_paths, state)
         if raw_type in _INVENTORY_DOC_TYPES:
             logger.info("Image upload (multi-page): branch=inventory doc_type=%s pages=%d", raw_type, len(file_paths))
             return _handle_inventory_image(file_paths, raw_type, state)
-        try:
-            reply = summarise_operational_note_from_image(file_paths[0])
-            return reply, state
-        except Exception as exc:
-            logger.exception("Image upload: multi-page op-note summarisation failed: %s", exc)
-            return _image_received_response(), state
+        subtype = _classify_non_commercial_subtype(extracted)
+        if subtype == "service_report":
+            logger.info("Image upload (multi-page): branch=service_report pages=%d", len(file_paths))
+            return _handle_service_report_image(file_paths, state)
+        logger.info("Image upload (multi-page): branch=%s pages=%d", subtype, len(file_paths))
+        return _handle_operational_notes_image(file_paths, state)
 
     try:
         extracted = normalise_doc_type(extracted)
@@ -1610,21 +1608,15 @@ def _handle_image_upload(file_path: str, state: dict) -> Tuple[str, dict]:
     # --- Step 2: operational note / service report / inventory ---
     if _is_operational_note(extracted):
         raw_type = (extracted.get("doc_type") or "").lower()
-        if raw_type == "service_report":
-            logger.info("Image upload: branch=service_report for %s", fname)
-            return _handle_service_report_image([file_path], state)
         if raw_type in _INVENTORY_DOC_TYPES:
             logger.info("Image upload: branch=inventory doc_type=%s for %s", raw_type, fname)
             return _handle_inventory_image([file_path], raw_type, state)
-        logger.info("Image upload: branch=operational_note for %s", fname)
-        try:
-            reply = summarise_operational_note_from_image(file_path)
-            logger.info("Image upload: reply=operational_summary created=%s", bool(reply))
-            return reply, state
-        except Exception as exc:
-            logger.exception("Image upload: operational summarisation failed for %s: %s", fname, exc)
-            logger.info("Image upload: branch=failed reply=IMAGE_RECEIVED")
-            return _image_received_response(), state
+        subtype = _classify_non_commercial_subtype(extracted)
+        if subtype == "service_report":
+            logger.info("Image upload: branch=service_report for %s", fname)
+            return _handle_service_report_image([file_path], state)
+        logger.info("Image upload: branch=%s for %s", subtype, fname)
+        return _handle_operational_notes_image([file_path], state)
 
     # --- Step 3: commercial document ---
     try:
@@ -2116,6 +2108,101 @@ def _build_equipment_context(state: dict) -> str:
     return ""
 
 
+_NON_COMMERCIAL_SUBTYPES = {"service_report", "operational_notes", "technical_note"}
+
+
+def _classify_non_commercial_subtype(extracted: dict) -> str:
+    """
+    Return 'service_report', 'operational_notes', or 'technical_note' for a
+    non-commercial document extraction.  Uses the vision model's doc_type when
+    it is one of the three valid subtypes; defaults to 'operational_notes'.
+    """
+    raw = (extracted.get("doc_type") or "").strip().lower()
+    return raw if raw in _NON_COMMERCIAL_SUBTYPES else "operational_notes"
+
+
+def _format_operational_notes_response(summary_data: dict) -> str:
+    """Build the NOTES SUMMARISED WhatsApp response from a structured summary dict."""
+    summary = (summary_data.get("summary") or "").strip()
+    issues = summary_data.get("issues") or []
+    open_actions = summary_data.get("open_actions") or []
+
+    issue_lines = "\n".join(f"• {i.strip()}" for i in issues) if issues else "• None identified"
+    action_lines = "\n".join(f"• {a.strip()}" for a in open_actions) if open_actions else "• None identified"
+
+    return (
+        "DECISION:\nNOTES SUMMARISED\n\n"
+        "WHY:\nHandwritten operational notes have been converted into a structured summary.\n\n"
+        f"SUMMARY:\n{summary}\n\n"
+        f"ISSUES / RISKS:\n{issue_lines}\n\n"
+        f"OPEN ACTIONS:\n{action_lines}\n\n"
+        "RECOMMENDED ACTIONS:\n"
+        '• Reply "add to handover notes" to save this summary\n'
+        '• Reply "show open actions" to view outstanding actions'
+    )
+
+
+def _handle_operational_notes_image(file_paths: list, state: dict) -> Tuple[str, dict]:
+    """Summarise an operational or technical note image. Does NOT auto-save."""
+    try:
+        summary_data = summarise_operational_note_from_image(file_paths[0])
+    except Exception as exc:
+        logger.exception("Operational notes image handler failed: %s", exc)
+        return _image_received_response(), state
+
+    response = _format_operational_notes_response(summary_data)
+    state["last_context"] = {
+        "type": "doc_summary",
+        "doc_subtype": summary_data.get("doc_subtype") or "operational_notes",
+        "summary": summary_data.get("summary") or "",
+        "issues": summary_data.get("issues") or [],
+        "open_actions": summary_data.get("open_actions") or [],
+        "source_file": file_paths[0] if file_paths else "",
+    }
+    logger.info(
+        "operational_notes: summarised doc_subtype=%r open_actions=%d",
+        summary_data.get("doc_subtype"), len(summary_data.get("open_actions") or []),
+    )
+    return response, state
+
+
+def _handle_add_to_handover(state: dict) -> Tuple[str, dict]:
+    """Explicitly save the most recent doc_summary from last_context to handover notes."""
+    last_ctx = state.get("last_context") or {}
+    ctx_type = last_ctx.get("type")
+    user_id = state.get("user_id", "")
+
+    if ctx_type == "doc_summary":
+        save_notes_summary(
+            user_id=user_id,
+            summary_data=last_ctx,
+            source_file=last_ctx.get("source_file") or "",
+        )
+        return _make_response(
+            decision="ADDED TO HANDOVER NOTES",
+            why="The latest summary has been saved to handover notes.",
+            actions=[
+                'Reply "show handover notes" to review saved notes',
+                'Reply "show open actions" to review outstanding actions',
+            ],
+        ), state
+
+    if ctx_type == "service_report":
+        return _make_response(
+            decision="SERVICE REPORT ALREADY SAVED",
+            why="Service reports are saved to service records automatically.",
+            actions=[
+                'Reply "show handover notes" to review saved service reports',
+            ],
+        ), state
+
+    return _make_response(
+        decision="NO SUMMARY TO SAVE",
+        why="There is no recent summary available to add to handover notes.",
+        actions=["Upload notes or a service report first"],
+    ), state
+
+
 def _handle_service_report_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
     """Handle a service_report doc_record produced by _extract_pdf_to_doc_record."""
     report = doc_record.get("service_report_data") or {}
@@ -2560,6 +2647,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "reminder":
         return _handle_reminder_command(incoming, phone, state)
+
+    if intent == "add_to_handover":
+        return _handle_add_to_handover(state)
 
     if intent == "show_handover_notes":
         return _handle_show_handover_notes(incoming, state)

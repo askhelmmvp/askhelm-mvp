@@ -44,7 +44,9 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
             '- Use "proforma" when the document heading says "proforma invoice", "proforma", "pro forma", or "pro-forma". This overrides "quote".\n'
             '- Use "invoice" when the document is an invoice, tax invoice, final invoice, commercial invoice, or billing request (and is NOT a proforma).\n'
             '- Use "quote" when the document is a quotation, proposal, estimate, offer, or price offer (and is NOT a proforma or invoice).\n'
-            '- Use "service_report" when the document is a service report, field service report, attendance report, work report, inspection report, maintenance report, or commissioning report — even if it lacks pricing. NOT a quote or invoice from a service company.\n'
+            '- Use "service_report" ONLY when: a supplier/contractor attended; a technician or service engineer is named; specific equipment was serviced; work carried out is listed; findings or recommendations are from a service provider. NOT a quote or invoice from a service company.\n'
+            '- Use "operational_notes" when the document is: a handwritten daily note, meeting note, yard meeting note, coordination note, task list, mixed open actions, operational planning, schedule, or any note that is NOT clearly a supplier service report.\n'
+            '- Use "technical_note" when the document is: a defect note, technical observation, inspection note, photo caption, or note about a single issue or system — not a commercial document and not a service report.\n'
             '- Use "equipment_list" when the document is an equipment list, machinery list, asset register, or installed equipment inventory.\n'
             '- Use "stock_inventory" when the document is a stock list, inventory, stores list, or consumables list.\n'
             '- Use "spare_parts_inventory" when the document is a spare parts list, spares inventory, or parts inventory.\n'
@@ -53,7 +55,7 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
             "\n"
             "Return exactly this JSON schema:\n"
             "{\n"
-            '  "doc_type": "quote|invoice|proforma|equipment_list|stock_inventory|spare_parts_inventory|null",\n'
+            '  "doc_type": "quote|invoice|proforma|service_report|operational_notes|technical_note|equipment_list|stock_inventory|spare_parts_inventory|null",\n'
             '  "supplier_name": "string|null",\n'
             '  "document_number": "string|null",\n'
             '  "reference_number": "string|null",\n'
@@ -105,10 +107,18 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
     return json.loads(raw)
 
 
-def summarise_operational_note_from_image(image_path: str) -> str:
+def summarise_operational_note_from_image(image_path: str) -> dict:
     """
-    Summarise a handwritten note, meeting note, or operational log image into
-    a structured Chief Engineer brief. Returns formatted text, not JSON.
+    Summarise a handwritten/operational note image into a structured dict.
+
+    Returns:
+        {
+            "doc_subtype": "operational_notes" | "technical_note",
+            "summary": str,
+            "issues": [str, ...],
+            "open_actions": [str, ...],
+        }
+    Falls back to a plain text summary in "summary" if JSON parsing fails.
     """
     media_type = "image/png" if image_path.lower().endswith(".png") else "image/jpeg"
     content = [
@@ -123,41 +133,56 @@ def summarise_operational_note_from_image(image_path: str) -> str:
         {
             "type": "text",
             "text": (
-                "You are a Chief Engineer reviewing an operational note, meeting note, or log.\n"
-                "Extract and summarise the key information into an action-focused brief.\n"
+                "You are a Chief Engineer reviewing a handwritten or operational note.\n"
+                "Extract and summarise the key information. Return ONLY valid JSON — no commentary.\n"
                 "\n"
-                "STRICT RULES:\n"
-                "1. Maximum 6 KEY POINTS — prioritise by operational importance.\n"
-                "2. Maximum 5 ACTIONS — immediate, practical, onboard steps only.\n"
-                "3. RISKS must be specific to content in the note — no generic filler.\n"
-                "4. If the note is unclear or illegible, say so in KEY POINTS.\n"
-                "5. Tone: concise, Chief Engineer, practical. No padding.\n"
-                "6. Do not repeat the same item in both KEY POINTS and ACTIONS.\n"
+                "Classify doc_subtype:\n"
+                '- "operational_notes": daily note, meeting note, coordination note, mixed tasks, planning, schedules\n'
+                '- "technical_note": defect note, inspection note, observation about one issue or system\n'
                 "\n"
-                "Respond in this exact format — nothing before or after:\n"
-                "DECISION:\n"
-                "Operational actions and risks identified\n"
+                "Rules:\n"
+                "- summary: 2-4 sentences, practical Chief Engineer tone, no padding\n"
+                "- issues: up to 4 specific risks or concerns from the note — no generic filler\n"
+                "- open_actions: up to 5 actionable tasks not yet complete\n"
+                "- If the note is illegible, set summary to 'Note is unclear or illegible'\n"
                 "\n"
-                "KEY POINTS:\n"
-                "• <point 1>\n"
-                "• <point 2 — up to 6>\n"
-                "\n"
-                "RISKS:\n"
-                "• <risk 1>\n"
-                "• <risk 2>\n"
-                "\n"
-                "ACTIONS:\n"
-                "• <action 1>\n"
-                "• <action 2 — up to 5>"
+                "Return exactly this JSON:\n"
+                "{\n"
+                '  "doc_subtype": "operational_notes|technical_note",\n'
+                '  "summary": "string",\n'
+                '  "issues": ["string"],\n'
+                '  "open_actions": ["string"]\n'
+                "}"
             ),
         },
     ]
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=500,
+        max_tokens=600,
         messages=[{"role": "user", "content": content}],
         timeout=90.0,
     )
 
-    return response.content[0].text.strip()
+    raw = response.content[0].text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+        raw = raw.rsplit("```", 1)[0].strip()
+
+    try:
+        result = json.loads(raw)
+        return {
+            "doc_subtype": result.get("doc_subtype") or "operational_notes",
+            "summary": result.get("summary") or "",
+            "issues": result.get("issues") or [],
+            "open_actions": result.get("open_actions") or [],
+        }
+    except (json.JSONDecodeError, Exception):
+        return {
+            "doc_subtype": "operational_notes",
+            "summary": raw,
+            "issues": [],
+            "open_actions": [],
+        }
