@@ -302,6 +302,16 @@ _EQUIPMENT_IDENTITY_PREFIXES = (
     "show me the ", "show me our ",
 )
 
+# When these words appear alongside an equipment noun the query is asking
+# about regulations/compliance, NOT about equipment data in memory.
+# Must be checked before _EQUIPMENT_IDENTITY_PREFIXES to avoid routing
+# "what are the ows regulations" to the equipment handler.
+_EQUIPMENT_REGULATION_GUARD = frozenset({
+    "regulation", "regulations", "regulatory", "compliance",
+    "required by law", "solas", "marpol", "ism code",
+    "legally", "legal requirement", "flag state", "class requirement",
+})
+
 
 def _is_equipment_memory_query(t: str) -> bool:
     """
@@ -311,9 +321,12 @@ def _is_equipment_memory_query(t: str) -> bool:
       'what are the specs of the chiller pump?'
       'do we have a watermaker?'
     but NOT stock queries ('do we have hydraulic oil?') where no equipment
-    noun is present.
+    noun is present, and NOT regulation queries ('what are the ows
+    regulations?') which should go to compliance instead.
     Also catches identity queries like 'what is the OWS' / 'what is the OCM'.
     """
+    if any(w in t for w in _EQUIPMENT_REGULATION_GUARD):
+        return False
     has_equipment = any(w in t for w in _MARINE_EQUIPMENT_WORDS)
     if not has_equipment:
         return False
@@ -552,6 +565,7 @@ _MAINTENANCE_STATE = [
     "haven't",
     "has not been",
     "missed",
+    "missing",
     "behind on",
     "failed to",
     "out of date",
@@ -560,10 +574,13 @@ _MAINTENANCE_STATE = [
     "not tested",
     "not inspected",
     "not serviced",
+    "not recorded",
+    "no record",
     "test",         # only fires when combined with safety equipment below
     "maintenance",
     "inspection",
     "service",
+    "check",
 ]
 
 # Onboard safety equipment and systems whose status is compliance-relevant.
@@ -574,6 +591,9 @@ _SAFETY_EQUIPMENT = [
     "fire extinguisher",
     "fire detection",
     "co2 system",
+    "fm200",
+    "fixed fire system",
+    "fixed fire suppression",
     "lifeboat",
     "life boat",
     "rescue boat",
@@ -588,9 +608,17 @@ _SAFETY_EQUIPMENT = [
     "bilge alarm",
     "emergency generator",
     "emergency lighting",
+    "escape lighting",
     "muster station",
     "watertight door",
+    "fire door",
     "fire damper",
+    "steering gear",
+    "orb",            # Oil Record Book
+    "oil record book",
+    "garbage log",
+    "garbage management",
+    "oil record",
 ]
 
 # ---------------------------------------------------------------------------

@@ -10,7 +10,15 @@ def _get_retriever():
 
 
 def answer_compliance_query(question: str) -> str:
+    from domain.operational_playbook import lookup as playbook_lookup
     from services.anthropic_service import answer_compliance_question
+
+    # Operational playbook: handles common safety-critical topics with CE-style
+    # practical guidance even when the exact source document is not loaded.
+    # Returns None when no topic matches — fall through to RAG.
+    playbook_answer = playbook_lookup(question)
+    if playbook_answer:
+        return playbook_answer
 
     try:
         retriever = _get_retriever()
@@ -32,7 +40,13 @@ def answer_compliance_query(question: str) -> str:
 
 def answer_compliance_followup(topic: str) -> str:
     """Re-retrieves context for the original topic; returns action-focused follow-up only."""
+    from domain.operational_playbook import lookup as playbook_lookup
     from services.anthropic_service import answer_compliance_followup_question, NOT_COVERED_FALLBACK
+
+    # Check playbook first for follow-up questions on safety topics.
+    playbook_answer = playbook_lookup(topic)
+    if playbook_answer:
+        return playbook_answer
 
     try:
         retriever = _get_retriever()
