@@ -318,22 +318,65 @@ def find_stock_for_system(user_id: str, query: str) -> list:
     return results
 
 
+def _eq_field_match(item: dict, q: str) -> bool:
+    """True if q appears as a substring in any searchable equipment field."""
+    system = (item.get("system") or "").lower()
+    name = (item.get("equipment_name") or "").lower()
+    make = (item.get("make") or "").lower()
+    model = (item.get("model") or "").lower()
+    serial = (item.get("serial_number") or "").lower()
+    return (
+        q in system or (system and system in q)
+        or q in name or (name and name in q)
+        or (make and q in make)
+        or (model and (q in model or model in q))
+        or (serial and q in serial)
+    )
+
+
+_EQ_STOPWORDS = frozenset({
+    "the", "our", "for", "and", "with", "its", "a", "an", "of", "in",
+    "to", "by", "do", "we", "are", "how", "many", "have", "what", "this",
+    "that", "there", "is", "does", "did", "will", "would", "could",
+    "should", "been", "some", "unit",
+})
+
+
 def find_equipment_by_query(user_id: str, query: str) -> list:
-    """Fuzzy match against system, equipment_name, make, model, serial_number."""
+    """
+    Fuzzy match against system, equipment_name, make, model, serial_number.
+
+    Strategy:
+      1. Full-phrase match across all fields.
+      2. If no results, try each significant word individually (len >= 4,
+         not a stopword). Also tries the singular form (trailing 's' stripped)
+         to handle plurals like 'stabilisers' → 'stabiliser'.
+    """
     q = query.lower().strip()
-    results = []
-    for item in get_all_equipment(user_id):
-        system = (item.get("system") or "").lower()
-        name = (item.get("equipment_name") or "").lower()
-        make = (item.get("make") or "").lower()
-        model = (item.get("model") or "").lower()
-        serial = (item.get("serial_number") or "").lower()
-        if (
-            q in system or (system and system in q)
-            or q in name or (name and name in q)
-            or (make and q in make)
-            or (model and (q in model or model in q))
-            or (serial and q in serial)
-        ):
+    all_items = get_all_equipment(user_id)
+    seen: set = set()
+    results: list = []
+
+    for i, item in enumerate(all_items):
+        if _eq_field_match(item, q):
+            seen.add(i)
             results.append(item)
+
+    if results:
+        return results
+
+    # Word-level fallback: try each significant word from the query
+    words = [
+        w for w in q.split()
+        if len(w) >= 4 and w not in _EQ_STOPWORDS
+    ]
+    for word in words:
+        singular = word[:-1] if word.endswith("s") and len(word) > 4 else None
+        for i, item in enumerate(all_items):
+            if i in seen:
+                continue
+            if _eq_field_match(item, word) or (singular and _eq_field_match(item, singular)):
+                seen.add(i)
+                results.append(item)
+
     return results

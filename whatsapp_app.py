@@ -1,5 +1,6 @@
 import copy
 import os
+import re
 import json
 import logging
 import requests
@@ -1881,7 +1882,37 @@ def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
 
 def _handle_equipment_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
+    t = query.lower().strip()
+
+    is_serial_query = "serial" in t
+    is_count_query = t.startswith("how many")
+    is_spec_query = any(w in t for w in ("spec", "specification", "specifications", "specs"))
+
+    # Extract the subject by stripping the longest matching prefix (longest first)
     subject = _extract_subject_from_query(query, [
+        # Serial number queries
+        "what is the serial number for the ",
+        "what is the serial number of the ",
+        "what is the serial number for ",
+        "what is the serial number of ",
+        "serial number for the ",
+        "serial number of the ",
+        "serial number for ",
+        "serial number of ",
+        # Spec queries
+        "what are the specifications of the ",
+        "what are the specifications of ",
+        "what are the specs of the ",
+        "what are the specs of ",
+        "what is the spec of the ",
+        "what is the spec of ",
+        "specifications of the ",
+        "specifications of ",
+        "specification of the ",
+        "specification of ",
+        "specs of the ",
+        "specs of ",
+        # Make/model/equipment queries
         "what equipment do we have from ",
         "what machinery do we have from ",
         "what equipment from ",
@@ -1899,11 +1930,28 @@ def _handle_equipment_query(query: str, state: dict) -> Tuple[str, dict]:
         "what is installed on ",
         "fitted to ",
     ])
-    if not subject:
-        subject = query
 
-    # "fitted to" queries: find stock linked to that equipment
-    if any(p in query.lower() for p in ("fitted to", "installed on", "what is this fitted", "what is that fitted")):
+    # For "how many X do we have / are there", extract X
+    if is_count_query:
+        m = re.match(
+            r'^how many\s+(.+?)(?:\s+do\s+we\s+have|\s+are\s+(?:there|onboard|on\s+board))?\??$',
+            t,
+        )
+        if m:
+            subject = m.group(1).strip()
+
+    # Strip leading articles so "the UV unit" → "UV unit"
+    for article in ("the ", "our ", "a ", "an "):
+        if subject.lower().startswith(article):
+            subject = subject[len(article):]
+            break
+
+    subject = subject.strip().rstrip("?").strip()
+    if not subject:
+        subject = query.strip()
+
+    # "fitted to / installed on" queries: find stock linked to that equipment
+    if any(p in t for p in ("fitted to", "installed on", "what is this fitted", "what is that fitted")):
         results = find_stock_for_system(user_id, subject)
         if not results:
             return (
@@ -1915,26 +1963,89 @@ def _handle_equipment_query(query: str, state: dict) -> Tuple[str, dict]:
             lines.append(f"• {item.get('description') or item.get('part_number') or 'Unknown'}")
         return "\n".join(lines).strip(), state
 
-    # "equipment from/by <make>" queries
     results = find_equipment_by_query(user_id, subject)
+
     if not results:
         return _make_response(
-            decision="NO EQUIPMENT MATCH",
-            why=f"No equipment found matching '{subject}'.",
-            actions=["Upload an equipment list to build onboard memory"],
+            decision="NO EQUIPMENT MATCH FOUND",
+            why=f"I searched vessel equipment memory but could not find a clear match for '{subject}'.",
+            actions=[
+                "Try the equipment name, make, or model",
+                "Upload the relevant machinery list if not already imported",
+            ],
         ), state
-    lines = [f"EQUIPMENT MATCHING '{subject.upper()}' ({len(results)} items):\n"]
+
+    # --- Count response ---
+    if is_count_query:
+        count = len(results)
+        lines = [
+            "DECISION:",
+            f"EQUIPMENT COUNT — {subject.upper()}",
+            "",
+            "WHY:",
+            f"Found {count} record{'s' if count != 1 else ''} matching '{subject}' in vessel memory.",
+            "",
+            "EQUIPMENT:",
+        ]
+        for item in results[:10]:
+            name = item.get("equipment_name") or "Unknown"
+            make = item.get("make") or ""
+            model = item.get("model") or ""
+            loc = item.get("location") or ""
+            detail = f" — {' '.join(p for p in [make, model] if p)}" if (make or model) else ""
+            loc_str = f" ({loc})" if loc else ""
+            lines.append(f"• {name}{detail}{loc_str}")
+        return "\n".join(lines), state
+
+    # --- Serial number response ---
+    if is_serial_query:
+        decision = "EQUIPMENT FOUND" if len(results) == 1 else "MULTIPLE EQUIPMENT MATCHES"
+        why = "Found matching equipment in vessel memory." if len(results) == 1 else f"Found {len(results)} matching records."
+        lines = [
+            "DECISION:",
+            decision,
+            "",
+            "WHY:",
+            why,
+            "",
+            "EQUIPMENT:",
+        ]
+        for item in results[:5]:
+            name = item.get("equipment_name") or "Unknown"
+            make = item.get("make") or ""
+            model = item.get("model") or ""
+            sn = item.get("serial_number") or ""
+            loc = item.get("location") or ""
+            detail = f" — {' '.join(p for p in [make, model] if p)}" if (make or model) else ""
+            sn_str = f", Serial: {sn}" if sn else ", Serial: not recorded"
+            loc_str = f" ({loc})" if loc else ""
+            lines.append(f"• {name}{detail}{sn_str}{loc_str}")
+        return "\n".join(lines), state
+
+    # --- Spec / general response ---
+    decision = "EQUIPMENT FOUND" if len(results) == 1 else "MULTIPLE EQUIPMENT MATCHES"
+    lines = [
+        "DECISION:",
+        decision,
+        "",
+        "WHY:",
+        f"Found {len(results)} record{'s' if len(results) != 1 else ''} matching '{subject}' in vessel memory.",
+        "",
+        "EQUIPMENT:",
+    ]
     for item in results[:10]:
         name = item.get("equipment_name") or "Unknown"
         make = item.get("make") or ""
         model = item.get("model") or ""
-        sys = item.get("system") or ""
         sn = item.get("serial_number") or ""
-        detail = ", ".join(p for p in [make, model] if p)
-        sn_str = f" SN:{sn}" if sn else ""
-        sys_str = f" [{sys}]" if sys else ""
-        lines.append(f"• {name} — {detail}{sn_str}{sys_str}" if detail else f"• {name}{sn_str}{sys_str}")
-    return "\n".join(lines).strip(), state
+        sys = item.get("system") or ""
+        loc = item.get("location") or ""
+        detail = f" — {' '.join(p for p in [make, model] if p)}" if (make or model) else ""
+        sn_str = f" s/n {sn}" if sn else ""
+        sys_str = f" [{sys}]" if sys and sys.lower() != name.lower() else ""
+        loc_str = f" ({loc})" if loc else ""
+        lines.append(f"• {name}{detail}{sn_str}{sys_str}{loc_str}")
+    return "\n".join(lines), state
 
 
 def _get_stock_ordering_note(query: str, state: dict) -> Optional[str]:

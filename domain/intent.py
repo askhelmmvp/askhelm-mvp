@@ -214,10 +214,19 @@ _EQUIPMENT_QUERY_SUBSTRINGS = [
     # "do we have" variants must come before _STOCK_QUERY_SUBSTRINGS "do we have "
     "what equipment do we have",
     "what machinery do we have",
-    # make/model/serial lookups
+    # serial number lookups
+    "what is the serial number",
+    "serial number for ",
+    "serial number of ",
+    # make/model/spec lookups
     "what make is",
     "what model is",
     "what is serial",
+    "what are the specs",
+    "specs of ",
+    "spec of ",
+    "specification of ",
+    "specifications of ",
     # installation queries
     "what equipment from ",
     "what equipment by ",
@@ -228,6 +237,46 @@ _EQUIPMENT_QUERY_SUBSTRINGS = [
     "what is this fitted to",
     "what is that fitted to",
 ]
+
+# Marine equipment nouns: presence in a question (combined with a question word)
+# indicates an equipment memory query rather than a stock or compliance query.
+_MARINE_EQUIPMENT_WORDS = frozenset({
+    "engine", "generator", "motor", "gearbox", "propeller", "shaft",
+    "thruster", "bow thruster", "stern thruster", "alternator",
+    "windlass", "winch", "crane", "davit",
+    "stabiliser", "stabilizer",
+    "chiller", "air conditioner", "hvac", "refrigeration",
+    "compressor", "pump", "separator", "watermaker", "ows",
+    "oily water separator",
+    "uv", "ultraviolet", "steriliser", "sterilizer", "purifier",
+    "boiler", "incinerator", "inverter",
+})
+
+# Question patterns that, when combined with a marine equipment noun,
+# signal an equipment memory query.
+_EQUIPMENT_QUESTION_WORDS = frozenset({
+    "serial number", "serial no",
+    "make", "manufacturer", "model", "type",
+    "specs", "spec", "specification", "specifications",
+    "how many",
+    "do we have",
+    "fitted", "installed",
+})
+
+
+def _is_equipment_memory_query(t: str) -> bool:
+    """
+    True when the message contains both a marine equipment noun and an
+    equipment-question pattern. Catches natural queries like:
+      'how many stabilisers do we have?'
+      'what are the specs of the chiller pump?'
+      'do we have a watermaker?'
+    but NOT stock queries ('do we have hydraulic oil?') where no equipment
+    noun is present.
+    """
+    has_equipment = any(w in t for w in _MARINE_EQUIPMENT_WORDS)
+    has_question = any(w in t for w in _EQUIPMENT_QUESTION_WORDS)
+    return has_equipment and has_question
 
 _GREETINGS = {"hi", "hello", "start", "hey"}
 
@@ -630,6 +679,12 @@ def classify_text(text: str) -> str:
     for phrase in _EQUIPMENT_QUERY_SUBSTRINGS:
         if phrase in t:
             return "equipment_query"
+
+    # Natural-language equipment question: equipment noun + question word.
+    # Checked before _STOCK_QUERY_SUBSTRINGS so "how many stabilisers do we have?"
+    # routes to equipment_query instead of stock_query.
+    if _is_equipment_memory_query(t):
+        return "equipment_query"
 
     for phrase in _STOCK_QUERY_SUBSTRINGS:
         if phrase in t:
