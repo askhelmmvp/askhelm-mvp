@@ -510,22 +510,48 @@ def _find_header_row(all_rows: list, max_scan: int = 10) -> int:
 # CSV extraction
 # ---------------------------------------------------------------------------
 
-def extract_inventory_from_csv(file_path: str) -> dict:
-    """Parse a CSV file into an inventory dict, auto-detecting the header row."""
-    try:
-        with open(file_path, newline="", encoding="utf-8-sig") as f:
-            sample = f.read(2048)
-        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
-    except Exception:
-        dialect = csv.excel
+# Encodings tried in preference order. cp1252 covers most Windows/Excel exports;
+# latin-1 and iso-8859-1 are byte-transparent fallbacks that never raise on any
+# single-byte file.
+_CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1", "iso-8859-1")
 
-    try:
-        with open(file_path, newline="", encoding="utf-8-sig") as f:
-            reader = csv.reader(f, dialect)
-            all_rows = list(reader)
-    except Exception as exc:
-        logger.warning("inventory: CSV read failed file=%s: %s", file_path, exc)
-        return {"equipment": [], "stock": []}
+
+def extract_inventory_from_csv(file_path: str) -> dict:
+    """Parse a CSV file into an inventory dict, auto-detecting the header row.
+
+    Tries multiple encodings in preference order so Windows/Excel CSV exports
+    (cp1252, latin-1) are handled without crashing.
+    Returns {"encoding_error": True} if all encodings fail.
+    """
+    fname = os.path.basename(file_path)
+    all_rows = None
+    used_encoding = None
+
+    for encoding in _CSV_ENCODINGS:
+        try:
+            with open(file_path, newline="", encoding=encoding) as f:
+                sample = f.read(2048)
+            try:
+                dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+            except csv.Error:
+                dialect = csv.excel
+            with open(file_path, newline="", encoding=encoding) as f:
+                reader = csv.reader(f, dialect)
+                all_rows = list(reader)
+            used_encoding = encoding
+            logger.info("inventory: csv_encoding_used=%s file=%s", encoding, fname)
+            break
+        except UnicodeDecodeError:
+            logger.debug("inventory: csv_encoding_failed=%s file=%s", encoding, fname)
+        except Exception as exc:
+            logger.warning("inventory: CSV read failed encoding=%s file=%s: %s", encoding, fname, exc)
+
+    if all_rows is None:
+        logger.warning(
+            "inventory: csv_encoding_not_supported — all encodings failed file=%s tried=%r",
+            fname, list(_CSV_ENCODINGS),
+        )
+        return {"equipment": [], "stock": [], "encoding_error": True}
 
     if len(all_rows) < 2:
         return {"equipment": [], "stock": []}
@@ -534,7 +560,7 @@ def extract_inventory_from_csv(file_path: str) -> dict:
     if header_idx > 0:
         logger.info(
             "inventory csv: header_row_detected=%d skipped_title_rows=%d file=%s",
-            header_idx, header_idx, os.path.basename(file_path),
+            header_idx, header_idx, fname,
         )
 
     # Flatten compound headers (e.g. 'Serial # / Type' → 'Serial #') so that
@@ -544,8 +570,8 @@ def extract_inventory_from_csv(file_path: str) -> dict:
 
     result = extract_inventory_from_tabular(headers, rows, confidence=0.8)
     logger.info(
-        "inventory csv: equipment=%d stock=%d file=%s",
-        len(result["equipment"]), len(result["stock"]), os.path.basename(file_path),
+        "inventory csv: equipment=%d stock=%d encoding=%s file=%s",
+        len(result["equipment"]), len(result["stock"]), used_encoding, fname,
     )
     return result
 

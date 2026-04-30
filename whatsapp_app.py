@@ -1706,6 +1706,16 @@ def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tu
     except Exception as exc:
         logger.exception("Inventory file handler failed file=%s: %s", file_path, exc)
         data = {"equipment": [], "stock": [], "parse_error": True}
+
+    if data.get("encoding_error"):
+        return (
+            "DECISION:\nCSV ENCODING NOT SUPPORTED\n\n"
+            "WHY:\nThe file could not be decoded using common CSV encodings.\n\n"
+            "RECOMMENDED ACTIONS:\n"
+            "• Re-export as CSV UTF-8\n"
+            "• Or upload the Excel file directly"
+        ), state
+
     user_id = state.get("user_id", "")
     parse_error = bool(data.get("parse_error"))
     skipped_rows = data.get("skipped_rows", 0)
