@@ -349,6 +349,22 @@ _ALIAS_SUBS = (
     (re.compile(r'\bstabili[sz]ers?\b'), 'stabilizer'),
     (re.compile(r'\bsterili[sz]ers?\b'), 'sterilizer'),
     (re.compile(r'\baircon\b'), 'airconditioning'),
+    # OWS / oily water separator variants (must come before generic "separator")
+    (re.compile(r'\b15\s*ppm\s+separator\b'), 'oily bilge separator'),
+    (re.compile(r'\boily\s+bilge\s+sep[ae]rators?\b'), 'oily bilge separator'),
+    (re.compile(r'\boily\s+water\s+sep[ae]rators?\b'), 'oily bilge separator'),
+    (re.compile(r'\bbilge\s+water\s+sep[ae]rators?\b'), 'oily bilge separator'),
+    (re.compile(r'\bbilge\s+sep[ae]rators?\b'), 'oily bilge separator'),
+    (re.compile(r'\bows\b'), 'oily bilge separator'),
+    # Typo: seperator → separator (catch-all after multi-word aliases above)
+    (re.compile(r'\bsep[e]rators?\b'), 'separator'),
+    # OCM / oil content monitor variants
+    (re.compile(r'\b15\s*ppm\s+(monitor|alarm|meter)\b'), 'oil content monitor'),
+    (re.compile(r'\boil\s+content\s+(monitor|meter)\b'), 'oil content monitor'),
+    (re.compile(r'\boil\s+monitoring\s+device\b'), 'oil content monitor'),
+    (re.compile(r'\bbilge\s+alarm\b'), 'oil content monitor'),
+    (re.compile(r'\bocm\b'), 'oil content monitor'),
+    (re.compile(r'\bomd\b'), 'oil content monitor'),
     (re.compile(r'\s+'), ' '),                               # collapse whitespace
 )
 

@@ -218,15 +218,35 @@ _EQUIPMENT_QUERY_SUBSTRINGS = [
     "what is the serial number",
     "serial number for ",
     "serial number of ",
-    # make/model/spec lookups
+    # make/model/manufacturer lookups
     "what make is",
     "what model is",
     "what is serial",
+    "what is the manufacturer",
+    "manufacturer of the",
+    "manufacturer of our",
+    "who makes our",
+    "who made the",
+    "who is the manufacturer",
+    # spec lookups
     "what are the specs",
     "specs of ",
     "spec of ",
     "specification of ",
     "specifications of ",
+    # OWS / OCM / OMD direct equipment queries
+    "what is the ows",
+    "what is the ocm",
+    "what is the omd",
+    "what is our ows",
+    "what is our ocm",
+    "what is our omd",
+    "serial number of the ocm",
+    "serial number of the omd",
+    "serial number of the ows",
+    "when was the ocm",
+    "when was the ows",
+    "when was the omd",
     # installation queries
     "what equipment from ",
     "what equipment by ",
@@ -246,8 +266,13 @@ _MARINE_EQUIPMENT_WORDS = frozenset({
     "windlass", "winch", "crane", "davit",
     "stabiliser", "stabilizer",
     "chiller", "air conditioner", "hvac", "refrigeration",
-    "compressor", "pump", "separator", "watermaker", "ows",
-    "oily water separator",
+    "compressor", "pump", "separator", "watermaker",
+    # OWS variants
+    "ows", "oily water separator", "oily bilge separator", "bilge separator",
+    "bilge water separator", "15ppm separator",
+    # OCM / OMD variants
+    "ocm", "omd", "oil content monitor", "oil monitoring device",
+    "oil content meter", "bilge alarm",
     "uv", "ultraviolet", "steriliser", "sterilizer", "purifier",
     "boiler", "incinerator", "inverter",
 })
@@ -261,7 +286,21 @@ _EQUIPMENT_QUESTION_WORDS = frozenset({
     "how many",
     "do we have",
     "fitted", "installed",
+    "calibrated", "approved", "approval",
+    "capacity", "pressure",
 })
+
+
+# "what is the X" / "what is our X" — identity queries for equipment nouns.
+# These contain no _EQUIPMENT_QUESTION_WORDS keyword so the two-set check
+# misses them; a dedicated prefix pattern closes the gap.
+_EQUIPMENT_IDENTITY_PREFIXES = (
+    "what is the ", "what is our ", "what is a ",
+    "what is an ", "what are the ", "what are our ",
+    "tell me about the ", "tell me about our ",
+    "describe the ", "describe our ",
+    "show me the ", "show me our ",
+)
 
 
 def _is_equipment_memory_query(t: str) -> bool:
@@ -273,10 +312,16 @@ def _is_equipment_memory_query(t: str) -> bool:
       'do we have a watermaker?'
     but NOT stock queries ('do we have hydraulic oil?') where no equipment
     noun is present.
+    Also catches identity queries like 'what is the OWS' / 'what is the OCM'.
     """
     has_equipment = any(w in t for w in _MARINE_EQUIPMENT_WORDS)
+    if not has_equipment:
+        return False
     has_question = any(w in t for w in _EQUIPMENT_QUESTION_WORDS)
-    return has_equipment and has_question
+    if has_question:
+        return True
+    # "what is the <equipment>" pattern — no field-question word needed
+    return any(t.startswith(p) for p in _EQUIPMENT_IDENTITY_PREFIXES)
 
 _GREETINGS = {"hi", "hello", "start", "hey"}
 
