@@ -335,10 +335,21 @@ def _eq_field_match(item: dict, q: str) -> bool:
 
 
 _EQ_STOPWORDS = frozenset({
-    "the", "our", "for", "and", "with", "its", "a", "an", "of", "in",
-    "to", "by", "do", "we", "are", "how", "many", "have", "what", "this",
-    "that", "there", "is", "does", "did", "will", "would", "could",
-    "should", "been", "some", "unit",
+    # 1–2 char common English words (keep marine abbreviations: "uv", "ac")
+    "a", "am", "an", "as", "at", "be", "by", "do", "go", "he",
+    "hi", "i", "if", "in", "is", "it", "me", "my", "no", "of",
+    "ok", "on", "or", "re", "so", "to", "up", "us", "we",
+    # 3-char noise words
+    "all", "any", "are", "did", "for", "get", "has", "had",
+    "her", "him", "his", "how", "its", "its", "let", "not",
+    "our", "out", "own", "see", "she", "the", "was", "who",
+    # Longer query noise
+    "and", "been", "but", "can", "could", "does", "find", "from",
+    "give", "have", "just", "know", "like", "look", "made",
+    "make", "many", "more", "much", "must", "need", "now", "show",
+    "some", "than", "that", "them", "then", "there", "they",
+    "this", "unit", "very", "want", "what", "when", "where",
+    "which", "who", "will", "with", "would", "your",
 })
 
 
@@ -365,10 +376,12 @@ def find_equipment_by_query(user_id: str, query: str) -> list:
     if results:
         return results
 
-    # Word-level fallback: try each significant word from the query
+    # Word-level fallback: try each significant word from the query.
+    # Threshold is 2 chars (not 4) so marine abbreviations like "uv", "ac",
+    # "ow" are included; common English 2-char words live in _EQ_STOPWORDS.
     words = [
         w for w in q.split()
-        if len(w) >= 4 and w not in _EQ_STOPWORDS
+        if len(w) >= 2 and w not in _EQ_STOPWORDS
     ]
     for word in words:
         singular = word[:-1] if word.endswith("s") and len(word) > 4 else None
