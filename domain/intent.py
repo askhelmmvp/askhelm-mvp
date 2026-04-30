@@ -57,9 +57,17 @@ _FOLLOW_UPS = {
     "list equipment": "show_equipment",
     "show machinery": "show_equipment",
     "show all equipment": "show_equipment",
+    "show all machinery": "show_equipment",
     "equipment list": "show_equipment",
     "machinery list": "show_equipment",
+    "list our equipment": "show_equipment",
+    "list all equipment": "show_equipment",
+    "list all machinery": "show_equipment",
     "what equipment do we have": "show_equipment",
+    "what equipment is onboard": "show_equipment",
+    "what machinery is onboard": "show_equipment",
+    "what engines do we have": "show_equipment",
+    "what generators do we have": "show_equipment",
     "show stock": "show_stock",
     "show inventory": "show_stock",
     "show spares": "show_stock",
@@ -203,6 +211,14 @@ _SPARES_QUERY_SUBSTRINGS = [
 ]
 
 _EQUIPMENT_QUERY_SUBSTRINGS = [
+    # "do we have" variants must come before _STOCK_QUERY_SUBSTRINGS "do we have "
+    "what equipment do we have",
+    "what machinery do we have",
+    # make/model/serial lookups
+    "what make is",
+    "what model is",
+    "what is serial",
+    # installation queries
     "what equipment from ",
     "what equipment by ",
     "equipment from ",
@@ -523,6 +539,9 @@ _COMMERCIAL_GUARD = {
     "machinery",
     "fitted to",
     "installed",
+    "serial",
+    "engine",
+    "generator",
 }
 
 # Message starters that indicate an open question.
@@ -659,6 +678,13 @@ def classify_text(text: str) -> str:
 
     if t in _GREETINGS:
         return "greeting"
+
+    # OEM brand in an open question → equipment lookup, not compliance.
+    # Catches queries like "what is the Caterpillar C18" or "show me the MTU 16V".
+    # Placed after all compliance checks so genuine regulatory questions with brand
+    # names (e.g. "is the Wartsila engine compliant?") are already handled above.
+    if _is_open_question(t) and any(b in t for b in _OEM_BRANDS):
+        return "equipment_query"
 
     # Question fallback: open question, not clearly commercial/document-related
     # Routes unknown questions to the compliance engine (returns "not covered"

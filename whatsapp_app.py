@@ -1753,7 +1753,15 @@ def _handle_show_equipment(state: dict) -> Tuple[str, dict]:
             why="No equipment has been imported yet.",
             actions=["Upload an equipment list (Excel, CSV, or PDF)"],
         ), state
-    lines = [f"EQUIPMENT ({len(items)} records):\n"]
+    lines = [
+        "DECISION:",
+        "EQUIPMENT FOUND",
+        "",
+        "WHY:",
+        f"Found {len(items)} equipment records in vessel memory.",
+        "",
+        "EQUIPMENT:",
+    ]
     for item in items[:20]:
         name = item.get("equipment_name") or item.get("system") or "Unknown"
         make = item.get("make") or ""
@@ -1762,14 +1770,14 @@ def _handle_show_equipment(state: dict) -> Tuple[str, dict]:
         loc = item.get("location") or ""
         sys = item.get("system") or ""
         detail_parts = [p for p in [make, model] if p]
-        detail = f" ({', '.join(detail_parts)})" if detail_parts else ""
-        serial_str = f" s/n {serial}" if serial else ""
-        loc_str = f" — {loc}" if loc else ""
+        detail = f" — {' '.join(detail_parts)}" if detail_parts else ""
+        loc_str = f" ({loc})" if loc else ""
         sys_str = f" [{sys}]" if sys and sys != name else ""
+        serial_str = f" s/n {serial}" if serial else ""
         lines.append(f"• {name}{detail}{serial_str}{sys_str}{loc_str}")
     if len(items) > 20:
         lines.append(f"... and {len(items) - 20} more")
-    return "\n".join(lines).strip(), state
+    return "\n".join(lines), state
 
 
 def _handle_show_stock(state: dict) -> Tuple[str, dict]:
@@ -1874,8 +1882,22 @@ def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
 def _handle_equipment_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
     subject = _extract_subject_from_query(query, [
-        "what equipment from ", "what equipment by ", "equipment from ",
-        "what is fitted to ", "what is installed on ", "fitted to ",
+        "what equipment do we have from ",
+        "what machinery do we have from ",
+        "what equipment from ",
+        "what equipment by ",
+        "equipment from ",
+        "what make is our ",
+        "what make is the ",
+        "what make is ",
+        "what model is our ",
+        "what model is the ",
+        "what model is ",
+        "what is serial number ",
+        "what is serial ",
+        "what is fitted to ",
+        "what is installed on ",
+        "fitted to ",
     ])
     if not subject:
         subject = query

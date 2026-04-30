@@ -319,17 +319,21 @@ def find_stock_for_system(user_id: str, query: str) -> list:
 
 
 def find_equipment_by_query(user_id: str, query: str) -> list:
-    """Fuzzy match against system, equipment_name, make."""
+    """Fuzzy match against system, equipment_name, make, model, serial_number."""
     q = query.lower().strip()
     results = []
     for item in get_all_equipment(user_id):
         system = (item.get("system") or "").lower()
         name = (item.get("equipment_name") or "").lower()
         make = (item.get("make") or "").lower()
+        model = (item.get("model") or "").lower()
+        serial = (item.get("serial_number") or "").lower()
         if (
             q in system or (system and system in q)
             or q in name or (name and name in q)
             or (make and q in make)
+            or (model and (q in model or model in q))
+            or (serial and q in serial)
         ):
             results.append(item)
     return results
