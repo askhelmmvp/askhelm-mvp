@@ -2,7 +2,7 @@ import os
 import json
 import hashlib
 
-from config import USERS_DIR
+from storage_paths import get_user_context_path, get_yacht_id_for_user, migrate_user_files
 
 
 def user_id_from_phone(phone: str) -> str:
@@ -10,7 +10,9 @@ def user_id_from_phone(phone: str) -> str:
 
 
 def _state_path(user_id: str) -> str:
-    return str(USERS_DIR / user_id / "state.json")
+    yacht_id = get_yacht_id_for_user(user_id)
+    migrate_user_files(user_id, yacht_id)
+    return str(get_user_context_path(yacht_id, user_id))
 
 
 def load_user_state(user_id: str) -> dict:

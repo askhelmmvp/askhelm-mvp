@@ -97,12 +97,14 @@ from services.inventory_service import (
     is_junk_equipment_name,
 )
 import config
+from storage_paths import migrate_all_users
 
 load_dotenv(dotenv_path=".env")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 config.log_startup()
+migrate_all_users()
 start_reminder_scheduler()
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
@@ -2414,8 +2416,11 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         "reset machinery", "clear machinery",
         "reset equipment memory", "clear equipment memory",
     ):
-        clear_equipment(state.get("user_id", ""))
-        logger.info("equipment_reset: user=%s", state.get("user_id", ""))
+        _uid = state.get("user_id", "")
+        clear_equipment(_uid)
+        from storage_paths import get_yacht_id_for_user, get_equipment_memory_path
+        _yid = get_yacht_id_for_user(_uid)
+        logger.info("equipment_reset: user=%s yacht=%s path=%s", _uid, _yid, get_equipment_memory_path(_yid))
         return _equipment_reset_response(), state
 
     # Invoice address commands
@@ -2476,8 +2481,11 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     # phrases, but this handler also covers any edge case that slips the pre-intent
     # check above (e.g. trailing punctuation stripped by t_core).
     if intent == "reset_equipment":
-        clear_equipment(state.get("user_id", ""))
-        logger.info("equipment_reset: user=%s", state.get("user_id", ""))
+        _uid = state.get("user_id", "")
+        clear_equipment(_uid)
+        from storage_paths import get_yacht_id_for_user, get_equipment_memory_path
+        _yid = get_yacht_id_for_user(_uid)
+        logger.info("equipment_reset: user=%s yacht=%s path=%s", _uid, _yid, get_equipment_memory_path(_yid))
         return _equipment_reset_response(), state
 
     if intent == "quote_compare":

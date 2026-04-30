@@ -3,13 +3,15 @@ import logging
 from pathlib import Path
 from datetime import datetime, timezone
 
-from config import USERS_DIR
+from storage_paths import get_handover_notes_path, get_yacht_id_for_user, migrate_user_files
 
 logger = logging.getLogger(__name__)
 
 
 def _handover_path(user_id: str) -> Path:
-    return USERS_DIR / user_id / "handover_notes.json"
+    yacht_id = get_yacht_id_for_user(user_id)
+    migrate_user_files(user_id, yacht_id)
+    return get_handover_notes_path(yacht_id)
 
 
 def load_handover_notes(user_id: str) -> dict:

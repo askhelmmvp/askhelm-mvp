@@ -5,21 +5,30 @@ import datetime
 from pathlib import Path
 from typing import Optional
 
-from config import USERS_DIR
+from storage_paths import (
+    get_equipment_memory_path,
+    get_stock_memory_path,
+    get_yacht_id_for_user,
+    migrate_user_files,
+)
 
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Paths
+# Paths  (yacht-level: one equipment/stock store shared across all crew)
 # ---------------------------------------------------------------------------
 
 def _equipment_path(user_id: str) -> Path:
-    return USERS_DIR / user_id / "equipment_memory.json"
+    yacht_id = get_yacht_id_for_user(user_id)
+    migrate_user_files(user_id, yacht_id)
+    return get_equipment_memory_path(yacht_id)
 
 
 def _stock_path(user_id: str) -> Path:
-    return USERS_DIR / user_id / "stock_memory.json"
+    yacht_id = get_yacht_id_for_user(user_id)
+    migrate_user_files(user_id, yacht_id)
+    return get_stock_memory_path(yacht_id)
 
 
 # ---------------------------------------------------------------------------
