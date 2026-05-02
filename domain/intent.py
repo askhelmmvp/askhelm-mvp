@@ -84,6 +84,19 @@ _FOLLOW_UPS = {
     "clear machinery": "reset_equipment",
     "reset equipment memory": "reset_equipment",
     "clear equipment memory": "reset_equipment",
+    # Compliance knowledge base management
+    "show compliance sources": "show_compliance_sources",
+    "compliance sources": "show_compliance_sources",
+    "list compliance sources": "show_compliance_sources",
+    "what regulations are loaded": "show_compliance_sources",
+    "what compliance documents do we have": "show_compliance_sources",
+    "list regulations": "show_compliance_sources",
+    "show regulations": "show_compliance_sources",
+    "show loaded regulations": "show_compliance_sources",
+    "reload compliance": "reload_compliance",
+    "rebuild compliance": "reload_compliance",
+    "reload compliance index": "reload_compliance",
+    "rebuild compliance index": "reload_compliance",
     # Manual library commands
     "show manuals": "show_manuals",
     "list manuals": "show_manuals",
@@ -509,6 +522,9 @@ def _is_marine_pricing_question(t: str) -> bool:
 # Substring triggers: matched anywhere in the lowercased message.
 # Checked after commercial intents so commercial routing always wins.
 _COMPLIANCE_SUBSTRINGS = [
+    # Direct compliance search commands
+    "search compliance for",
+    "search regulations for",
     # MARPOL Annex VI / emissions
     "marpol",
     "annex vi",

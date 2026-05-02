@@ -41,6 +41,18 @@ def get_global_dir() -> Path:
     return get_data_dir() / "global"
 
 
+def get_global_compliance_dir() -> Path:
+    return get_global_dir() / "compliance"
+
+
+def get_compliance_chunks_path() -> Path:
+    return get_global_compliance_dir() / "compliance_chunks.jsonl"
+
+
+def get_compliance_index_path() -> Path:
+    return get_global_compliance_dir() / "compliance_index.pkl"
+
+
 # ---------------------------------------------------------------------------
 # Yacht-level paths
 # ---------------------------------------------------------------------------

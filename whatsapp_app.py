@@ -37,7 +37,16 @@ from domain.session_manager import (
     MAX_QUOTES_PER_SESSION,
 )
 from domain.intent import classify_text
-from domain.compliance_engine import answer_compliance_query, answer_compliance_followup
+from domain.compliance_engine import (
+    answer_compliance_query,
+    answer_compliance_followup,
+    reset_retriever as _reset_compliance_retriever,
+)
+from services.compliance_ingest import (
+    list_sources as list_compliance_sources,
+    rebuild_index as rebuild_compliance_index,
+    ingest_compliance_pdf,
+)
 from services.market_price_service import check_market_price, commercial_followup_advice
 from domain.component_memory import (
     extract_components_from_doc,
@@ -114,6 +123,7 @@ from services.inventory_service import (
 )
 import config
 from storage_paths import migrate_all_users
+from services.compliance_ingest import seed_if_empty as _seed_compliance
 
 load_dotenv(dotenv_path=".env")
 
@@ -121,6 +131,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger(__name__)
 config.log_startup()
 migrate_all_users()
+_seed_compliance()
 start_reminder_scheduler()
 
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
@@ -2433,6 +2444,77 @@ def _handle_show_open_actions(state: dict) -> Tuple[str, dict]:
     return "\n".join(lines).strip(), state
 
 
+def _handle_show_compliance_sources(state: dict) -> Tuple[str, dict]:
+    """List all loaded compliance regulation sources."""
+    sources = list_compliance_sources()
+    if not sources:
+        return _make_response(
+            decision="NO COMPLIANCE SOURCES LOADED",
+            why="The compliance knowledge base is empty.",
+            actions=[
+                "Upload a compliance PDF to add it",
+                'Reply "reload compliance" to rebuild the index',
+            ],
+        ), state
+
+    total_chunks = sum(s["chunks"] for s in sources)
+    lines = [f"COMPLIANCE SOURCES ({len(sources)} document(s), {total_chunks} sections):\n"]
+    for s in sources:
+        lines.append(f"• {s['source']} ({s['chunks']} section(s))")
+    lines.append("")
+    lines.append('Reply "search compliance for [topic]" to search')
+    lines.append('Reply "reload compliance" to rebuild the index after uploading new documents')
+    return "\n".join(lines).strip(), state
+
+
+def _handle_reload_compliance(state: dict) -> Tuple[str, dict]:
+    """Rebuild the compliance index from stored chunks."""
+    try:
+        count = rebuild_compliance_index()
+        _reset_compliance_retriever()
+        return _make_response(
+            decision="COMPLIANCE INDEX REBUILT",
+            why=f"The compliance knowledge base has been rebuilt from {count} sections.",
+            actions=[
+                'Reply "show compliance sources" to see loaded regulations',
+                'Reply "search compliance for [topic]" to search',
+            ],
+        ), state
+    except Exception as exc:
+        logger.exception("reload_compliance failed: %s", exc)
+        return _make_response(
+            decision="REBUILD FAILED",
+            why=f"Could not rebuild the compliance index: {exc}",
+            actions=["Check server logs for details"],
+        ), state
+
+
+def _handle_compliance_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
+    """Ingest a compliance PDF into the global knowledge base."""
+    import os
+    filename = os.path.basename(file_path)
+    # Derive a friendly source name from the filename
+    source_name = os.path.splitext(filename)[0].replace("-", " ").replace("_", " ").strip()
+    try:
+        total = ingest_compliance_pdf(file_path, source_name)
+        _reset_compliance_retriever()
+        return _make_response(
+            decision="COMPLIANCE DOCUMENT ADDED",
+            why=f"{filename} has been added to the global compliance knowledge base.",
+            actions=[
+                f'Reply "show compliance sources" to confirm it is listed',
+                'Reply "search compliance for [topic]" to search',
+            ],
+        ), state
+    except Exception as exc:
+        logger.exception("compliance PDF ingest failed: %s", exc)
+        return _make_response(
+            decision="INGEST FAILED",
+            why=f"Could not process {filename}: {exc}",
+            actions=["Check that the PDF contains selectable text"],
+        ), state
+
+
 def _extract_pdf_to_doc_record(file_path: str) -> dict:
     """Extract text/images from a PDF and return a normalised doc_record. Does NOT touch state."""
     text = extract_pdf_text(file_path)
@@ -2802,6 +2884,12 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "show_open_actions":
         return _handle_show_open_actions(state)
+
+    if intent == "show_compliance_sources":
+        return _handle_show_compliance_sources(state)
+
+    if intent == "reload_compliance":
+        return _handle_reload_compliance(state)
 
     if intent == "show_manuals":
         return _handle_show_manuals(state)
