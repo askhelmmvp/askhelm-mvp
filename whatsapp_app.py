@@ -70,6 +70,21 @@ from services.service_report_service import (
     format_whatsapp_response as format_service_report_response,
     make_service_report_doc_record,
 )
+from services.manual_service import (
+    is_technical_manual_text,
+    extract_manual_metadata_from_text,
+    extract_manual_metadata_from_images,
+    chunk_manual_text,
+    make_manual_doc_record,
+    format_manual_import_response,
+    answer_manual_question,
+)
+from domain.manual_store import (
+    save_manual,
+    get_all_manuals,
+    find_manuals_by_equipment,
+    search_manual_chunks,
+)
 from domain.handover_store import (
     save_service_report,
     save_notes_summary,
@@ -2235,6 +2250,119 @@ def _handle_service_report_image(image_paths: list, state: dict) -> Tuple[str, d
     return format_service_report_response(report, handover_note), state
 
 
+def _handle_manual_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
+    """Save a technical manual doc_record and return the MANUAL IMPORTED response."""
+    manual = doc_record.get("manual_data") or {}
+    chunks = doc_record.get("manual_chunks") or []
+    user_id = state.get("user_id", "")
+    save_manual(user_id, manual, chunks, doc_record.get("file_path", ""))
+    state["last_context"] = {
+        "type": "manual_imported",
+        "manufacturer": manual.get("manufacturer") or "",
+        "product_name": manual.get("product_name") or "",
+        "system": manual.get("system") or "",
+    }
+    return format_manual_import_response(manual), state
+
+
+def _handle_show_manuals(state: dict) -> Tuple[str, dict]:
+    """List all saved manuals."""
+    user_id = state.get("user_id", "")
+    manuals = get_all_manuals(user_id)
+    if not manuals:
+        return _make_response(
+            decision="NO MANUALS SAVED",
+            why="No technical manuals have been imported yet.",
+            actions=["Upload a PDF manual to add it to the library"],
+        ), state
+
+    lines = [f"MANUAL LIBRARY ({len(manuals)} manual(s)):\n"]
+    for m in manuals:
+        parts = [p for p in [m.get("manufacturer"), m.get("product_name")] if p]
+        title = " ".join(parts) if parts else m.get("document_type") or "Manual"
+        doc_type = m.get("document_type") or ""
+        system = m.get("system") or ""
+        meta = " — ".join(filter(None, [doc_type, system]))
+        lines.append(f"• {title}" + (f" ({meta})" if meta else ""))
+
+    lines.append("")
+    lines.append('Reply "search manual for [topic]" to find information')
+    return "\n".join(lines).strip(), state
+
+
+_MANUAL_QUERY_PREFIXES = (
+    "search manual for ", "search the manual for ",
+    "in the manual for ", "manual for ",
+    "what does the manual say about ",
+    "what does the manual ",
+    "find in the manual ",
+    "look up in the manual ",
+    "according to the manual ",
+    "in the manual ",
+    "from the manual ",
+    "search manual ",
+    "search the manual ",
+)
+
+
+def _extract_manual_query(text: str) -> str:
+    """Strip command prefix and return the bare search query."""
+    t = text.lower().strip()
+    for prefix in _MANUAL_QUERY_PREFIXES:
+        if t.startswith(prefix):
+            return text[len(prefix):].strip()
+        if prefix.rstrip() in t:
+            idx = t.index(prefix.rstrip()) + len(prefix.rstrip())
+            return text[idx:].strip()
+    return text.strip()
+
+
+def _handle_manual_search(query: str, state: dict) -> Tuple[str, dict]:
+    """Answer a question by searching saved manual chunks."""
+    user_id = state.get("user_id", "")
+    search_q = _extract_manual_query(query)
+    if not search_q:
+        search_q = query
+
+    chunks = search_manual_chunks(user_id, search_q, top_k=4)
+    if not chunks:
+        # Try broader search — all manuals
+        all_manuals = get_all_manuals(user_id)
+        if not all_manuals:
+            return _make_response(
+                decision="NO MANUALS AVAILABLE",
+                why="No technical manuals have been imported yet.",
+                actions=["Upload a PDF manual to search it"],
+            ), state
+        return _make_response(
+            decision="NOT FOUND IN MANUALS",
+            why=f"No relevant content found for '{search_q}' in saved manuals.",
+            actions=[
+                "Try different search terms",
+                'Reply "show manuals" to see what manuals are available',
+            ],
+        ), state
+
+    manual_label = chunks[0].get("manual_label") or "manual"
+    answer = answer_manual_question(search_q, chunks, manual_label)
+
+    state["last_context"] = {
+        "type": "manual_search",
+        "query": search_q,
+        "manual_label": manual_label,
+    }
+
+    return (
+        f"DECISION:\nMANUAL SEARCH RESULT\n\n"
+        f"WHY:\nFound relevant content in the {manual_label}.\n\n"
+        f"ANSWER:\n{answer}\n\n"
+        f"SOURCE:\n• {manual_label}\n\n"
+        f"RECOMMENDED ACTIONS:\n"
+        f"• Search again with more specific terms\n"
+        f'• Reply "show manuals" to see all available manuals'
+    ), state
+
+
 def _parse_system_from_query(query: str) -> str:
     """Extract the system name from retrieval queries like 'handover for OWS'."""
     t = query.lower().strip()
@@ -2310,6 +2438,15 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
     text = extract_pdf_text(file_path)
 
     if text.strip():
+        # Technical manual pre-screen: must run before inventory (manuals contain
+        # "parts list", "serial number", etc. that would otherwise trigger inventory).
+        if is_technical_manual_text(text):
+            logger.info("PDF: technical manual detected in raw text, routing to manual extraction")
+            filename = os.path.basename(file_path)
+            manual = extract_manual_metadata_from_text(text, filename)
+            chunks = chunk_manual_text(text)
+            return make_manual_doc_record(manual, file_path, chunks)
+
         # Inventory pre-screen: check raw text BEFORE service report / commercial extraction.
         inv_type = classify_inventory_text(text)
         if inv_type:
@@ -2355,6 +2492,11 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
                 logger.info("PDF (image path): service report detected by vision, running structured extraction")
                 report = extract_service_report_from_images(image_paths)
                 return make_service_report_doc_record(report, file_path)
+            if raw_type == "technical_manual":
+                logger.info("PDF (image path): technical manual detected by vision, running manual extraction")
+                filename = os.path.basename(file_path)
+                manual = extract_manual_metadata_from_images(image_paths, filename)
+                return make_manual_doc_record(manual, file_path, [])
     else:
         extracted = extract_commercial_document_with_claude(text)
 
@@ -2411,6 +2553,10 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
 
     if doc_type == "service_report":
         answer, state = _handle_service_report_doc(doc_record, state)
+        return answer, state
+
+    if doc_type == "technical_manual":
+        answer, state = _handle_manual_doc(doc_record, state)
         return answer, state
 
     if doc_type == "quote":
@@ -2656,6 +2802,12 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "show_open_actions":
         return _handle_show_open_actions(state)
+
+    if intent == "show_manuals":
+        return _handle_show_manuals(state)
+
+    if intent == "manual_search":
+        return _handle_manual_search(incoming, state)
 
     if intent == "show_equipment":
         return _handle_show_equipment(state)

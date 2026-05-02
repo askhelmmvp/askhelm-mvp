@@ -50,8 +50,14 @@ _STOCK_BODY_KW = frozenset([
 def classify_inventory_text(text: str) -> Optional[str]:
     """
     Return 'equipment_list', 'stock_inventory', 'spare_parts_inventory', or None.
+    Returns None for technical manuals so they are not imported as inventory.
     Uses keyword signals — no Claude call.
     """
+    from services.manual_service import is_technical_manual_text
+    if is_technical_manual_text(text):
+        logger.debug("inventory_classify: technical manual detected — skipping inventory classification")
+        return None
+
     t = text.lower()
 
     # Heading-level signals — one match is enough.

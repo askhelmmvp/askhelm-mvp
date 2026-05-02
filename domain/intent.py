@@ -84,6 +84,14 @@ _FOLLOW_UPS = {
     "clear machinery": "reset_equipment",
     "reset equipment memory": "reset_equipment",
     "clear equipment memory": "reset_equipment",
+    # Manual library commands
+    "show manuals": "show_manuals",
+    "list manuals": "show_manuals",
+    "show all manuals": "show_manuals",
+    "what manuals do we have": "show_manuals",
+    "what manuals have we got": "show_manuals",
+    "list all manuals": "show_manuals",
+    "show manual library": "show_manuals",
     # Explicit handover save — after a note or service report summary
     "add to handover notes": "add_to_handover",
     "add to handover": "add_to_handover",
@@ -195,6 +203,20 @@ _HANDOVER_SUBSTRINGS = [
 _OPEN_ACTIONS_SUBSTRINGS = [
     "open action",
     "outstanding action",
+]
+
+_MANUAL_SEARCH_SUBSTRINGS = [
+    "search manual",
+    "search the manual",
+    "in the manual",
+    "from the manual",
+    "according to the manual",
+    "what does the manual say",
+    "what does the manual",
+    "look up in the manual",
+    "find in the manual",
+    "manual for ",
+    "in the manual for ",
 ]
 
 # Inventory query substrings — matched after handover/open-action checks.
@@ -673,6 +695,8 @@ _COMMERCIAL_GUARD = {
     "serial",
     "engine",
     "generator",
+    "manual",
+    "manuals",
 }
 
 # Message starters that indicate an open question.
@@ -753,6 +777,10 @@ def classify_text(text: str) -> str:
     for phrase in _OPEN_ACTIONS_SUBSTRINGS:
         if phrase in t:
             return "show_open_actions"
+
+    for phrase in _MANUAL_SEARCH_SUBSTRINGS:
+        if phrase in t:
+            return "manual_search"
 
     for phrase in _SPARES_QUERY_SUBSTRINGS:
         if phrase in t:

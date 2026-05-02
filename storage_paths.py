@@ -69,6 +69,14 @@ def get_comparison_sessions_dir(yacht_id: str) -> Path:
     return get_yacht_dir(yacht_id) / "comparison_sessions"
 
 
+def get_manuals_dir(yacht_id: str) -> Path:
+    return get_yacht_dir(yacht_id) / "manuals"
+
+
+def get_manuals_index_path(yacht_id: str) -> Path:
+    return get_manuals_dir(yacht_id) / "manuals_index.json"
+
+
 # ---------------------------------------------------------------------------
 # User-level paths
 # ---------------------------------------------------------------------------
