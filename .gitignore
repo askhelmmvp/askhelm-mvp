@@ -28,3 +28,6 @@ CLAUDE.md
 
 # Local regulation source PDFs
 data/global/regulations/*.pdf
+
+# Local regulation PDFs and scanned archives
+data/global/regulations/**/*.pdf
