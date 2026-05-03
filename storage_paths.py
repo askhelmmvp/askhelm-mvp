@@ -34,7 +34,8 @@ _PROJECT_ROOT = Path(__file__).resolve().parent
 # ---------------------------------------------------------------------------
 
 def get_data_dir() -> Path:
-    return Path(os.environ.get("DATA_DIR", str(_PROJECT_ROOT / "data")))
+    env = os.environ.get("DATA_DIR") or os.environ.get("STORAGE_DIR")
+    return Path(env) if env else _PROJECT_ROOT / "data"
 
 
 def get_global_dir() -> Path:
@@ -43,6 +44,10 @@ def get_global_dir() -> Path:
 
 def get_global_compliance_dir() -> Path:
     return get_global_dir() / "compliance"
+
+
+def get_global_regulations_dir() -> Path:
+    return get_global_dir() / "regulations"
 
 
 def get_compliance_chunks_path() -> Path:
@@ -87,6 +92,22 @@ def get_manuals_dir(yacht_id: str) -> Path:
 
 def get_manuals_index_path(yacht_id: str) -> Path:
     return get_manuals_dir(yacht_id) / "manuals_index.json"
+
+
+def get_compliance_profile_path(yacht_id: str) -> Path:
+    return get_yacht_dir(yacht_id) / "compliance_profile.json"
+
+
+def get_yacht_compliance_dir(yacht_id: str) -> Path:
+    return get_yacht_dir(yacht_id) / "compliance"
+
+
+def get_yacht_compliance_chunks_path(yacht_id: str) -> Path:
+    return get_yacht_compliance_dir(yacht_id) / "compliance_chunks.jsonl"
+
+
+def get_yacht_compliance_index_path(yacht_id: str) -> Path:
+    return get_yacht_compliance_dir(yacht_id) / "compliance_index.pkl"
 
 
 # ---------------------------------------------------------------------------

@@ -775,6 +775,204 @@ def seed_if_empty() -> bool:
     return True
 
 
+# ---------------------------------------------------------------------------
+# Yacht-level compliance chunks and index
+# ---------------------------------------------------------------------------
+
+def _yacht_chunks_path(yacht_id: str) -> Path:
+    from storage_paths import get_yacht_compliance_chunks_path
+    return get_yacht_compliance_chunks_path(yacht_id)
+
+
+def _yacht_index_path(yacht_id: str) -> Path:
+    from storage_paths import get_yacht_compliance_index_path
+    return get_yacht_compliance_index_path(yacht_id)
+
+
+def load_yacht_chunks(yacht_id: str) -> List[Dict]:
+    p = _yacht_chunks_path(yacht_id)
+    if not p.exists():
+        return []
+    chunks = []
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    chunks.append(json.loads(line))
+    except Exception as exc:
+        logger.warning("compliance_ingest: failed to load yacht chunks yacht=%s: %s", yacht_id, exc)
+    return chunks
+
+
+def save_yacht_chunks(yacht_id: str, chunks: List[Dict]) -> None:
+    p = _yacht_chunks_path(yacht_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w", encoding="utf-8") as f:
+        for chunk in chunks:
+            f.write(json.dumps(chunk) + "\n")
+
+
+def build_yacht_index(yacht_id: str, chunks: List[Dict]) -> None:
+    if not chunks:
+        logger.warning("compliance_ingest: no yacht chunks — skipping index build yacht=%s", yacht_id)
+        return
+    from sklearn.feature_extraction.text import TfidfVectorizer
+    texts = []
+    for c in chunks:
+        kw = " ".join(c.get("keywords") or [])
+        texts.append(
+            f"{c.get('section', '')} {c.get('topic', '')} {kw} {c.get('content', '')}"
+        )
+    vectorizer = TfidfVectorizer(
+        ngram_range=(1, 2),
+        max_features=10000,
+        sublinear_tf=True,
+        stop_words="english",
+    )
+    matrix = vectorizer.fit_transform(texts)
+    p = _yacht_index_path(yacht_id)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "wb") as fh:
+        pickle.dump({"vectorizer": vectorizer, "matrix": matrix, "metadata": chunks}, fh)
+    logger.info(
+        "compliance_ingest: yacht index built chunks=%d vocab=%d yacht=%s path=%s",
+        len(chunks), len(vectorizer.vocabulary_), yacht_id, p,
+    )
+
+
+def rebuild_yacht_index(yacht_id: str) -> int:
+    chunks = load_yacht_chunks(yacht_id)
+    build_yacht_index(yacht_id, chunks)
+    return len(chunks)
+
+
+def list_yacht_sources(yacht_id: str) -> List[Dict]:
+    """Return unique source documents in the yacht compliance knowledge base."""
+    chunks = load_yacht_chunks(yacht_id)
+    counts: Counter = Counter()
+    for c in chunks:
+        src = c.get("source") or c.get("document") or "Unknown"
+        src = re.sub(r"\.pdf$", "", src, flags=re.I).strip()
+        counts[src] += 1
+    return [{"source": s, "chunks": n} for s, n in sorted(counts.items())]
+
+
+def ingest_yacht_compliance_pdf(
+    file_path: str, source_name: str, yacht_id: str, doc_type: str = "yacht_procedure"
+) -> int:
+    """
+    Extract and chunk a yacht-specific compliance PDF.
+    Stores chunks + index at DATA_DIR/yachts/<yacht_id>/compliance/.
+    Returns new total chunk count.
+    """
+    from domain.extraction import extract_pdf_text
+    text = extract_pdf_text(file_path)
+    if not text.strip():
+        logger.warning("compliance_ingest: no text from yacht compliance PDF file=%s", file_path)
+        return 0
+    filename = os.path.basename(file_path)
+    new_chunks = _chunk_compliance_text(text, source_name, filename)
+    for c in new_chunks:
+        c["yacht_id"] = yacht_id
+        c["doc_type"] = doc_type
+    if not new_chunks:
+        logger.warning("compliance_ingest: zero chunks from yacht compliance PDF file=%s", file_path)
+        return 0
+    existing = load_yacht_chunks(yacht_id)
+    existing = [c for c in existing if (c.get("document") or "").lower() != filename.lower()]
+    combined = existing + new_chunks
+    save_yacht_chunks(yacht_id, combined)
+    build_yacht_index(yacht_id, combined)
+    logger.info(
+        "compliance_ingest: yacht compliance ingested chunks=%d total=%d yacht=%s source=%s",
+        len(new_chunks), len(combined), yacht_id, source_name,
+    )
+    return len(combined)
+
+
+# ---------------------------------------------------------------------------
+# Compliance document type classification
+# ---------------------------------------------------------------------------
+
+_SMS_KEYWORDS = frozenset([
+    "safety management system",
+    "safety management manual",
+    "sms manual",
+    "master's responsibility",
+    "designated person",
+    "company safety policy",
+])
+
+_PROCEDURE_KEYWORDS = frozenset([
+    "garbage management plan",
+    "fuel changeover procedure",
+    "fuel oil changeover",
+    "standing order",
+    "emergency procedure",
+    "environmental procedure",
+    "maintenance procedure",
+    "bunkering procedure",
+])
+
+
+def classify_compliance_doc(text: str, filename: str) -> Optional[str]:
+    """
+    Heuristic classifier for uploaded compliance documents.
+    Returns 'yacht_sms', 'yacht_procedure', or None.
+    Conservative — only classifies when confident.
+    """
+    fname = filename.lower()
+    t = text.lower()[:8000]
+
+    if any(kw in fname for kw in ("sms", "safety management", "safety mgmt", "safety manual")):
+        return "yacht_sms"
+    if any(kw in fname for kw in (
+        "garbage management", "fuel changeover", "fuel oil changeover",
+        "standing order", "emergency procedure", "maintenance procedure",
+        "environmental procedure",
+    )):
+        return "yacht_procedure"
+
+    if sum(1 for kw in _SMS_KEYWORDS if kw in t) >= 2:
+        return "yacht_sms"
+    if any(kw in t for kw in _PROCEDURE_KEYWORDS):
+        return "yacht_procedure"
+
+    return None
+
+
+def make_compliance_doc_record(doc_type: str, source_name: str, file_path: str) -> dict:
+    """Build a minimal doc_record for a yacht SMS or procedure document."""
+    import hashlib
+    fp = hashlib.md5(file_path.encode()).hexdigest()
+    return {
+        "document_id": str(uuid.uuid4()),
+        "file_path": file_path,
+        "doc_type": doc_type,
+        "source_name": source_name,
+        "supplier_name": "",
+        "document_number": "",
+        "reference_number": "",
+        "document_date": "",
+        "currency": "",
+        "total": None,
+        "subtotal": None,
+        "tax": None,
+        "line_items": [],
+        "exclusions": [],
+        "assumptions": [],
+        "fingerprint": fp,
+        "billing_address": {},
+        "delivery_address": {},
+    }
+
+
+def list_global_regulations() -> List[Dict]:
+    """Return unique source names from the global compliance knowledge base."""
+    return list_sources()
+
+
 def _migrate_old_kb() -> List[Dict]:
     """Import chunks from the old data/knowledge_base/ location if they exist."""
     try:

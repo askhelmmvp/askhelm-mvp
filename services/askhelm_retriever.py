@@ -2,7 +2,7 @@ import logging
 import pickle
 import re
 from pathlib import Path
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 from sklearn.metrics.pairwise import cosine_similarity
 
 logger = logging.getLogger(__name__)
@@ -154,6 +154,98 @@ class AskHelmComplianceRetriever:
                 return results
 
         return results
+
+
+    def search_with_yacht(
+        self,
+        query: str,
+        yacht_id: str,
+        selected_regulations: Optional[List[str]] = None,
+        top_k: int = 5,
+        min_score: float = 0.05,
+    ) -> List[Dict[str, Any]]:
+        """
+        Combined search across global regulations and yacht-specific compliance docs.
+
+        If selected_regulations is provided and non-empty, global results are filtered
+        to those sources; falls back to all global results if none survive the filter.
+        Yacht-specific chunks are prepended (higher priority for vessel procedures).
+        """
+        global_results = self.search(query, top_k=top_k * 3, min_score=min_score)
+
+        if selected_regulations:
+            filtered = [
+                r for r in global_results
+                if any(
+                    sel.lower() in (r.get("source") or "").lower()
+                    for sel in selected_regulations
+                )
+            ]
+            if not filtered:
+                filtered = global_results
+                logger.debug(
+                    "compliance_retriever: no global results within selected_regulations=%s — using all",
+                    selected_regulations,
+                )
+        else:
+            filtered = global_results
+
+        yacht_results = self._search_yacht_index(query, yacht_id, top_k, min_score)
+
+        combined = list(yacht_results)
+        seen_ids = {r.get("id") or r.get("source_reference", "") for r in combined}
+        for r in filtered:
+            rid = r.get("id") or r.get("source_reference", "")
+            if rid not in seen_ids:
+                combined.append(r)
+                seen_ids.add(rid)
+
+        result = combined[:top_k]
+        logger.info(
+            "compliance_retriever: combined_search yacht=%s selected=%s "
+            "global_hits=%d yacht_hits=%d final=%d",
+            yacht_id,
+            selected_regulations or "all",
+            len(filtered),
+            len(yacht_results),
+            len(result),
+        )
+        return result
+
+    def _search_yacht_index(
+        self, query: str, yacht_id: str, top_k: int, min_score: float
+    ) -> List[Dict[str, Any]]:
+        """Search the yacht-specific compliance TF-IDF index. Returns [] if none exists."""
+        from storage_paths import get_yacht_compliance_index_path
+        idx_path = get_yacht_compliance_index_path(yacht_id)
+        if not idx_path.exists():
+            return []
+        try:
+            with open(idx_path, "rb") as fh:
+                payload = pickle.load(fh)
+            q = payload["vectorizer"].transform([query])
+            scores = cosine_similarity(q, payload["matrix"]).flatten()
+            ranked = scores.argsort()[::-1]
+            results: List[Dict[str, Any]] = []
+            for i in ranked[:max(top_k * 4, 20)]:
+                score = float(scores[i])
+                if score < min_score:
+                    break
+                item = dict(payload["metadata"][i])
+                item["score"] = round(score, 4)
+                item["_from_yacht"] = True
+                results.append(item)
+                if len(results) >= top_k:
+                    break
+            logger.debug(
+                "compliance_retriever: yacht_index_search yacht=%s hits=%d", yacht_id, len(results)
+            )
+            return results
+        except Exception as exc:
+            logger.warning(
+                "compliance_retriever: yacht index search failed yacht=%s: %s", yacht_id, exc
+            )
+            return []
 
 
 if __name__ == "__main__":

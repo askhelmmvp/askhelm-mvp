@@ -93,10 +93,24 @@ _FOLLOW_UPS = {
     "list regulations": "show_compliance_sources",
     "show regulations": "show_compliance_sources",
     "show loaded regulations": "show_compliance_sources",
+    "show global regulations": "show_compliance_sources",
+    "global regulations": "show_compliance_sources",
     "reload compliance": "reload_compliance",
     "rebuild compliance": "reload_compliance",
     "reload compliance index": "reload_compliance",
     "rebuild compliance index": "reload_compliance",
+    # Per-yacht compliance profile
+    "show compliance profile": "show_compliance_profile",
+    "compliance profile": "show_compliance_profile",
+    "my compliance profile": "show_compliance_profile",
+    "show selected regulations": "show_selected_regulations",
+    "selected regulations": "show_selected_regulations",
+    "which regulations are selected": "show_selected_regulations",
+    "show vessel procedures": "show_vessel_procedures",
+    "vessel procedures": "show_vessel_procedures",
+    "show vessel documents": "show_vessel_procedures",
+    "show sms": "show_vessel_procedures",
+    "show our sms": "show_vessel_procedures",
     # Manual library commands
     "show manuals": "show_manuals",
     "list manuals": "show_manuals",
@@ -252,6 +266,9 @@ _SPARES_QUERY_SUBSTRINGS = [
     "what spares for ",
     "what spares do we have for ",
     "parts for ",
+    "what stock do we have for ",
+    "stock for ",
+    "what stock for ",
 ]
 
 _EQUIPMENT_QUERY_SUBSTRINGS = [
@@ -370,6 +387,14 @@ def _is_equipment_memory_query(t: str) -> bool:
     Also catches identity queries like 'what is the OWS' / 'what is the OCM'.
     """
     if any(w in t for w in _EQUIPMENT_REGULATION_GUARD):
+        return False
+    # Queries containing compliance-specific word-boundary patterns are regulatory, not equipment.
+    if any(re.search(pattern, t) for pattern in _COMPLIANCE_WORD_PATTERNS):
+        return False
+    # "spare X" means spare-parts inventory, not equipment memory
+    if re.search(r'\bspare\b', t) and any(qw in t for qw in (
+        "do we have", "have we got", "do we carry", "is there"
+    )):
         return False
     has_equipment = any(w in t for w in _MARINE_EQUIPMENT_WORDS)
     if not has_equipment:
@@ -835,6 +860,13 @@ def classify_text(text: str) -> str:
 
         if _is_marine_pricing_question(t):
             return "market_check"
+
+    # Compliance profile management commands — must come before compliance keyword scan
+    # so "enable MARPOL Annex VI for H3" is not swallowed by the "marpol" trigger.
+    if t.startswith("enable ") and " for " in t:
+        return "enable_regulation"
+    if t.startswith("disable ") and " for " in t:
+        return "disable_regulation"
 
     # Compliance — checked after commercial intents, before generic fallback
     for trigger in _COMPLIANCE_SUBSTRINGS:

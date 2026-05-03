@@ -26,17 +26,24 @@ def reset_retriever():
     logger.info("compliance_engine: retriever reset — will reload on next query")
 
 
-def answer_compliance_query(question: str) -> str:
+def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
     from domain.operational_playbook import lookup as playbook_lookup
     from services.anthropic_service import answer_compliance_question, NOT_COVERED_FALLBACK
 
-    # 1. Try document retrieval first.
+    # 1. Try document retrieval first (global + yacht-specific).
     try:
         retriever = _get_retriever()
-        chunks = retriever.search(question, top_k=5, min_score=0.05)
+        from services.compliance_profile import get_selected_regulations
+        selected = get_selected_regulations(yacht_id)
+        chunks = retriever.search_with_yacht(
+            question,
+            yacht_id=yacht_id,
+            selected_regulations=selected if selected else None,
+            top_k=5,
+            min_score=0.05,
+        )
     except Exception as exc:
         logger.exception("compliance_engine: retriever failed: %s", exc)
-        # Retriever down — fall back to playbook, then fail gracefully.
         chunks = []
 
     top_score = chunks[0].get("score", 0.0) if chunks else 0.0
@@ -83,14 +90,22 @@ def answer_compliance_query(question: str) -> str:
     return NOT_COVERED_FALLBACK
 
 
-def answer_compliance_followup(topic: str) -> str:
+def answer_compliance_followup(topic: str, yacht_id: str = "h3") -> str:
     """Action-focused follow-up; re-retrieves context for the original topic."""
     from domain.operational_playbook import lookup as playbook_lookup
     from services.anthropic_service import answer_compliance_followup_question, NOT_COVERED_FALLBACK
 
     try:
         retriever = _get_retriever()
-        chunks = retriever.search(topic, top_k=5, min_score=0.05)
+        from services.compliance_profile import get_selected_regulations
+        selected = get_selected_regulations(yacht_id)
+        chunks = retriever.search_with_yacht(
+            topic,
+            yacht_id=yacht_id,
+            selected_regulations=selected if selected else None,
+            top_k=5,
+            min_score=0.05,
+        )
     except Exception as exc:
         logger.exception("compliance_engine: retriever failed on follow-up: %s", exc)
         chunks = []

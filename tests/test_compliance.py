@@ -123,9 +123,9 @@ class TestComplianceRouting(unittest.TestCase):
     @patch("services.anthropic_service.answer_compliance_question")
     def test_tier_iii_question_routed_to_engine(self, mock_llm, mock_retriever_getter):
         mock_retriever = MagicMock()
-        mock_retriever.search.return_value = [
-            {"source_reference": "MARPOL Annex VI Reg 13", "content": "Tier III NOx limits apply in NECAs."}
-        ]
+        _chunks = [{"source_reference": "MARPOL Annex VI Reg 13", "content": "Tier III NOx limits apply in NECAs.", "score": 0.5}]
+        mock_retriever.search.return_value = _chunks
+        mock_retriever.search_with_yacht.return_value = _chunks
         mock_retriever_getter.return_value = mock_retriever
         mock_llm.return_value = (
             "DECISION: Yes — Tier III applies in designated NECAs including Norwegian waters.\n"
@@ -164,9 +164,9 @@ class TestComplianceEngine(unittest.TestCase):
     @patch("services.anthropic_service.answer_compliance_question")
     def test_returns_llm_answer_when_chunks_found(self, mock_llm, mock_retriever_getter):
         mock_retriever = MagicMock()
-        mock_retriever.search.return_value = [
-            {"source_reference": "MARPOL Annex VI Reg 14", "content": "Sulphur content limit 0.1% m/m in SECA."}
-        ]
+        _chunks = [{"source_reference": "MARPOL Annex VI Reg 14", "content": "Sulphur content limit 0.1% m/m in SECA.", "score": 0.5}]
+        mock_retriever.search.return_value = _chunks
+        mock_retriever.search_with_yacht.return_value = _chunks
         mock_retriever_getter.return_value = mock_retriever
         mock_llm.return_value = (
             "DECISION: Yes — sulphur limit is 0.1% m/m in SECA.\n"
@@ -188,6 +188,7 @@ class TestComplianceEngine(unittest.TestCase):
     def test_fallback_when_no_chunks(self, mock_retriever_getter):
         mock_retriever = MagicMock()
         mock_retriever.search.return_value = []
+        mock_retriever.search_with_yacht.return_value = []
         mock_retriever_getter.return_value = mock_retriever
 
         from domain.compliance_engine import answer_compliance_query
@@ -204,7 +205,7 @@ class TestComplianceEngine(unittest.TestCase):
         result = answer_compliance_query("marpol tier iii")
 
         self.assertIn("DECISION:", result)
-        self.assertIn("Cannot confirm", result)
+        self.assertIn("Not explicitly covered", result)
 
 
 class TestAnswerComplianceQuestion(unittest.TestCase):
@@ -257,9 +258,9 @@ class TestComplianceFollowUp(unittest.TestCase):
         self, mock_followup, mock_retriever_getter
     ):
         mock_retriever = MagicMock()
-        mock_retriever.search.return_value = [
-            {"source_reference": "ISM Code Chapter 9", "content": "Non-conformities must be documented and corrected."}
-        ]
+        _chunks = [{"source_reference": "ISM Code Chapter 9", "content": "Non-conformities must be documented and corrected.", "score": 0.5}]
+        mock_retriever.search.return_value = _chunks
+        mock_retriever.search_with_yacht.return_value = _chunks
         mock_retriever_getter.return_value = mock_retriever
         mock_followup.return_value = (
             "DECISION: Raise and close the non-conformity.\n"
@@ -327,9 +328,9 @@ class TestComplianceFollowUp(unittest.TestCase):
     @patch("services.anthropic_service.answer_compliance_question")
     def test_compliance_question_sets_last_context(self, mock_llm, mock_retriever_getter):
         mock_retriever = MagicMock()
-        mock_retriever.search.return_value = [
-            {"source_reference": "ISM Code Ch 9", "content": "Non-conformities..."}
-        ]
+        _chunks = [{"source_reference": "ISM Code Ch 9", "content": "Non-conformities...", "score": 0.5}]
+        mock_retriever.search.return_value = _chunks
+        mock_retriever.search_with_yacht.return_value = _chunks
         mock_retriever_getter.return_value = mock_retriever
         mock_llm.return_value = "DECISION: Yes.\nWHY: X.\nSOURCE: Y\nACTIONS: Z"
 
@@ -457,9 +458,9 @@ class TestComplianceFollowUpBehaviour(unittest.TestCase):
         )
 
         mock_retriever = MagicMock()
-        mock_retriever.search.return_value = [
-            {"source_reference": "ISM Code Ch 10", "content": "Safety equipment must be tested periodically."}
-        ]
+        _chunks = [{"source_reference": "ISM Code Ch 10", "content": "Safety equipment must be tested periodically.", "score": 0.5}]
+        mock_retriever.search.return_value = _chunks
+        mock_retriever.search_with_yacht.return_value = _chunks
         mock_retriever_getter.return_value = mock_retriever
         mock_followup.return_value = FOLLOWUP_ANSWER
 
@@ -554,11 +555,276 @@ class TestComplianceGrounding(unittest.TestCase):
         from services.anthropic_service import NOT_COVERED_FALLBACK
         mock_retriever = MagicMock()
         mock_retriever.search.return_value = []
+        mock_retriever.search_with_yacht.return_value = []
         mock_retriever_getter.return_value = mock_retriever
 
         from domain.compliance_engine import answer_compliance_query
         result = answer_compliance_query("what does marpol say about ballast water?")
         self.assertEqual(result, NOT_COVERED_FALLBACK)
+
+
+class TestComplianceStoragePaths(unittest.TestCase):
+    def test_compliance_profile_path(self):
+        from storage_paths import get_compliance_profile_path
+        path = get_compliance_profile_path("h3")
+        self.assertIn("h3", str(path))
+        self.assertTrue(str(path).endswith("compliance_profile.json"))
+
+    def test_yacht_compliance_dir(self):
+        from storage_paths import get_yacht_compliance_dir
+        path = get_yacht_compliance_dir("h3")
+        self.assertIn("compliance", str(path))
+        self.assertIn("h3", str(path))
+
+    def test_yacht_compliance_chunks_path(self):
+        from storage_paths import get_yacht_compliance_chunks_path
+        path = get_yacht_compliance_chunks_path("h3")
+        self.assertTrue(str(path).endswith("compliance_chunks.jsonl"))
+
+    def test_yacht_compliance_index_path(self):
+        from storage_paths import get_yacht_compliance_index_path
+        path = get_yacht_compliance_index_path("h3")
+        self.assertTrue(str(path).endswith("compliance_index.pkl"))
+
+    def test_storage_dir_env_alias(self):
+        import os
+        import importlib
+        import storage_paths as sp
+        original = os.environ.get("DATA_DIR")
+        os.environ.pop("DATA_DIR", None)
+        os.environ["STORAGE_DIR"] = "/tmp/testaskhelm"
+        try:
+            importlib.reload(sp)
+            self.assertEqual(str(sp.get_data_dir()), "/tmp/testaskhelm")
+        finally:
+            os.environ.pop("STORAGE_DIR", None)
+            if original:
+                os.environ["DATA_DIR"] = original
+            importlib.reload(sp)
+
+
+class TestComplianceProfileService(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        import os
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib
+        import storage_paths
+        importlib.reload(storage_paths)
+
+    def tearDown(self):
+        import os
+        import shutil
+        import importlib
+        os.environ.pop("DATA_DIR", None)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        import storage_paths
+        importlib.reload(storage_paths)
+
+    def test_load_creates_default_profile(self):
+        import importlib
+        import services.compliance_profile as cp
+        importlib.reload(cp)
+        profile = cp.load_profile("h3")
+        self.assertEqual(profile["yacht_id"], "h3")
+        self.assertEqual(profile["selected_regulations"], [])
+        self.assertEqual(profile["vessel_documents"], [])
+
+    def test_enable_regulation(self):
+        import importlib
+        import services.compliance_profile as cp
+        importlib.reload(cp)
+        added = cp.enable_regulation("h3", "ISM Code 2018")
+        self.assertTrue(added)
+        self.assertIn("ISM Code 2018", cp.get_selected_regulations("h3"))
+
+    def test_enable_regulation_idempotent(self):
+        import importlib
+        import services.compliance_profile as cp
+        importlib.reload(cp)
+        cp.enable_regulation("h3", "MARPOL Annex VI")
+        added_again = cp.enable_regulation("h3", "MARPOL Annex VI")
+        self.assertFalse(added_again)
+        self.assertEqual(cp.get_selected_regulations("h3").count("MARPOL Annex VI"), 1)
+
+    def test_disable_regulation(self):
+        import importlib
+        import services.compliance_profile as cp
+        importlib.reload(cp)
+        cp.enable_regulation("h3", "MARPOL Annex VI")
+        removed = cp.disable_regulation("h3", "MARPOL Annex VI")
+        self.assertTrue(removed)
+        self.assertNotIn("MARPOL Annex VI", cp.get_selected_regulations("h3"))
+
+    def test_disable_missing_regulation(self):
+        import importlib
+        import services.compliance_profile as cp
+        importlib.reload(cp)
+        removed = cp.disable_regulation("h3", "Non-existent Regulation")
+        self.assertFalse(removed)
+
+    def test_add_vessel_document(self):
+        import importlib
+        import services.compliance_profile as cp
+        importlib.reload(cp)
+        cp.add_vessel_document("h3", {"name": "H3 SMS", "type": "sms"})
+        docs = cp.list_vessel_documents("h3")
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["name"], "H3 SMS")
+
+    def test_add_vessel_document_replaces_same_name(self):
+        import importlib
+        import services.compliance_profile as cp
+        importlib.reload(cp)
+        cp.add_vessel_document("h3", {"name": "H3 SMS", "type": "sms", "path": "old"})
+        cp.add_vessel_document("h3", {"name": "H3 SMS", "type": "sms", "path": "new"})
+        docs = cp.list_vessel_documents("h3")
+        self.assertEqual(len(docs), 1)
+        self.assertEqual(docs[0]["path"], "new")
+
+
+class TestComplianceCommandIntents(unittest.TestCase):
+    def _cls(self, text):
+        from domain.intent import classify_text
+        return classify_text(text)
+
+    def test_show_compliance_profile(self):
+        self.assertEqual(self._cls("show compliance profile"), "show_compliance_profile")
+
+    def test_compliance_profile_short(self):
+        self.assertEqual(self._cls("compliance profile"), "show_compliance_profile")
+
+    def test_show_selected_regulations(self):
+        self.assertEqual(self._cls("show selected regulations"), "show_selected_regulations")
+
+    def test_show_vessel_procedures(self):
+        self.assertEqual(self._cls("show vessel procedures"), "show_vessel_procedures")
+
+    def test_show_global_regulations(self):
+        self.assertEqual(self._cls("show global regulations"), "show_compliance_sources")
+
+    def test_show_loaded_regulations(self):
+        self.assertEqual(self._cls("show loaded regulations"), "show_compliance_sources")
+
+    def test_enable_regulation_intent(self):
+        self.assertEqual(self._cls("enable MARPOL Annex VI for H3"), "enable_regulation")
+
+    def test_disable_regulation_intent(self):
+        self.assertEqual(self._cls("disable ISM Code for H3"), "disable_regulation")
+
+    def test_enable_does_not_go_to_compliance(self):
+        self.assertNotEqual(self._cls("enable MARPOL Annex VI for H3"), "compliance_question")
+
+    def test_disable_does_not_go_to_compliance(self):
+        self.assertNotEqual(self._cls("disable ISM Code for H3"), "compliance_question")
+
+    def test_nox_trigger_is_compliance_not_equipment(self):
+        self.assertEqual(self._cls("what are the NOx limits for our engine"), "compliance_question")
+
+
+class TestComplianceDocClassifier(unittest.TestCase):
+    def test_sms_by_filename(self):
+        from services.compliance_ingest import classify_compliance_doc
+        self.assertEqual(classify_compliance_doc("some text here", "H3 SMS.pdf"), "yacht_sms")
+
+    def test_safety_management_by_filename(self):
+        from services.compliance_ingest import classify_compliance_doc
+        self.assertEqual(classify_compliance_doc("", "H3 Safety Management Manual.pdf"), "yacht_sms")
+
+    def test_garbage_plan_by_filename(self):
+        from services.compliance_ingest import classify_compliance_doc
+        self.assertEqual(
+            classify_compliance_doc("", "H3 Garbage Management Plan.pdf"), "yacht_procedure"
+        )
+
+    def test_fuel_changeover_by_filename(self):
+        from services.compliance_ingest import classify_compliance_doc
+        self.assertEqual(
+            classify_compliance_doc("", "fuel changeover procedure.pdf"), "yacht_procedure"
+        )
+
+    def test_sms_by_text_keywords(self):
+        from services.compliance_ingest import classify_compliance_doc
+        text = (
+            "This safety management system defines master's responsibility "
+            "and designated person duties for this vessel."
+        )
+        self.assertEqual(classify_compliance_doc(text, "unknown.pdf"), "yacht_sms")
+
+    def test_procedure_by_text(self):
+        from services.compliance_ingest import classify_compliance_doc
+        text = "This garbage management plan describes waste handling procedures onboard."
+        self.assertEqual(classify_compliance_doc(text, "unknown.pdf"), "yacht_procedure")
+
+    def test_invoice_returns_none(self):
+        from services.compliance_ingest import classify_compliance_doc
+        self.assertIsNone(classify_compliance_doc("Invoice for spare parts #12345", "invoice.pdf"))
+
+    def test_empty_text_no_match(self):
+        from services.compliance_ingest import classify_compliance_doc
+        self.assertIsNone(classify_compliance_doc("", "random_file.pdf"))
+
+
+class TestRetrievalWithYacht(unittest.TestCase):
+    @patch("services.askhelm_retriever.AskHelmComplianceRetriever.search")
+    def test_selected_regulations_filter(self, mock_search):
+        mock_search.return_value = [
+            {"id": "r1", "source": "ISM Code 2018", "score": 0.5, "content": "ISM content"},
+            {"id": "r2", "source": "MARPOL Annex VI", "score": 0.4, "content": "MARPOL content"},
+            {"id": "r3", "source": "LYC Code", "score": 0.3, "content": "LYC content"},
+        ]
+        retriever = MagicMock(spec=["search", "search_with_yacht", "_search_yacht_index", "metadata"])
+        retriever.search = mock_search
+        retriever._search_yacht_index.return_value = []
+
+        from services.askhelm_retriever import AskHelmComplianceRetriever
+        results = AskHelmComplianceRetriever.search_with_yacht(
+            retriever, "test query", yacht_id="h3",
+            selected_regulations=["ISM Code 2018", "MARPOL Annex VI"],
+            top_k=5, min_score=0.05,
+        )
+        sources = [r["source"] for r in results]
+        self.assertIn("ISM Code 2018", sources)
+        self.assertIn("MARPOL Annex VI", sources)
+        self.assertNotIn("LYC Code", sources)
+
+    @patch("services.askhelm_retriever.AskHelmComplianceRetriever.search")
+    def test_no_selected_regulations_returns_all(self, mock_search):
+        mock_search.return_value = [
+            {"id": "r1", "source": "ISM Code 2018", "score": 0.5, "content": "ISM"},
+            {"id": "r2", "source": "LYC Code", "score": 0.3, "content": "LYC"},
+        ]
+        retriever = MagicMock(spec=["search", "search_with_yacht", "_search_yacht_index", "metadata"])
+        retriever.search = mock_search
+        retriever._search_yacht_index.return_value = []
+
+        from services.askhelm_retriever import AskHelmComplianceRetriever
+        results = AskHelmComplianceRetriever.search_with_yacht(
+            retriever, "test query", yacht_id="h3",
+            selected_regulations=None, top_k=5, min_score=0.05,
+        )
+        sources = [r["source"] for r in results]
+        self.assertIn("ISM Code 2018", sources)
+        self.assertIn("LYC Code", sources)
+
+    @patch("services.askhelm_retriever.AskHelmComplianceRetriever.search")
+    def test_yacht_chunks_prepended(self, mock_search):
+        mock_search.return_value = [
+            {"id": "global1", "source": "ISM Code 2018", "score": 0.4, "content": "ISM"},
+        ]
+        yacht_chunk = {"id": "yacht1", "source": "H3 SMS", "score": 0.6, "content": "SMS"}
+        retriever = MagicMock(spec=["search", "search_with_yacht", "_search_yacht_index", "metadata"])
+        retriever.search = mock_search
+        retriever._search_yacht_index.return_value = [yacht_chunk]
+
+        from services.askhelm_retriever import AskHelmComplianceRetriever
+        results = AskHelmComplianceRetriever.search_with_yacht(
+            retriever, "test query", yacht_id="h3",
+            selected_regulations=None, top_k=5, min_score=0.05,
+        )
+        self.assertEqual(results[0]["id"], "yacht1")
+        self.assertEqual(results[1]["id"], "global1")
 
 
 if __name__ == "__main__":

@@ -46,6 +46,19 @@ from services.compliance_ingest import (
     list_sources as list_compliance_sources,
     rebuild_index as rebuild_compliance_index,
     ingest_compliance_pdf,
+    ingest_yacht_compliance_pdf,
+    list_yacht_sources,
+    classify_compliance_doc,
+    make_compliance_doc_record,
+    list_global_regulations,
+)
+from services.compliance_profile import (
+    load_profile as load_compliance_profile,
+    enable_regulation as enable_compliance_regulation,
+    disable_regulation as disable_compliance_regulation,
+    get_selected_regulations,
+    add_vessel_document,
+    list_vessel_documents,
 )
 from services.market_price_service import check_market_price, commercial_followup_advice
 from domain.component_memory import (
@@ -1803,7 +1816,13 @@ def _handle_show_equipment(state: dict) -> Tuple[str, dict]:
 
 def _handle_show_stock(state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
+    _yid = _gyid(user_id)
     items = get_all_stock(user_id)
+    logger.info(
+        "whatsapp_app: show_stock user=%s yacht_id=%s path=%s records=%d",
+        user_id, _yid, _gsp(_yid), len(items),
+    )
     if not items:
         return _make_response(
             decision="NO STOCK RECORDS",
@@ -1837,6 +1856,12 @@ def _extract_subject_from_query(query: str, prefixes: list) -> str:
 
 def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
+    _yid = _gyid(user_id)
+    logger.info(
+        "whatsapp_app: stock_query user=%s yacht_id=%s path=%s query=%r",
+        user_id, _yid, _gsp(_yid), query,
+    )
     subject = _extract_subject_from_query(query, [
         "do we have ", "do we stock ", "have we got ", "is there any ",
         "do we carry ", "how many do we have ", "how much do we have ",
@@ -1869,9 +1894,16 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
 
 def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
+    _yid = _gyid(user_id)
+    logger.info(
+        "whatsapp_app: spares_query user=%s yacht_id=%s path=%s query=%r",
+        user_id, _yid, _gsp(_yid), query,
+    )
     system = _extract_subject_from_query(query, [
         "show spares for ", "spares for ", "spare parts for ",
         "what spares for ", "what spares do we have for ", "parts for ",
+        "what stock do we have for ", "stock for ", "what stock for ",
     ])
     if not system:
         system = query
@@ -2445,26 +2477,31 @@ def _handle_show_open_actions(state: dict) -> Tuple[str, dict]:
 
 
 def _handle_show_compliance_sources(state: dict) -> Tuple[str, dict]:
-    """List all loaded compliance regulation sources."""
+    """List all loaded global regulation sources."""
     sources = list_compliance_sources()
     if not sources:
         return _make_response(
-            decision="NO COMPLIANCE SOURCES LOADED",
-            why="The compliance knowledge base is empty.",
+            decision="NO REGULATIONS LOADED",
+            why="The global compliance knowledge base is empty.",
             actions=[
                 "Upload a compliance PDF to add it",
                 'Reply "reload compliance" to rebuild the index',
             ],
         ), state
 
+    reg_lines = "\n".join(f"• {s['source']}" for s in sources)
     total_chunks = sum(s["chunks"] for s in sources)
-    lines = [f"COMPLIANCE SOURCES ({len(sources)} document(s), {total_chunks} sections):\n"]
-    for s in sources:
-        lines.append(f"• {s['source']} ({s['chunks']} section(s))")
-    lines.append("")
-    lines.append('Reply "search compliance for [topic]" to search')
-    lines.append('Reply "reload compliance" to rebuild the index after uploading new documents')
-    return "\n".join(lines).strip(), state
+    response = (
+        f"DECISION:\nREGULATIONS FOUND\n\n"
+        f"WHY:\nGlobal compliance database contains {len(sources)} loaded regulation document(s) "
+        f"({total_chunks} sections).\n\n"
+        f"REGULATIONS:\n{reg_lines}\n\n"
+        f"RECOMMENDED ACTIONS:\n"
+        f'• Reply "show compliance profile" to see selected regulations for this vessel\n'
+        f'• Reply "search compliance for [topic]" to search\n'
+        f'• Reply "reload compliance" to rebuild the index after uploading new documents'
+    )
+    return response, state
 
 
 def _handle_reload_compliance(state: dict) -> Tuple[str, dict]:
@@ -2487,6 +2524,206 @@ def _handle_reload_compliance(state: dict) -> Tuple[str, dict]:
             why=f"Could not rebuild the compliance index: {exc}",
             actions=["Check server logs for details"],
         ), state
+
+
+def _handle_show_compliance_profile(state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user
+    yacht_id = get_yacht_id_for_user(user_id)
+    profile = load_compliance_profile(yacht_id)
+    selected = profile.get("selected_regulations", [])
+    vessel_docs = profile.get("vessel_documents", [])
+
+    if not selected and not vessel_docs:
+        return _make_response(
+            decision="NO COMPLIANCE PROFILE SET",
+            why=f"{yacht_id.upper()} has no selected regulations or vessel procedures yet.",
+            actions=[
+                f'Reply "enable ISM Code for {yacht_id}" to select a regulation',
+                "Upload your SMS to add a vessel procedure",
+                'Reply "show global regulations" to see available regulations',
+            ],
+        ), state
+
+    lines = [f"COMPLIANCE PROFILE — {yacht_id.upper()}\n"]
+    if selected:
+        lines.append("APPLICABLE REGULATIONS:")
+        for r in selected:
+            lines.append(f"• {r}")
+        lines.append("")
+    if vessel_docs:
+        lines.append("VESSEL PROCEDURES:")
+        for d in vessel_docs:
+            lines.append(f"• {d.get('name', 'Unknown')}")
+        lines.append("")
+    if not selected:
+        lines.append("No regulations selected yet.")
+    if not vessel_docs:
+        lines.append("No vessel procedures uploaded yet.")
+    return "\n".join(lines).strip(), state
+
+
+def _handle_show_selected_regulations(state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user
+    yacht_id = get_yacht_id_for_user(user_id)
+    selected = get_selected_regulations(yacht_id)
+    if not selected:
+        return _make_response(
+            decision="NO REGULATIONS SELECTED",
+            why=f"{yacht_id.upper()} has no selected regulations yet.",
+            actions=[
+                f'Reply "enable ISM Code for {yacht_id}" to select a regulation',
+                'Reply "show global regulations" to see available regulations',
+            ],
+        ), state
+    lines = [f"SELECTED REGULATIONS — {yacht_id.upper()} ({len(selected)}):\n"]
+    for r in selected:
+        lines.append(f"• {r}")
+    return "\n".join(lines).strip(), state
+
+
+def _handle_show_vessel_procedures(state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user
+    yacht_id = get_yacht_id_for_user(user_id)
+    docs = list_vessel_documents(yacht_id)
+    if not docs:
+        return _make_response(
+            decision="NO VESSEL PROCEDURES",
+            why=f"No vessel procedures have been uploaded for {yacht_id.upper()} yet.",
+            actions=[
+                "Upload your SMS or vessel procedures to get started",
+                'Reply "show compliance profile" for the full profile',
+            ],
+        ), state
+    lines = [f"VESSEL PROCEDURES — {yacht_id.upper()} ({len(docs)}):\n"]
+    for d in docs:
+        name = d.get("name", "Unknown")
+        doc_type = d.get("type", "")
+        lines.append(f"• {name}" + (f" ({doc_type})" if doc_type else ""))
+    return "\n".join(lines).strip(), state
+
+
+def _handle_enable_regulation(query: str, state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user
+    yacht_id = get_yacht_id_for_user(user_id)
+    rest = query.strip()
+    if rest.lower().startswith("enable "):
+        rest = rest[len("enable "):].strip()
+    # Extract regulation name before " for "
+    lower_rest = rest.lower()
+    if " for " in lower_rest:
+        idx = lower_rest.rfind(" for ")
+        reg_name = rest[:idx].strip()
+    else:
+        reg_name = rest.strip()
+    if not reg_name:
+        return _make_response(
+            decision="REGULATION NOT SPECIFIED",
+            why="Could not determine which regulation to enable.",
+            actions=[f'Try: "enable ISM Code for {yacht_id}"'],
+        ), state
+    added = enable_compliance_regulation(yacht_id, reg_name)
+    if added:
+        return _make_response(
+            decision="REGULATION ENABLED",
+            why=f"{reg_name} is now selected for {yacht_id.upper()} compliance answers.",
+            actions=[
+                f"Ask a {reg_name} question",
+                'Reply "show compliance profile" to review the full profile',
+            ],
+        ), state
+    return _make_response(
+        decision="ALREADY ENABLED",
+        why=f"{reg_name} is already selected for {yacht_id.upper()}.",
+        actions=['Reply "show compliance profile" to review the full profile'],
+    ), state
+
+
+def _handle_disable_regulation(query: str, state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user
+    yacht_id = get_yacht_id_for_user(user_id)
+    rest = query.strip()
+    if rest.lower().startswith("disable "):
+        rest = rest[len("disable "):].strip()
+    lower_rest = rest.lower()
+    if " for " in lower_rest:
+        idx = lower_rest.rfind(" for ")
+        reg_name = rest[:idx].strip()
+    else:
+        reg_name = rest.strip()
+    if not reg_name:
+        return _make_response(
+            decision="REGULATION NOT SPECIFIED",
+            why="Could not determine which regulation to disable.",
+            actions=[f'Try: "disable ISM Code for {yacht_id}"'],
+        ), state
+    removed = disable_compliance_regulation(yacht_id, reg_name)
+    if removed:
+        return _make_response(
+            decision="REGULATION DISABLED",
+            why=f"{reg_name} has been removed from {yacht_id.upper()} compliance answers.",
+            actions=['Reply "show compliance profile" to review the updated profile'],
+        ), state
+    return _make_response(
+        decision="NOT IN PROFILE",
+        why=f"{reg_name} was not in the selected regulations for {yacht_id.upper()}.",
+        actions=['Reply "show compliance profile" to see what is selected'],
+    ), state
+
+
+def _handle_yacht_compliance_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
+    """Store a yacht SMS or procedure document under the active yacht's compliance folder."""
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user
+    yacht_id = get_yacht_id_for_user(user_id)
+    doc_type = doc_record.get("doc_type", "yacht_procedure")
+    file_path = doc_record.get("file_path", "")
+    source_name = doc_record.get("source_name") or (
+        os.path.splitext(os.path.basename(file_path))[0].replace("-", " ").replace("_", " ").strip()
+    )
+    try:
+        ingest_yacht_compliance_pdf(file_path, source_name, yacht_id, doc_type)
+    except Exception as exc:
+        logger.exception("yacht_compliance_doc: ingest failed yacht=%s: %s", yacht_id, exc)
+        return _make_response(
+            decision="IMPORT FAILED",
+            why=f"Could not process {source_name}: {exc}",
+            actions=["Check that the PDF contains selectable text"],
+        ), state
+    subtype = "sms" if doc_type == "yacht_sms" else "procedure"
+    add_vessel_document(yacht_id, {
+        "name": source_name,
+        "type": subtype,
+        "path": f"compliance/{subtype}/{os.path.basename(file_path)}",
+    })
+    logger.info(
+        "whatsapp_app: yacht compliance doc imported name=%r type=%s yacht=%s user=%s",
+        source_name, doc_type, yacht_id, user_id,
+    )
+    if doc_type == "yacht_sms":
+        return _make_response(
+            decision="YACHT SMS IMPORTED",
+            why=f"{source_name} has been stored as yacht-specific compliance guidance "
+                f"and is available to all {yacht_id.upper()} users.",
+            actions=[
+                'Ask "what is our defect reporting procedure?"',
+                'Ask "what does our SMS say about maintenance?"',
+                'Reply "show vessel procedures" to see all loaded procedures',
+            ],
+        ), state
+    return _make_response(
+        decision="YACHT PROCEDURE IMPORTED",
+        why=f"{source_name} has been stored as a vessel procedure for {yacht_id.upper()} "
+            f"and is available to all users on this vessel.",
+        actions=[
+            'Ask "what is our procedure for..." to query it',
+            'Reply "show vessel procedures" to see all loaded procedures',
+        ],
+    ), state
 
 
 def _handle_compliance_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
@@ -2520,11 +2757,23 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
     text = extract_pdf_text(file_path)
 
     if text.strip():
+        filename = os.path.basename(file_path)
+
+        # Compliance document pre-screen: run first so an SMS is not mis-classified
+        # as inventory or a technical manual.
+        _compliance_type = classify_compliance_doc(text, filename)
+        if _compliance_type in ("yacht_sms", "yacht_procedure"):
+            logger.info(
+                "PDF: compliance document detected doc_type=%s file=%s, routing to yacht compliance",
+                _compliance_type, filename,
+            )
+            source_name = os.path.splitext(filename)[0].replace("-", " ").replace("_", " ").strip()
+            return make_compliance_doc_record(_compliance_type, source_name, file_path)
+
         # Technical manual pre-screen: must run before inventory (manuals contain
         # "parts list", "serial number", etc. that would otherwise trigger inventory).
         if is_technical_manual_text(text):
             logger.info("PDF: technical manual detected in raw text, routing to manual extraction")
-            filename = os.path.basename(file_path)
             manual = extract_manual_metadata_from_text(text, filename)
             chunks = chunk_manual_text(text)
             return make_manual_doc_record(manual, file_path, chunks)
@@ -2639,6 +2888,10 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
 
     if doc_type == "technical_manual":
         answer, state = _handle_manual_doc(doc_record, state)
+        return answer, state
+
+    if doc_type in ("yacht_sms", "yacht_procedure"):
+        answer, state = _handle_yacht_compliance_doc(doc_record, state)
         return answer, state
 
     if doc_type == "quote":
@@ -2823,7 +3076,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         if last_ctx.get("type") == "compliance" and intent in ("what_to_do", "compliance_followup"):
             topic = last_ctx.get("topic", "")
             if topic:
-                return answer_compliance_followup(topic), state
+                from storage_paths import get_yacht_id_for_user
+                _yid = get_yacht_id_for_user(state.get("user_id", ""))
+                return answer_compliance_followup(topic, yacht_id=_yid), state
         if intent == "compliance_followup":
             # Re-route to commercial when market check or comparison context exists.
             if last_ctx.get("type") == "market_check" or comparison_data:
@@ -2853,7 +3108,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         return build_extraction_view_response(state), state
 
     if intent == "compliance_question":
-        answer = answer_compliance_query(incoming)
+        from storage_paths import get_yacht_id_for_user
+        _yid = get_yacht_id_for_user(state.get("user_id", ""))
+        answer = answer_compliance_query(incoming, yacht_id=_yid)
         state["last_context"] = {"type": "compliance", "topic": incoming}
         return answer, state
 
@@ -2890,6 +3147,21 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "reload_compliance":
         return _handle_reload_compliance(state)
+
+    if intent == "show_compliance_profile":
+        return _handle_show_compliance_profile(state)
+
+    if intent == "show_selected_regulations":
+        return _handle_show_selected_regulations(state)
+
+    if intent == "show_vessel_procedures":
+        return _handle_show_vessel_procedures(state)
+
+    if intent == "enable_regulation":
+        return _handle_enable_regulation(incoming, state)
+
+    if intent == "disable_regulation":
+        return _handle_disable_regulation(incoming, state)
 
     if intent == "show_manuals":
         return _handle_show_manuals(state)

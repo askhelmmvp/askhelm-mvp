@@ -28,7 +28,11 @@ def _equipment_path(user_id: str) -> Path:
 def _stock_path(user_id: str) -> Path:
     yacht_id = get_yacht_id_for_user(user_id)
     migrate_user_files(user_id, yacht_id)
-    return get_stock_memory_path(yacht_id)
+    path = get_stock_memory_path(yacht_id)
+    logger.debug(
+        "inventory_store: stock_path user=%s yacht_id=%s path=%s", user_id, yacht_id, path
+    )
+    return path
 
 
 # ---------------------------------------------------------------------------
@@ -51,7 +55,12 @@ def load_stock(user_id: str) -> dict:
     try:
         if path.exists():
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            logger.info(
+                "inventory_store: load_stock user=%s path=%s records=%d",
+                user_id, path, len(data.get("stock", [])),
+            )
+            return data
     except Exception as exc:
         logger.warning("inventory_store: failed to load stock user=%s: %s", user_id, exc)
     return {"stock": []}
@@ -268,9 +277,10 @@ def merge_stock(user_id: str, new_items: list, source_file: str) -> tuple:
             added += 1
 
     _write_stock(user_id, data)
+    yacht_id = get_yacht_id_for_user(user_id)
     logger.info(
-        "inventory_store: stock added=%d merged=%d user=%s",
-        added, merged, user_id,
+        "inventory_store: stock added=%d merged=%d total=%d user=%s yacht_id=%s path=%s",
+        added, merged, len(existing), user_id, yacht_id, get_stock_memory_path(yacht_id),
     )
     return added, merged
 
@@ -311,20 +321,33 @@ def find_stock_by_query(user_id: str, query: str) -> list:
             or (linked and q in linked)
         ):
             results.append(item)
+    logger.info(
+        "inventory_store: find_stock_by_query user=%s query=%r results=%d",
+        user_id, query, len(results),
+    )
     return results
 
 
 def find_stock_for_system(user_id: str, query: str) -> list:
-    """Return stock items whose linked_equipment or description matches query."""
+    """Return stock items whose linked_equipment, description, supplier or make matches query."""
     q = query.lower().strip()
     results = []
     for item in get_all_stock(user_id):
         linked = (item.get("linked_equipment") or "").lower()
         desc = (item.get("description") or "").lower()
-        linked_match = linked and (q in linked or linked in q)
-        desc_match = q in desc
-        if linked_match or desc_match:
+        supplier = (item.get("supplier") or "").lower()
+        make = (item.get("make") or "").lower()
+        if (
+            (linked and (q in linked or linked in q))
+            or q in desc
+            or (supplier and (q in supplier or supplier in q))
+            or (make and (q in make or make in q))
+        ):
             results.append(item)
+    logger.info(
+        "inventory_store: find_stock_for_system user=%s query=%r results=%d",
+        user_id, query, len(results),
+    )
     return results
 
 
