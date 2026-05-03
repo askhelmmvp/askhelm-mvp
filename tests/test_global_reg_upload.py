@@ -101,6 +101,30 @@ class TestHandleGlobalRegulationUpload(unittest.TestCase):
             _handle_global_regulation_upload(pdf, "SOLAS", {})
         mock_reset.assert_called_once()
 
+    def test_zero_chunks_returns_import_failed(self):
+        from whatsapp_app import _handle_global_regulation_upload
+        pdf = self._make_pdf()
+        with patch("whatsapp_app.ingest_compliance_pdf", return_value=0), \
+             patch("whatsapp_app._reset_compliance_retriever"):
+            answer, _ = _handle_global_regulation_upload(pdf, "ISM Code", {})
+        self.assertIn("GLOBAL REGULATION IMPORT FAILED", answer)
+
+    def test_zero_chunks_does_not_reset_retriever(self):
+        from whatsapp_app import _handle_global_regulation_upload
+        pdf = self._make_pdf()
+        with patch("whatsapp_app.ingest_compliance_pdf", return_value=0), \
+             patch("whatsapp_app._reset_compliance_retriever") as mock_reset:
+            _handle_global_regulation_upload(pdf, "ISM Code", {})
+        mock_reset.assert_not_called()
+
+    def test_zero_chunks_response_mentions_searchable_text(self):
+        from whatsapp_app import _handle_global_regulation_upload
+        pdf = self._make_pdf()
+        with patch("whatsapp_app.ingest_compliance_pdf", return_value=0), \
+             patch("whatsapp_app._reset_compliance_retriever"):
+            answer, _ = _handle_global_regulation_upload(pdf, "ISM Code", {})
+        self.assertIn("no searchable text", answer)
+
     def test_ingest_failure_returns_ingest_failed(self):
         from whatsapp_app import _handle_global_regulation_upload
         pdf = self._make_pdf()

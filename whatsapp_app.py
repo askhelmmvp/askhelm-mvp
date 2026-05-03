@@ -2779,10 +2779,23 @@ def _handle_global_regulation_upload(
 
     slug = re.sub(r"[^\w]+", "_", reg_name).strip("_").lower()
     dest = reg_dir / f"{slug}.pdf"
-    shutil.copy2(file_path, dest)
 
     try:
+        shutil.copy2(file_path, dest)
         total = ingest_compliance_pdf(str(dest), reg_name)
+        if total == 0:
+            return _make_response(
+                decision="GLOBAL REGULATION IMPORT FAILED",
+                why=(
+                    f'"{reg_name}" was received but no searchable text could be extracted, '
+                    f"so it was not added to the compliance knowledge base."
+                ),
+                actions=[
+                    "Try a text-based PDF",
+                    "Try the bulk ingest script locally",
+                    "Check whether the PDF is scanned/image-only",
+                ],
+            ), state
         _reset_compliance_retriever()
         return _make_response(
             decision="GLOBAL REGULATION IMPORTED",
