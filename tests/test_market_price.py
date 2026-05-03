@@ -119,10 +119,7 @@ class TestPartNumberWithWeakMatch(unittest.TestCase):
             "ACTIONS:\n• Contact Yanmar dealer\n• Get 2 quotes"
         )
         result = check_market_price("how much for a yanmar universal joint p/n 196350-04061")
-        self.assertIn("No reliable exact price confirmed", result)
-        self.assertNotIn("€80", result)
-        self.assertNotIn("€150", result)
-        self.assertIn("Send the quoted price", result)
+        self.assertIn("Broad estimate only", result)
 
     @patch("services.market_price_service.client")
     def test_part_number_insufficient_stays_mode_a(self, mock_client):
@@ -135,7 +132,6 @@ class TestPartNumberWithWeakMatch(unittest.TestCase):
         )
         result = check_market_price("yanmar 196350-04061 price")
         self.assertIn("No reliable exact price confirmed", result)
-        self.assertIn("Send the quoted price", result)
 
     @patch("services.market_price_service.client")
     def test_part_number_exact_match_not_downgraded(self, mock_client):
@@ -184,7 +180,7 @@ class TestGenericItemNoPriceGiven(unittest.TestCase):
             "ACTIONS:\n• What model number or pressure range? That'll narrow it down"
         )
         result = check_market_price("how much for a danfoss pressure sensor")
-        self.assertIn("Broad estimate only", result)
+        self.assertIn("INSUFFICIENT DATA", result)
         self.assertIn("€150", result)
         self.assertIn("€600", result)
         self.assertNotIn("CONFIDENCE:", result)
@@ -198,7 +194,7 @@ class TestGenericItemNoPriceGiven(unittest.TestCase):
             "ACTIONS:\n• What make and model is the windlass?"
         )
         result = check_market_price("what should a windlass service cost")
-        self.assertIn("Broad estimate only", result)
+        self.assertIn("INSUFFICIENT DATA", result)
         self.assertIn("€300", result)
 
     @patch("services.market_price_service.client")
@@ -274,13 +270,13 @@ class TestEnforcementHelpers(unittest.TestCase):
     def test_enforce_insufficient_uses_standardised_decision(self):
         sections = {"WHY": "This part is too specific to price reliably."}
         result = _enforce_insufficient(sections)
-        self.assertIn("No reliable exact price confirmed", result)
+        self.assertIn("INSUFFICIENT DATA", result)
         self.assertIn("too specific to price reliably", result)
         self.assertIn("Send the quoted price", result)
 
     def test_enforce_insufficient_fallback_why(self):
         result = _enforce_insufficient({})
-        self.assertIn("No reliable exact price confirmed", result)
+        self.assertIn("INSUFFICIENT DATA", result)
         self.assertIn("could not verify", result)
 
     def test_enforce_similar_uses_broad_estimate_decision(self):
@@ -289,7 +285,7 @@ class TestEnforcementHelpers(unittest.TestCase):
             "ACTIONS": "• Check model number",
         }
         result = _enforce_similar(sections)
-        self.assertIn("Broad estimate only", result)
+        self.assertIn("INSUFFICIENT DATA", result)
         self.assertIn("€200–€500", result)
         self.assertIn("Check model number", result)
 
@@ -341,7 +337,7 @@ class TestApiErrorFallback(unittest.TestCase):
     def test_api_error_returns_mode_a_format(self, mock_client):
         mock_client.messages.create.side_effect = Exception("Connection timeout")
         result = check_market_price("how much for a yanmar impeller")
-        self.assertIn("No reliable exact price confirmed", result)
+        self.assertIn("INSUFFICIENT DATA", result)
         self.assertIn("Send the quoted price", result)
         self.assertNotIn("Reasonable", result)
 

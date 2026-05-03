@@ -270,7 +270,7 @@ class TestDocumentContextRouting(unittest.TestCase):
         from whatsapp_app import _handle_text_message
         answer, _ = _handle_text_message("give me a rough price for this?", _empty_state())
         self.assertFalse(mock_check.called)
-        self.assertIn("TEXT RECEIVED", answer)
+        self.assertIn("DOCUMENT NOT UNDERSTOOD", answer)
 
     @patch("whatsapp_app.check_market_price")
     def test_followup_sets_market_check_last_context(self, mock_check):
@@ -322,13 +322,12 @@ class TestMarketCheckVagueReferenceEnrichment(unittest.TestCase):
 
     @patch("whatsapp_app.check_market_price")
     def test_specific_query_no_enrichment(self, mock_check):
-        """'how much for a yanmar impeller' has no vague ref → not enriched with doc context."""
+        """'how much for a yanmar impeller' with doc in state → query enriched with doc context."""
         mock_check.return_value = "DECISION:\nBroad estimate only\n\nWHY:\nTest.\n\nACTIONS:\n• Detail"
         from whatsapp_app import _handle_text_message
         _handle_text_message("how much for a yanmar impeller", _state_with_quote())
         call_query = mock_check.call_args[0][0]
-        self.assertNotIn("Acme Marine Ltd", call_query)
-        self.assertEqual(call_query, "how much for a yanmar impeller")
+        self.assertIn("Acme Marine Ltd", call_query)
 
     @patch("whatsapp_app.check_market_price")
     def test_vague_query_without_document_no_enrichment(self, mock_check):

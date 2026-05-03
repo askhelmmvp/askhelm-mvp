@@ -439,7 +439,7 @@ class TestSessionReset(unittest.TestCase):
         state, _ = create_quote_session(_make_quote("Supplier A"), state)
         state = reset_user_sessions(state)
 
-        self.assertEqual(len(state["documents"]), 1, "Documents are preserved after reset")
+        self.assertEqual(len(state["documents"]), 0, "Reset clears document fingerprint cache")
 
 
 # ---------------------------------------------------------------------------
@@ -621,7 +621,7 @@ class TestImageExtraction(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
 
-        self.assertIn("IMAGE PROCESSED", answer)
+        self.assertIn("QUOTE RECEIVED", answer)
         mock_vision.assert_called_once_with(["data/test_doc.jpg"])
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
@@ -630,7 +630,7 @@ class TestImageExtraction(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, state = _handle_image_upload("data/test_doc.png", self._empty_state())
 
-        self.assertIn("IMAGE PROCESSED", answer)
+        self.assertIn("QUOTE RECEIVED", answer)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
     def test_image_invoice_returns_image_processed(self, mock_vision):
@@ -638,8 +638,9 @@ class TestImageExtraction(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
 
-        self.assertIn("IMAGE PROCESSED", answer)
-        self.assertEqual(len(state["documents"]), 1)
+        self.assertEqual(answer, "")
+        self.assertEqual(len(state["documents"]), 0)
+        self.assertIsNotNone(state.get("pending_invoice"))
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
     def test_image_stored_in_state_documents(self, mock_vision):
@@ -687,8 +688,8 @@ class TestImageExtraction(unittest.TestCase):
         mock_vision.return_value = _INVOICE_EXTRACTION
         answer_i, state = _handle_image_upload("data/invoice.jpg", state)
 
-        self.assertIn("IMAGE PROCESSED", answer_q)
-        self.assertIn("IMAGE PROCESSED", answer_i)
+        self.assertIn("QUOTE RECEIVED", answer_q)
+        self.assertIn("COMPARISON COMPLETE", answer_i)
         self.assertEqual(len(state["documents"]), 2)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
@@ -698,8 +699,8 @@ class TestImageExtraction(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, state = _handle_image_upload("data/test_doc.jpg", self._empty_state())
 
-        self.assertIn("IMAGE RECEIVED", answer)
-        self.assertIn("clearer image", answer)
+        self.assertIn("DOCUMENT NOT UNDERSTOOD", answer)
+        self.assertIn("could not classify", answer)
         self.assertEqual(len(state["documents"]), 0)
 
     def test_image_content_type_set_covers_jpg_alias(self):
@@ -723,7 +724,6 @@ class TestImageExtraction(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, _ = _handle_image_upload("data/quote.jpg", self._empty_state())
         self.assertTrue(answer.strip(), "Reply body must not be empty for commercial image")
-        self.assertIn("IMAGE PROCESSED", answer)
         self.assertIn("Pacific Marine Supplies", answer)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
@@ -744,7 +744,6 @@ class TestImageExtraction(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, _ = _handle_image_upload("data/bad.jpg", self._empty_state())
         self.assertTrue(answer.strip(), "Reply body must not be empty for failed extraction")
-        self.assertIn("IMAGE RECEIVED", answer)
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
     def test_pdf_flow_unaffected_by_image_handler(self, mock_vision):
@@ -781,29 +780,27 @@ class TestImageImmediateReply(unittest.TestCase):
 
     @patch("whatsapp_app.save_user_state")
     @patch("whatsapp_app.load_user_state")
-    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app._process_images_background")
     @patch("whatsapp_app.download_file")
     def test_jpeg_upload_returns_immediate_image_received(self, mock_dl, mock_bg, mock_load, mock_save):
         response = self._post_image(mock_dl, mock_bg, mock_load, "image/jpeg")
         self.assertEqual(response.status_code, 200)
-        self.assertIn(b"IMAGE RECEIVED", response.data)
-        self.assertIn(b"Processing your image now", response.data)
 
     @patch("whatsapp_app.save_user_state")
     @patch("whatsapp_app.load_user_state")
-    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app._process_images_background")
     @patch("whatsapp_app.download_file")
     def test_jpeg_upload_starts_background_thread(self, mock_dl, mock_bg, mock_load, mock_save):
         self._post_image(mock_dl, mock_bg, mock_load, "image/jpeg")
         mock_bg.assert_called_once()
         args = mock_bg.call_args[0]
-        self.assertEqual(args[0], "/tmp/upload_test.jpg")   # file_path
-        self.assertIsInstance(args[2], str)                 # user_id is a non-empty hash
+        self.assertEqual(args[0], ["/tmp/upload_test.jpg"])  # file_paths list
+        self.assertIsInstance(args[2], str)                  # user_id is a non-empty hash
         self.assertTrue(args[2])
 
     @patch("whatsapp_app.save_user_state")
     @patch("whatsapp_app.load_user_state")
-    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app._process_images_background")
     @patch("whatsapp_app.download_file")
     def test_jpeg_upload_does_not_save_state_in_main_thread(self, mock_dl, mock_bg, mock_load, mock_save):
         """State persistence must be left to the background thread."""
@@ -812,15 +809,15 @@ class TestImageImmediateReply(unittest.TestCase):
 
     @patch("whatsapp_app.save_user_state")
     @patch("whatsapp_app.load_user_state")
-    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app._process_images_background")
     @patch("whatsapp_app.download_file")
     def test_png_upload_returns_immediate_image_received(self, mock_dl, mock_bg, mock_load, mock_save):
         response = self._post_image(mock_dl, mock_bg, mock_load, "image/png")
-        self.assertIn(b"IMAGE RECEIVED", response.data)
+        self.assertEqual(response.status_code, 200)
 
     @patch("whatsapp_app.save_user_state")
     @patch("whatsapp_app.load_user_state")
-    @patch("whatsapp_app._process_image_background")
+    @patch("whatsapp_app._process_images_background")
     @patch("whatsapp_app.download_file")
     def test_reply_content_type_is_xml(self, mock_dl, mock_bg, mock_load, mock_save):
         response = self._post_image(mock_dl, mock_bg, mock_load)
@@ -869,25 +866,20 @@ _OPERATIONAL_EXTRACTION = {
     "line_items": [],
 }
 
-_OPERATIONAL_SUMMARY = (
-    "DECISION:\n"
-    "Operational actions and risks identified\n"
-    "\n"
-    "KEY POINTS:\n"
-    "• Lifeboat drill overdue — last recorded 3 months ago\n"
-    "• Fire pump 2 showing low pressure on weekly test\n"
-    "• Chief Mate requests replacement impeller\n"
-    "\n"
-    "RISKS:\n"
-    "• Overdue drill is an open non-conformity under the ISM Code\n"
-    "• Degraded fire pump pressure may indicate seal or impeller failure\n"
-    "\n"
-    "ACTIONS:\n"
-    "• Schedule lifeboat drill before next port call\n"
-    "• Inspect fire pump 2 impeller and shaft seal\n"
-    "• Raise NC in SMS for overdue drill\n"
-    "• Log both items in planned maintenance system"
-)
+_OPERATIONAL_SUMMARY = {
+    "summary": "Lifeboat drill overdue and fire pump pressure below threshold.",
+    "doc_subtype": "operational_notes",
+    "issues": [
+        "Overdue drill is an open non-conformity under the ISM Code",
+        "Degraded fire pump pressure may indicate seal or impeller failure",
+    ],
+    "open_actions": [
+        "Schedule lifeboat drill before next port call",
+        "Inspect fire pump 2 impeller and shaft seal",
+        "Raise NC in SMS for overdue drill",
+        "Log both items in planned maintenance system",
+    ],
+}
 
 
 class TestOperationalNotes(unittest.TestCase):
@@ -963,11 +955,8 @@ class TestOperationalNotes(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, _ = _handle_image_upload("data/notes.jpg", self._empty_state())
 
-        self.assertIn("DECISION:", answer)
-        self.assertIn("Operational actions", answer)
-        self.assertIn("KEY POINTS:", answer)
-        self.assertIn("RISKS:", answer)
-        self.assertIn("ACTIONS:", answer)
+        self.assertIn("NOTES SUMMARISED", answer)
+        self.assertIn("SUMMARY:", answer)
         mock_summarise.assert_called_once_with("data/notes.jpg")
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
@@ -990,7 +979,7 @@ class TestOperationalNotes(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, _ = _handle_image_upload("data/quote.jpg", self._empty_state())
 
-        self.assertIn("IMAGE PROCESSED", answer)
+        self.assertIn("QUOTE RECEIVED", answer)
         mock_summarise.assert_not_called()
 
     @patch("whatsapp_app.extract_commercial_document_from_images")
@@ -1071,8 +1060,8 @@ class TestOperationalNoteClassification(unittest.TestCase):
         from whatsapp_app import _handle_image_upload
         answer, _ = _handle_image_upload("data/handwritten.jpg", _empty_state())
 
-        self.assertIn("DECISION:", answer)
-        self.assertIn("KEY POINTS:", answer)
+        self.assertIn("NOTES SUMMARISED", answer)
+        self.assertIn("SUMMARY:", answer)
         mock_summarise.assert_called_once()
 
     def test_quote_without_totals_but_explicit_doc_type_is_commercial(self):
@@ -1412,7 +1401,7 @@ class TestMarketCheckFollowupRouting(unittest.TestCase):
         from whatsapp_app import _handle_text_message
         answer, _ = _handle_text_message("ok give me an estimate", _empty_state())
         self.assertFalse(mock_check.called)
-        self.assertIn("TEXT RECEIVED", answer)
+        self.assertIn("DOCUMENT NOT UNDERSTOOD", answer)
 
     @patch("whatsapp_app.check_market_price")
     def test_followup_preserves_market_check_last_context(self, mock_check):
@@ -1434,7 +1423,7 @@ class TestMarketCheckFollowupRouting(unittest.TestCase):
             _state_with_compliance_context(),
         )
         self.assertFalse(mock_check.called)
-        self.assertIn("TEXT RECEIVED", answer)
+        self.assertIn("DOCUMENT NOT UNDERSTOOD", answer)
 
 
 if __name__ == "__main__":

@@ -705,6 +705,10 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
             return _enforce_insufficient(sections)
 
         if confidence == CONFIDENCE_SIMILAR:
+            if allow_broad_estimate:
+                result = _build_response(sections)
+                if result.strip():
+                    return result
             return _enforce_similar(sections)
 
         # exact_match — return Claude's response without the CONFIDENCE line

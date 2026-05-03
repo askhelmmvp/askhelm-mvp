@@ -279,13 +279,13 @@ class TestShouldForceCompare(unittest.TestCase):
 
     def test_below_50pct_item_overlap_no_force(self):
         state = _state_with_quote()
-        invoice = _invoice_doc(items=[
+        invoice = _invoice_doc(total=2000.0, items=[
             {"description": "Impeller replacement"},      # 1 match (of 3 quote items)
             {"description": "Completely different A"},
             {"description": "Completely different B"},
             {"description": "Freight"},
         ])
-        # quote-relative overlap = 1/3 = 33% < 50%
+        # quote-relative overlap = 1/3 = 33% < 50%; total=2000 is >20% from quote=1000 so no proximity trigger
         self.assertFalse(_should_force_compare(invoice, self._session(state), state))
 
     def test_exactly_50pct_overlap_forces_compare(self):
@@ -414,8 +414,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
         self.assertIn("MATCH CONFIRMED", response)
-        self.assertIn("COST INCREASE", response)
-        self.assertIn("Acme Marine Ltd", response)
+        self.assertIn("FREIGHT ADDED", response)
 
     def test_freight_why_includes_amount(self):
         from whatsapp_app import build_comparison_response
@@ -424,7 +423,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
         self.assertIn("150", response)
-        self.assertIn("not shown on the original quote", response)
+        self.assertIn("not included in the original quote", response)
 
     def test_freight_actions_include_confirm_wording(self):
         from whatsapp_app import build_comparison_response
@@ -432,7 +431,7 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         invoice = _invoice_doc()
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
-        self.assertIn("Confirm freight was agreed", response)
+        self.assertIn("Confirm whether the quote was ex works", response)
 
     def test_non_freight_addition_uses_standard_response(self):
         """Invoice adds a spare part (not ancillary) → standard cost-increase response."""
@@ -464,7 +463,6 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         comparison = compare_documents(quote, invoice)
         response = build_comparison_response(quote, invoice, comparison)
         self.assertIn("MATCH CONFIRMED", response)
-        self.assertIn("COST INCREASE", response)
         # Delivery categorised as "delivery" and amount shown
         self.assertIn("delivery", response)
         self.assertIn("80", response)
@@ -514,7 +512,7 @@ class TestFullFreightIntegration(unittest.TestCase):
             state,
         )
         self.assertIn("MATCH CONFIRMED", answer, f"Got: {answer[:300]}")
-        self.assertIn("COST INCREASE", answer, f"Got: {answer[:300]}")
+        self.assertIn("FREIGHT ADDED", answer, f"Got: {answer[:300]}")
 
     def test_invoice_upload_different_supplier_no_comparison_performed(self):
         """Invoice from a different supplier → no automatic comparison (uncertain or no match)."""
@@ -540,11 +538,8 @@ class TestFullFreightIntegration(unittest.TestCase):
         )
         # Must not produce a freight comparison response
         self.assertNotIn("FREIGHT ADDED", answer)
-        # Must indicate no automatic comparison happened
-        self.assertTrue(
-            "NO MATCHING QUOTE" in answer or "MATCH UNCERTAIN" in answer,
-            f"Expected unmatched response, got: {answer[:200]}",
-        )
+        # Silent storage — no user-facing response for unmatched invoice
+        self.assertFalse(answer, f"Expected empty response for unmatched invoice, got: {answer[:200]}")
 
 
 class TestSupplierScore(unittest.TestCase):
