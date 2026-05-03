@@ -114,7 +114,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=600,
+        max_tokens=400,
         system=(
             "You are answering maritime compliance questions using ONLY the regulation excerpts provided.\n"
             "\n"
@@ -124,6 +124,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
             "3. Do NOT mention any convention, regulation, requirement, or authority not stated in the excerpts.\n"
             "4. Do NOT supplement, extend, or add information beyond what is explicitly in the excerpts.\n"
             "5. If the excerpts do not directly answer the question, copy the FALLBACK below verbatim — nothing else.\n"
+            "6. DECISION must be one short line. WHY must be 2-4 lines maximum. ACTIONS maximum 4 bullets.\n"
             "\n"
             "FALLBACK — copy this exactly if the excerpts do not answer the question:\n"
             "DECISION: Not explicitly covered in the loaded documents.\n"
@@ -132,10 +133,20 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
             "ACTIONS: • Refer to the relevant regulation or onboard procedure if this needs to be confirmed\n"
             "\n"
             "If the excerpts DO answer the question, respond in this exact format:\n"
-            "DECISION: <one sentence — yes/no/conditional, grounded in excerpts only>\n"
-            "WHY: <one or two sentences — from the excerpts only, no external knowledge>\n"
-            "SOURCE: <regulation name, section, and page from the excerpt header>\n"
-            "ACTIONS: <bullet list of what the crew/owner must do, from excerpts only>"
+            "DECISION:\n"
+            "<short statement — yes/no/what is required, one line only>\n"
+            "\n"
+            "WHY:\n"
+            "<2-4 short lines — from the excerpts only, no external knowledge>\n"
+            "\n"
+            "SOURCE:\n"
+            "<regulation name — section/chapter from the excerpt header>\n"
+            "\n"
+            "ACTIONS:\n"
+            "• <action 1 — from excerpts only>\n"
+            "• <action 2 — from excerpts only>\n"
+            "• <action 3 — only if needed>\n"
+            "• <action 4 — only if needed>"
         ),
         messages=[
             {

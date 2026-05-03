@@ -827,5 +827,90 @@ class TestRetrievalWithYacht(unittest.TestCase):
         self.assertEqual(results[1]["id"], "global1")
 
 
+class TestComplianceAnswerLength(unittest.TestCase):
+    """Compliance answers must be safe for WhatsApp delivery (≤ 1175 chars body)."""
+
+    _LONG_ANSWER = (
+        "DECISION:\nMAINTENANCE REQUIREMENTS FOUND\n\n"
+        "WHY:\n"
+        + ("LYC 23A.15 requires vessel equipment to be checked and tested daily. " * 20)
+        + "\n\nSOURCE:\nLarge Yacht Code LYC — Part A, 23A.15\n\n"
+        "ACTIONS:\n• Keep daily checks recorded\n• Maintain inspection programme\n• Review SMS every 3 years"
+    )
+
+    def test_cap_short_answer_unchanged(self):
+        from domain.compliance_engine import _cap_compliance_answer
+        short = "DECISION:\nOK\n\nWHY:\nBrief.\n\nSOURCE:\nDoc\n\nACTIONS:\n• Act"
+        self.assertEqual(_cap_compliance_answer(short), short)
+
+    def test_cap_long_answer_truncates_to_limit(self):
+        from domain.compliance_engine import _cap_compliance_answer
+        result = _cap_compliance_answer(self._LONG_ANSWER)
+        self.assertLessEqual(len(result), 1175)
+
+    def test_cap_truncates_on_line_boundary(self):
+        from domain.compliance_engine import _cap_compliance_answer
+        result = _cap_compliance_answer(self._LONG_ANSWER)
+        self.assertFalse(result.endswith(" "), "trailing space after truncation")
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_compliance_query_caps_long_llm_response(self, mock_llm, mock_retriever_getter):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "LYC 23A.15", "content": "Daily checks required.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = self._LONG_ANSWER
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what does the Large Yacht Code say about maintenance?")
+        self.assertLessEqual(len(result), 1175)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_compliance_answer_has_required_sections(self, mock_llm, mock_retriever_getter):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "LYC 23A.15", "content": "Daily checks required.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION:\nMAINTENANCE REQUIREMENTS FOUND\n\n"
+            "WHY:\nLYC 23A.15 requires daily checks when in use.\n\n"
+            "SOURCE:\nLarge Yacht Code LYC — Part A, 23A.15\n\n"
+            "ACTIONS:\n• Keep daily checks recorded\n• Review SMS every 3 years"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what does the Large Yacht Code say about maintenance?")
+        self.assertIn("DECISION:", result)
+        self.assertIn("WHY:", result)
+        self.assertIn("SOURCE:", result)
+        self.assertIn("ACTIONS:", result)
+        self.assertLessEqual(len(result), 1175)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_followup_question")
+    def test_compliance_followup_caps_long_response(self, mock_followup, mock_retriever_getter):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "LYC 23A.15", "content": "Daily checks required.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_followup.return_value = self._LONG_ANSWER
+
+        from domain.compliance_engine import answer_compliance_followup
+        result = answer_compliance_followup("maintenance requirements")
+        self.assertLessEqual(len(result), 1175)
+
+    def test_prompt_max_tokens_is_400(self):
+        """LLM token budget for compliance answers must not exceed 400."""
+        import inspect
+        import services.anthropic_service as svc
+        src = inspect.getsource(svc.answer_compliance_question)
+        self.assertIn("max_tokens=400", src)
+
+
 if __name__ == "__main__":
     unittest.main()

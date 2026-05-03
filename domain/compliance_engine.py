@@ -10,6 +10,20 @@ _retriever = None
 # documents to be loaded).
 _DOC_CONFIDENCE_THRESHOLD = 0.15
 
+# Hard limit for the answer body (before the "⚓ AskHelm \n\n" header is added).
+# WhatsApp silently drops messages that are too long; 1175 chars + 12-char header ≤ 1200 target.
+_WHATSAPP_ANSWER_LIMIT = 1175
+
+
+def _cap_compliance_answer(text: str) -> str:
+    if len(text) <= _WHATSAPP_ANSWER_LIMIT:
+        return text
+    truncated = text[:_WHATSAPP_ANSWER_LIMIT]
+    last_newline = truncated.rfind("\n")
+    if last_newline > _WHATSAPP_ANSWER_LIMIT // 2:
+        truncated = truncated[:last_newline]
+    return truncated.rstrip()
+
 
 def _get_retriever():
     global _retriever
@@ -60,7 +74,7 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
         # If Claude determined the chunk doesn't actually answer the question,
         # fall through to playbook rather than returning NOT_COVERED.
         if not doc_answer.startswith("DECISION: Not explicitly covered"):
-            return doc_answer
+            return _cap_compliance_answer(doc_answer)
         logger.debug(
             "compliance_engine: document returned NOT_COVERED despite score=%.4f — trying playbook",
             top_score,
@@ -73,7 +87,7 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
             "compliance_engine: playbook fallback — top_score=%.4f question=%r",
             top_score, question[:60],
         )
-        return playbook_answer
+        return _cap_compliance_answer(playbook_answer)
 
     # 4. Weak document match but no playbook → use whatever retrieval we have.
     if chunks:
@@ -81,7 +95,7 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
             "compliance_engine: low-confidence document answer — chunks=%d top_score=%.4f",
             len(chunks), top_score,
         )
-        return answer_compliance_question(question, chunks)
+        return _cap_compliance_answer(answer_compliance_question(question, chunks))
 
     # 5. Nothing matched.
     logger.warning(
@@ -115,13 +129,13 @@ def answer_compliance_followup(topic: str, yacht_id: str = "h3") -> str:
     if chunks and top_score >= _DOC_CONFIDENCE_THRESHOLD:
         followup = answer_compliance_followup_question(topic, chunks)
         if not followup.startswith("DECISION: Not explicitly covered"):
-            return followup
+            return _cap_compliance_answer(followup)
 
     playbook_answer = playbook_lookup(topic)
     if playbook_answer:
-        return playbook_answer
+        return _cap_compliance_answer(playbook_answer)
 
     if chunks:
-        return answer_compliance_followup_question(topic, chunks)
+        return _cap_compliance_answer(answer_compliance_followup_question(topic, chunks))
 
     return NOT_COVERED_FALLBACK
