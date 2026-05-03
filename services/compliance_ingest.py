@@ -141,6 +141,11 @@ def ingest_compliance_pdf(pdf_path: str, source_name: str) -> int:
     from domain.extraction import extract_pdf_text
     text = extract_pdf_text(pdf_path)
     if not text.strip():
+        # TODO ASK-18E: OCR fallback for scanned PDFs.
+        # PyMuPDF supports page.get_textpage_ocr() once Tesseract is installed:
+        #   brew install tesseract        (macOS dev)
+        #   apt-get install tesseract-ocr (Render / Ubuntu prod)
+        # Then wrap this function: render each page and call get_textpage_ocr(flags=3).
         logger.warning("compliance_ingest: no text extracted from %s", pdf_path)
         return 0
     filename = os.path.basename(pdf_path)

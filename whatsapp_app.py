@@ -2784,6 +2784,8 @@ def _handle_global_regulation_upload(
         shutil.copy2(file_path, dest)
         total = ingest_compliance_pdf(str(dest), reg_name)
         if total == 0:
+            # TODO ASK-18E: when Tesseract is installed, retry here with OCR fallback.
+            # See compliance_ingest.ingest_compliance_pdf for the hook point.
             return _make_response(
                 decision="GLOBAL REGULATION IMPORT FAILED",
                 why=(
