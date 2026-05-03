@@ -2752,6 +2752,55 @@ def _handle_compliance_pdf_upload(file_path: str, state: dict) -> Tuple[str, dic
         ), state
 
 
+_GLOBAL_REG_CAPTION_RE = re.compile(
+    r"(?:upload\s+as\s+global\s+regulation|global\s+regulation|ingest\s+global\s+regulation)"
+    r"\s*[:\-]?\s*(.+)",
+    re.IGNORECASE,
+)
+
+
+def _parse_global_regulation_caption(text: str) -> Optional[str]:
+    """Return the regulation name from caption text, or None."""
+    m = _GLOBAL_REG_CAPTION_RE.search(text)
+    if not m:
+        return None
+    return m.group(1).strip()
+
+
+def _handle_global_regulation_upload(
+    file_path: str, reg_name: str, state: dict
+) -> Tuple[str, dict]:
+    """Save PDF to stable regulations folder and ingest into global compliance index."""
+    import shutil
+    from storage_paths import get_global_regulations_dir
+
+    reg_dir = get_global_regulations_dir()
+    reg_dir.mkdir(parents=True, exist_ok=True)
+
+    slug = re.sub(r"[^\w]+", "_", reg_name).strip("_").lower()
+    dest = reg_dir / f"{slug}.pdf"
+    shutil.copy2(file_path, dest)
+
+    try:
+        total = ingest_compliance_pdf(str(dest), reg_name)
+        _reset_compliance_retriever()
+        return _make_response(
+            decision="GLOBAL REGULATION IMPORTED",
+            why=f'"{reg_name}" has been added to the global compliance knowledge base ({total} chunks).',
+            actions=[
+                'Reply "show compliance sources" to confirm it is listed',
+                f'Search with "what does {reg_name} say about..."',
+            ],
+        ), state
+    except Exception as exc:
+        logger.exception("global regulation ingest failed: %s", exc)
+        return _make_response(
+            decision="INGEST FAILED",
+            why=f'Could not process "{reg_name}": {exc}',
+            actions=["Check that the PDF contains selectable text"],
+        ), state
+
+
 def _extract_pdf_to_doc_record(file_path: str) -> dict:
     """Extract text/images from a PDF and return a normalised doc_record. Does NOT touch state."""
     text = extract_pdf_text(file_path)
@@ -3297,6 +3346,8 @@ def whatsapp_reply():
             # each document's type before dispatching any of them.
             # Images are collected (not yet threaded) so all pages from the same
             # message can be sent to Claude together as one multi-page document.
+            _reg_name = _parse_global_regulation_caption(incoming) if incoming else None
+            _regulation_answers: list = []
             pdf_doc_records: list = []
             image_file_paths: list = []
             _spreadsheet_answers: list = []
@@ -3320,6 +3371,17 @@ def whatsapp_reply():
                             "Media [%d/%d]: content_type=%r — PDF magic bytes found, treating as PDF",
                             i + 1, num_media, media_type,
                         )
+                    if _reg_name:
+                        logger.info(
+                            "PDF [%d/%d]: global regulation upload detected, bypassing vision — reg=%r",
+                            i + 1, num_media, _reg_name,
+                        )
+                        reg_answer, state = _handle_global_regulation_upload(
+                            file_path, _reg_name, state
+                        )
+                        _regulation_answers.append(reg_answer)
+                        continue
+
                     doc_record = _extract_pdf_to_doc_record(file_path)
                     logger.info(
                         "PDF extracted [%d/%d]: type=%s supplier=%s",
@@ -3407,6 +3469,8 @@ def whatsapp_reply():
 
             if comparison_answer is not None:
                 answer = comparison_answer
+            elif _regulation_answers:
+                answer = _regulation_answers[-1]
             elif pdf_answers:
                 answer = pdf_answers[-1]
             elif image_started:
