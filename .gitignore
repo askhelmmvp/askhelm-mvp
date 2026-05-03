@@ -21,3 +21,10 @@ data/users/*
 
 # data/knowledge_base/ is intentionally committed — static KB files belong in the repo
 CLAUDE.md
+.DS_Store
+
+# macOS
+.DS_Store
+
+# Local regulation source PDFs
+data/global/regulations/*.pdf
