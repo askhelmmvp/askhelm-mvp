@@ -190,7 +190,7 @@ def _assess_oem_part_price(query: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=200,
-            system=_OEM_ASSESSMENT_PROMPT,
+            system=[{"type": "text", "text": _OEM_ASSESSMENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
@@ -465,7 +465,7 @@ def _assess_commodity_price(query: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=200,
-            system=_COMMODITY_ASSESSMENT_PROMPT,
+            system=[{"type": "text", "text": _COMMODITY_ASSESSMENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
@@ -654,7 +654,7 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=300,
-            system=_SYSTEM_PROMPT,
+            system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
@@ -820,7 +820,7 @@ def commercial_followup_advice(query: str, context_summary: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=300,
-            system=system,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": full_query}],
             timeout=60.0,
         )
@@ -885,7 +885,7 @@ def invoice_approval_checks(invoice_context: str, user_message: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=400,
-            system=_INVOICE_APPROVAL_SYSTEM,
+            system=[{"type": "text", "text": _INVOICE_APPROVAL_SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": content}],
             timeout=60.0,
         )

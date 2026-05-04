@@ -840,7 +840,7 @@ def _call_claude_inventory(content_text: str, max_tokens: int) -> tuple:
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=max_tokens,
-        system=_INVENTORY_EXTRACT_PROMPT,
+        system=[{"type": "text", "text": _INVENTORY_EXTRACT_PROMPT, "cache_control": {"type": "ephemeral"}}],
         messages=[{"role": "user", "content": content_text}],
         timeout=90.0,
     )
@@ -957,7 +957,7 @@ def extract_inventory_from_images(image_paths: list) -> dict:
             response = client.messages.create(
                 model="claude-sonnet-4-6",
                 max_tokens=_TOKENS_PER_CHUNK,
-                system=_INVENTORY_EXTRACT_PROMPT,
+                system=[{"type": "text", "text": _INVENTORY_EXTRACT_PROMPT, "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": content}],
                 timeout=90.0,
             )

@@ -3337,6 +3337,16 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if intent == "spares_query":
         return _handle_spares_query(incoming, state)
 
+    if intent == "invoice_clarification":
+        _pending_inv = state.get("pending_invoice")
+        _has_inv_doc = any(
+            (d.get("doc_type") or "") in ("invoice", "proforma")
+            for d in (state.get("documents") or [])
+        )
+        if _pending_inv or _has_inv_doc:
+            return _handle_invoice_clarification(incoming, state), state
+        return _handle_action_request(incoming, last_ctx, comparison_data, state), state
+
     if intent == "equipment_query":
         return _handle_equipment_query(incoming, state)
 
@@ -3392,6 +3402,20 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             if _comp:
                 state = merge_components(_comp, state)
             return answer, state
+
+    # Unknown intent — but if we have invoice context and the message is substantive,
+    # treat it as invoice clarification rather than returning a generic fallback.
+    if intent == "unknown":
+        _has_inv = bool(state.get("pending_invoice")) or (
+            last_ctx.get("document_type") in ("invoice", "proforma")
+        )
+        if not _has_inv:
+            _has_inv = any(
+                (d.get("doc_type") or "") in ("invoice", "proforma")
+                for d in (state.get("documents") or [])
+            )
+        if _has_inv and len(incoming.split()) >= 3:
+            return _handle_invoice_clarification(incoming, state), state
 
     return _make_response(
         decision="DOCUMENT NOT UNDERSTOOD",
