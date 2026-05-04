@@ -123,6 +123,7 @@ from domain.inventory_store import (
     find_stock_for_system,
     find_equipment_by_query,
     clear_equipment,
+    link_stock_to_equipment,
 )
 from services.inventory_service import (
     classify_inventory_text,
@@ -1745,18 +1746,29 @@ def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tu
         return (
             "DECISION:\nCSV ENCODING NOT SUPPORTED\n\n"
             "WHY:\nThe file could not be decoded using common CSV encodings.\n\n"
-            "RECOMMENDED ACTIONS:\n"
+            "ACTIONS:\n"
             "• Re-export as CSV UTF-8\n"
             "• Or upload the Excel file directly"
         ), state
 
     user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user as _gyid
+    yacht_id = _gyid(user_id)
     parse_error = bool(data.get("parse_error"))
     skipped_rows = data.get("skipped_rows", 0)
+
+    stock_items = data.get("stock") or []
+    st_linked = 0
+    if stock_items:
+        stock_items, st_linked = link_stock_to_equipment(user_id, stock_items)
+
     eq_added, eq_merged = merge_equipment(user_id, data.get("equipment") or [], file_path)
-    st_added, st_merged = merge_stock(user_id, data.get("stock") or [], file_path)
+    st_added, st_merged = merge_stock(user_id, stock_items, file_path)
     state["last_context"] = {"type": "inventory_import"}
-    return format_inventory_response(eq_added, eq_merged, st_added, st_merged, parse_error, skipped_rows), state
+    return format_inventory_response(
+        eq_added, eq_merged, st_added, st_merged,
+        parse_error, skipped_rows, st_linked=st_linked, yacht_id=yacht_id,
+    ), state
 
 
 # ---------------------------------------------------------------------------
@@ -1829,19 +1841,33 @@ def _handle_show_stock(state: dict) -> Tuple[str, dict]:
             why="No stock has been imported yet.",
             actions=["Upload a stock list or spare parts inventory"],
         ), state
-    lines = [f"STOCK ({len(items)} items):\n"]
+    lines = [
+        "DECISION:",
+        "STOCK FOUND",
+        "",
+        "WHY:",
+        f"Found {len(items)} stock records in {_yid.upper()} vessel memory.",
+        "",
+        "STOCK:",
+    ]
     for item in items[:25]:
         desc = item.get("description") or item.get("part_number") or "Unknown"
         qty = item.get("quantity_onboard")
         unit = item.get("unit") or ""
         loc = item.get("storage_location") or ""
         pn = item.get("part_number") or ""
-        qty_str = f" — Qty: {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
-        loc_str = f" [{loc}]" if loc else ""
+        qty_str = f" — {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
+        loc_str = f" — {loc}" if loc else ""
         pn_str = f" ({pn})" if pn and pn != desc else ""
         lines.append(f"• {desc}{pn_str}{qty_str}{loc_str}")
     if len(items) > 25:
         lines.append(f"... and {len(items) - 25} more")
+    lines += [
+        "",
+        "ACTIONS:",
+        "• Ask \"do we have <item> onboard?\" for specific searches",
+        "• Ask \"show spares for <system>\" to filter by equipment",
+    ]
     return "\n".join(lines).strip(), state
 
 
@@ -1872,23 +1898,38 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     results = find_stock_by_query(user_id, subject)
     if not results:
         return _make_response(
-            decision="NO ONBOARD STOCK MATCH",
-            why=f"No onboard stock match found for '{subject}'.",
-            actions=["Check spelling", "Upload your stock list to build onboard memory"],
+            decision="NO STOCK FOUND",
+            why=f"No matching onboard stock found for '{subject}' in {_yid.upper()} stock memory.",
+            actions=[
+                "Check spelling or part number",
+                "Upload latest stock list if inventory is incomplete",
+            ],
         ), state
-    lines = [f"STOCK FOUND — '{subject}':\n"]
+    lines = [
+        "DECISION:",
+        "STOCK FOUND",
+        "",
+        "WHY:",
+        f"{results[0].get('description') or results[0].get('part_number') or subject} is held onboard.",
+        "",
+        "STOCK:",
+    ]
     for item in results[:8]:
         desc = item.get("description") or item.get("part_number") or "Unknown"
         qty = item.get("quantity_onboard")
         unit = item.get("unit") or ""
         loc = item.get("storage_location") or ""
         pn = item.get("part_number") or ""
-        conf = item.get("confidence", 0.7)
-        conf_label = "✓" if conf >= 0.75 else "~"
-        qty_str = f"Qty: {qty}{(' ' + unit).rstrip()}" if qty is not None else "Qty: unknown"
-        loc_str = f" | Location: {loc}" if loc else ""
-        pn_str = f" | P/N: {pn}" if pn else ""
-        lines.append(f"{conf_label} {desc}{pn_str} — {qty_str}{loc_str}")
+        qty_str = f" — {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
+        loc_str = f" — {loc}" if loc else ""
+        pn_str = f" ({pn})" if pn and pn != desc else ""
+        lines.append(f"• {desc}{pn_str}{qty_str}{loc_str}")
+    lines += [
+        "",
+        "ACTIONS:",
+        "• Check stock location before ordering",
+        "• Ask \"show spares for <system>\" if you need related parts",
+    ]
     return "\n".join(lines).strip(), state
 
 
@@ -1910,25 +1951,32 @@ def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
     results = find_stock_for_system(user_id, system)
     if not results:
         return _make_response(
-            decision="NO SPARES FOUND",
-            why=f"No spare parts found linked to '{system}'. "
-                "This may mean no spares are recorded or the system name doesn't match.",
+            decision="NO STOCK FOUND",
+            why=f"No matching onboard stock found for '{system}' in {_yid.upper()} stock memory.",
             actions=[
-                "Check the system name matches your stock list",
-                "Upload a spare parts list to build onboard memory",
+                "Check spelling or part number",
+                "Upload latest stock list if inventory is incomplete",
             ],
         ), state
-    lines = [f"SPARES FOR '{system.upper()}' ({len(results)} items):\n"]
+    lines = [
+        "DECISION:",
+        "SPARES FOUND",
+        "",
+        "WHY:",
+        f"AskHelm found onboard stock linked or matched to {system}.",
+        "",
+        "SPARES:",
+    ]
     for item in results[:10]:
         desc = item.get("description") or "Unknown"
         qty = item.get("quantity_onboard")
         unit = item.get("unit") or ""
         loc = item.get("storage_location") or ""
         pn = item.get("part_number") or ""
-        qty_str = f"Qty: {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
-        loc_str = f" [{loc}]" if loc else ""
+        qty_str = f" — {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
+        loc_str = f" — {loc}" if loc else ""
         pn_str = f" ({pn})" if pn else ""
-        lines.append(f"• {desc}{pn_str} — {qty_str}{loc_str}")
+        lines.append(f"• {desc}{pn_str}{qty_str}{loc_str}")
     return "\n".join(lines).strip(), state
 
 

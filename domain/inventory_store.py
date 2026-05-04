@@ -286,6 +286,54 @@ def merge_stock(user_id: str, new_items: list, source_file: str) -> tuple:
 
 
 # ---------------------------------------------------------------------------
+# Equipment linking for stock items
+# ---------------------------------------------------------------------------
+
+def link_stock_to_equipment(user_id: str, stock_items: list) -> tuple:
+    """
+    For each stock item that has a linked_equipment text, try to match it to
+    an equipment record in memory using simple substring matching.
+    Adds an equipment_link dict to matched items.
+    Returns (updated_items, linked_count).
+    """
+    equipment = get_all_equipment(user_id)
+    if not equipment or not stock_items:
+        return stock_items, 0
+
+    eq_names = [
+        (e.get("equipment_name") or e.get("system") or "").lower().strip()
+        for e in equipment
+    ]
+
+    linked_count = 0
+    updated = []
+    for item in stock_items:
+        item = dict(item)
+        linked_text = (item.get("linked_equipment") or "").lower().strip()
+        if linked_text and not item.get("equipment_link"):
+            matched_eq = None
+            for i, eq_name in enumerate(eq_names):
+                if not eq_name:
+                    continue
+                if linked_text == eq_name or linked_text in eq_name or eq_name in linked_text:
+                    matched_eq = equipment[i]
+                    break
+            if matched_eq:
+                item["equipment_link"] = {
+                    "equipment_name": matched_eq.get("equipment_name") or matched_eq.get("system") or "",
+                    "confidence": 0.85,
+                }
+                linked_count += 1
+        updated.append(item)
+
+    logger.info(
+        "inventory_store: link_stock_to_equipment user=%s items=%d linked=%d",
+        user_id, len(stock_items), linked_count,
+    )
+    return updated, linked_count
+
+
+# ---------------------------------------------------------------------------
 # Reset
 # ---------------------------------------------------------------------------
 

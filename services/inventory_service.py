@@ -153,11 +153,21 @@ _STOCK_COL_MAP = {
     "part code": "part_number",
     "ref": "part_number",
     "reference": "part_number",
+    "article no": "part_number",
+    "article number": "part_number",
+    "mat no": "part_number",
+    "mat. no": "part_number",
+    "material no": "part_number",
+    "material number": "part_number",
     "description": "description",
     "desc": "description",
     "item": "description",
     "item description": "description",
+    "item name": "description",
+    "part name": "description",
     "name": "description",
+    "material": "description",
+    "material description": "description",
     "qty": "quantity_onboard",
     "quantity": "quantity_onboard",
     "qty onboard": "quantity_onboard",
@@ -166,12 +176,21 @@ _STOCK_COL_MAP = {
     "on hand": "quantity_onboard",
     "in stock": "quantity_onboard",
     "onboard": "quantity_onboard",
+    "stock qty": "quantity_onboard",
+    "stock quantity": "quantity_onboard",
+    "qty in stock": "quantity_onboard",
+    "available qty": "quantity_onboard",
+    "available": "quantity_onboard",
     "unit": "unit",
     "uom": "unit",
     "units": "unit",
     "location": "storage_location",
     "loc": "storage_location",
     "bin": "storage_location",
+    "bin no": "storage_location",
+    "bin number": "storage_location",
+    "shelf": "storage_location",
+    "shelf no": "storage_location",
     "storage location": "storage_location",
     "store": "storage_location",
     "storage": "storage_location",
@@ -1024,6 +1043,8 @@ def format_inventory_response(
     st_merged: int,
     parse_error: bool = False,
     skipped_rows: int = 0,
+    st_linked: int = 0,
+    yacht_id: str = "H3",
 ) -> str:
     eq_total = eq_added + eq_merged
     st_total = st_added + st_merged
@@ -1034,9 +1055,10 @@ def format_inventory_response(
         return _INVENTORY_NEEDS_REVIEW
 
     skip_note = f" Skipped {skipped_rows} header/section rows." if skipped_rows > 0 else ""
+    yid = yacht_id.upper()
 
     _eq_actions = (
-        "RECOMMENDED ACTIONS:\n"
+        "ACTIONS:\n"
         "• Ask \"show equipment\"\n"
         "• Ask \"what equipment do we have from <make>?\"\n"
         "• Ask \"what is <model/serial>?\""
@@ -1049,12 +1071,11 @@ def format_inventory_response(
                 "DECISION:\nEQUIPMENT LIST PARTIALLY IMPORTED\n\n"
                 f"WHY:\nI imported {eq_total} equipment records, "
                 f"but some rows could not be structured safely.{skip_note}\n\n"
-                "RECOMMENDED ACTIONS:\n"
+                "ACTIONS:\n"
                 "• Upload Excel or CSV for better results\n"
                 "• Or upload the list in smaller sections"
             )
         if eq_merged > 0:
-            # Second or later import — some existing records were matched/updated
             if eq_added > 0:
                 why = (
                     f"Added {eq_added} new equipment records and updated {eq_merged} "
@@ -1065,32 +1086,41 @@ def format_inventory_response(
                     f"Updated {eq_merged} existing records — no new equipment added.{skip_note}"
                 )
             return f"DECISION:\nEQUIPMENT LIST UPDATED\n\nWHY:\n{why}\n\n{_eq_actions}"
-        # eq_merged == 0: all records are new (first import or entirely new equipment)
         why = f"Imported {eq_added} new equipment records into vessel memory.{skip_note}"
         return f"DECISION:\nEQUIPMENT LIST IMPORTED\n\nWHY:\n{why}\n\n{_eq_actions}"
 
-    # Stock-only or mixed import
+    # Stock-only import
+    if st_total > 0 and eq_total == 0:
+        linked_note = f" {st_linked} linked to equipment." if st_linked > 0 else ""
+        partial_note = (
+            "\nSome records may be missing due to formatting issues in the source."
+        ) if parse_error else ""
+        return (
+            "DECISION:\nSTOCK IMPORTED\n\n"
+            f"WHY:\nImported {st_total} stock records for {yid}.{linked_note}{partial_note}\n\n"
+            "ACTIONS:\n"
+            "• Ask \"show stock\"\n"
+            "• Ask \"do we have <part> onboard?\"\n"
+            "• Ask \"show spares for <system>\""
+        )
+
+    # Mixed equipment + stock import
     parts = []
     if eq_total:
         parts.append(f"{eq_added} new + {eq_merged} updated equipment records")
     if st_total:
-        parts.append(f"{st_added} new + {st_merged} updated stock items")
-    if not parts:
-        parts.append("no records recognised")
-
+        linked_note = f" ({st_linked} linked to equipment)" if st_linked > 0 else ""
+        parts.append(f"{st_added} new + {st_merged} updated stock items{linked_note}")
     summary = "; ".join(parts)
     partial_note = (
-        "\n\nNote: some records may be missing due to formatting issues in the source. "
-        "If the count looks low, try re-uploading as Excel or CSV."
+        "\nSome records may be missing due to formatting issues in the source."
     ) if parse_error else ""
 
     return (
         "DECISION:\nINVENTORY IMPORTED\n\n"
-        f"WHY:\nImported {summary}. "
-        f"Fields have been normalised from source data.{partial_note}\n\n"
-        "RECOMMENDED ACTIONS:\n"
+        f"WHY:\nImported {summary}.{partial_note}\n\n"
+        "ACTIONS:\n"
         "• Ask \"do we have <part> onboard?\"\n"
         "• Ask \"show spares for <system>\"\n"
-        "• Ask \"show equipment\" or \"show stock\"\n"
-        "• Ask \"what is this fitted to?\""
+        "• Ask \"show equipment\" or \"show stock\""
     )
