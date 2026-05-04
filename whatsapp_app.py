@@ -18,7 +18,7 @@ from services.anthropic_vision_service import (
     extract_commercial_document_from_images,
     summarise_operational_note_from_image,
 )
-from domain.compare import compare_documents
+from domain.compare import compare_documents, build_line_item_comparison
 from domain.session_store import user_id_from_phone, load_user_state, save_user_state
 from domain.session_manager import (
     make_document_record,
@@ -1001,6 +1001,224 @@ def build_what_should_i_do_response(comparison_data: Optional[dict]) -> str:
     actions = _build_actions(doc_type_a, doc_type_b, supplier_a, supplier_b, delta)
 
     return _make_response(decision="HERE IS WHAT TO DO NEXT", why=why, actions=actions)
+
+
+_LINE_ITEM_COMPARISON_TRIGGERS = (
+    "are the parts the same", "are the quantities the same",
+    "are the parts and quantities", "parts the same", "quantities the same",
+    "what is different between", "what differs between", "like-for-like",
+    "are any parts missing", "are any part numbers",
+    "do the part numbers match",
+)
+
+_MARKET_SAMPLE_TRIGGERS = (
+    "sample the expensive", "check the expensive items against",
+)
+
+
+def build_line_item_comparison_response(comparison_data: Optional[dict]) -> str:
+    """Line-level part/qty comparison for 'are the parts the same?' follow-ups."""
+    if not comparison_data:
+        return _no_comparison_response()
+
+    doc_a = comparison_data["doc_a"]
+    doc_b = comparison_data["doc_b"]
+    supplier_a = (doc_a.get("supplier_name") or "Quote A").strip()
+    supplier_b = (doc_b.get("supplier_name") or "Quote B").strip()
+
+    li = build_line_item_comparison(doc_a, doc_b)
+    matched = li["matched"]
+    only_in_a = li["only_in_a"]
+    only_in_b = li["only_in_b"]
+    has_pn_diffs = li["has_pn_differences"]
+    has_qty_diffs = li["has_qty_differences"]
+
+    if has_pn_diffs or has_qty_diffs or only_in_a or only_in_b:
+        decision = "PARTS ARE MOSTLY ALIGNED, BUT NOT PERFECTLY IDENTICAL"
+    else:
+        decision = "PARTS AND QUANTITIES ARE ALIGNED"
+
+    cnt_a = len(doc_a.get("line_items") or [])
+    cnt_b = len(doc_b.get("line_items") or [])
+    why_parts = [f"{supplier_a} has {cnt_a} line items; {supplier_b} has {cnt_b}."]
+    if has_pn_diffs:
+        why_parts.append(
+            "Several part numbers differ and should be verified as superseded or "
+            "equivalent references before ordering."
+        )
+    if only_in_a:
+        why_parts.append(f"{len(only_in_a)} item(s) in {supplier_a} have no clear match in {supplier_b}.")
+    if only_in_b:
+        why_parts.append(f"{len(only_in_b)} item(s) in {supplier_b} have no clear match in {supplier_a}.")
+    why = " ".join(why_parts)
+
+    part_lines = []
+    for m in matched[:15]:
+        item_a = m["item_a"]
+        item_b = m["item_b"]
+        pn_a = m["pn_a"]
+        pn_b = m["pn_b"]
+        total_a = item_a.get("line_total")
+        total_b = item_b.get("line_total")
+        desc = (item_a.get("description") or "").strip()[:50]
+
+        if m["pn_differs"]:
+            note = f"part numbers differ ({pn_a} vs {pn_b}) — check equivalence"
+        elif m["qty_differs"]:
+            note = f"qty differs ({item_a.get('quantity')} vs {item_b.get('quantity')})"
+        elif total_a is not None and total_b is not None:
+            if total_b < total_a:
+                note = f"same qty, {supplier_b[:14]} cheaper"
+            elif total_b > total_a:
+                note = f"same qty, {supplier_a[:14]} cheaper"
+            else:
+                note = "same qty and price"
+        else:
+            note = "matched"
+        part_lines.append(f"- {desc}: {note}")
+
+    for item in only_in_a[:3]:
+        part_lines.append(f"- {(item.get('description') or '')[:50]}: only in {supplier_a}")
+    for item in only_in_b[:3]:
+        part_lines.append(f"- {(item.get('description') or '')[:50]}: only in {supplier_b}")
+
+    actions = []
+    if has_pn_diffs:
+        actions.append("Confirm whether the differing part numbers are valid replacements or superseded references")
+    actions.append("Compare ex-VAT totals separately from inc-VAT totals before deciding")
+    actions.append("Confirm shipping and delivery terms for both suppliers")
+    if has_pn_diffs:
+        actions.append("If part equivalence is confirmed, choose on total price and delivery reliability")
+
+    result = f"DECISION:\n{decision}\n\nWHY:\n{why}"
+    if part_lines:
+        result += "\n\nPART CHECK:\n" + "\n".join(part_lines)
+    result += "\n\nACTIONS:\n" + "\n".join(f"• {a}" for a in actions[:4])
+    return result
+
+
+def build_procurement_recommendation(comparison_data: Optional[dict]) -> str:
+    """Procurement recommendation for 'which quote should I go for?' follow-ups."""
+    if not comparison_data:
+        return _no_comparison_response()
+
+    doc_a = comparison_data["doc_a"]
+    doc_b = comparison_data["doc_b"]
+    comparison = comparison_data["comparison"]
+
+    supplier_a = (doc_a.get("supplier_name") or "Quote A").strip()
+    supplier_b = (doc_b.get("supplier_name") or "Quote B").strip()
+    total_a = comparison.get("total_a")
+    total_b = comparison.get("total_b")
+    subtotal_a = doc_a.get("subtotal")
+    tax_a = doc_a.get("tax")
+    currency_a = (doc_a.get("currency") or "").upper()
+    currency_b = (doc_b.get("currency") or "").upper()
+    currency = currency_a or currency_b
+
+    li = build_line_item_comparison(doc_a, doc_b)
+    has_pn_diffs = li["has_pn_differences"]
+
+    cheaper = costlier = None
+    diff_pct = None
+    if total_a is not None and total_b is not None:
+        if total_a <= total_b:
+            cheaper, costlier = supplier_a, supplier_b
+            diff_pct = (total_b - total_a) / total_a * 100 if total_a != 0 else None
+        else:
+            cheaper, costlier = supplier_b, supplier_a
+            diff_pct = (total_a - total_b) / total_b * 100 if total_b != 0 else None
+
+    if cheaper and has_pn_diffs:
+        decision = f"{cheaper.upper()} APPEARS BETTER VALUE — CONFIRM PART NUMBER DIFFERENCES BEFORE ORDERING"
+    elif cheaper:
+        decision = f"{cheaper.upper()} IS LOWER COST — VERIFY SCOPE BEFORE ORDERING"
+    else:
+        decision = "UNABLE TO COMPARE — TOTALS MISSING"
+
+    why_parts = []
+    if total_a is not None and total_b is not None:
+        a_vat = " (inc VAT)" if tax_a else ""
+        why_parts.append(f"{supplier_a}: {currency_a or currency} {total_a:,.2f}{a_vat}.")
+        why_parts.append(f"{supplier_b}: {currency_b or currency} {total_b:,.2f}.")
+    if diff_pct is not None:
+        why_parts.append(f"{costlier} is {diff_pct:.1f}% higher.")
+    if subtotal_a and tax_a:
+        why_parts.append(
+            f"Compare {supplier_a} ex-VAT ({currency_a} {subtotal_a:,.2f}) "
+            f"against {supplier_b} total for a like-for-like comparison."
+        )
+    if has_pn_diffs:
+        why_parts.append(
+            "Some part numbers differ and must be confirmed as equivalent before committing."
+        )
+    why = " ".join(why_parts)
+
+    actions = []
+    if has_pn_diffs:
+        actions.append("Confirm the differing part numbers are equivalent or superseded references")
+    if subtotal_a and tax_a:
+        actions.append(
+            f"Compare {supplier_a} ex-VAT ({currency_a} {subtotal_a:,.2f}) "
+            f"against {supplier_b} total"
+        )
+    else:
+        actions.append("Confirm delivery address, freight terms, and lead time for each supplier")
+    if cheaper:
+        actions.append(f"If scope and part equivalence are confirmed, {cheaper} appears better value")
+    actions.append("Confirm inbound freight, duties, and any applicable taxes before approving")
+
+    return _make_response(decision=decision, why=why, actions=actions[:4])
+
+
+def _handle_quote_compare_followup(
+    incoming: str, comparison_data: Optional[dict], state: dict
+) -> str:
+    """Route a quote-comparison follow-up to the appropriate response builder."""
+    if not comparison_data:
+        return _make_response(
+            decision="NO ACTIVE COMPARISON",
+            why="There is no completed quote comparison to follow up on.",
+            actions=[
+                "Upload two or more quotes",
+                "Send 'compare quotes' to run the comparison first",
+            ],
+        )
+
+    t = incoming.lower()
+
+    if any(trigger in t for trigger in _LINE_ITEM_COMPARISON_TRIGGERS):
+        return build_line_item_comparison_response(comparison_data)
+
+    if any(trigger in t for trigger in _MARKET_SAMPLE_TRIGGERS):
+        doc_a = comparison_data["doc_a"]
+        doc_b = comparison_data["doc_b"]
+        sup_a = (doc_a.get("supplier_name") or "Quote A").strip()
+        sup_b = (doc_b.get("supplier_name") or "Quote B").strip()
+        currency = (doc_a.get("currency") or doc_b.get("currency") or "").upper()
+        all_items = sorted(
+            (i for i in (doc_a.get("line_items") or []) if i.get("line_total") and (i.get("description") or "").strip()),
+            key=lambda x: x.get("line_total") or 0,
+            reverse=True,
+        )
+        top_items = all_items[:5]
+        if not top_items:
+            return build_procurement_recommendation(comparison_data)
+        ctx_parts = [f"Comparing quotes: {sup_a} vs {sup_b}. Highest-value items to assess:"]
+        for item in top_items:
+            desc = (item.get("description") or "").strip()
+            qty = item.get("quantity")
+            total = item.get("line_total")
+            line = f"- {desc}"
+            if qty:
+                line += f" x{qty}"
+            if total:
+                line += f" = {currency} {total:,.2f}"
+            ctx_parts.append(line)
+        query = "\n".join(ctx_parts) + f"\n\nUser: {incoming}"
+        return check_market_price(query, allow_broad_estimate=True)
+
+    return build_procurement_recommendation(comparison_data)
 
 
 def _handle_action_request(
@@ -3218,6 +3436,11 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     # Commercial context computed early — needed for follow-up routing decisions.
     active = get_active_session(state)
     comparison_data = active.get("last_comparison") if active else None
+
+    if intent == "quote_compare_followup":
+        if comparison_data:
+            return _handle_quote_compare_followup(incoming, comparison_data, state), state
+        return _handle_quote_compare_intent(state)
 
     # Context-aware follow-up routing:
     if intent in ("what_to_do", "compliance_followup", "commercial_followup"):

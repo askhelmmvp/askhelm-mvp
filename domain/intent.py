@@ -235,6 +235,30 @@ _INVOICE_CLARIFICATION_SUBSTRINGS = [
     "what should i check",
 ]
 
+# Quote comparison follow-up phrases — checked BEFORE market-price and compliance
+# so they are never mis-routed to the RAG or market-price engines.
+_QUOTE_COMPARE_FOLLOWUP_SUBSTRINGS = [
+    "are the parts the same",
+    "are the quantities the same",
+    "are the parts and quantities",
+    "parts and quantities the same",
+    "what is different between the quotes",
+    "what differs between the quotes",
+    "which quote should i go for",
+    "which supplier should i order from",
+    "who should i order from",
+    "is the cheaper quote like-for-like",
+    "are any parts missing",
+    "are any part numbers different",
+    "do the part numbers match",
+    "what part numbers differ",
+    "parts are the same",
+    "quantities are the same",
+    "sample the expensive items",
+    "check the expensive items against",
+    "which one should i go for",
+]
+
 # Substring triggers for service report / handover retrieval.
 # "handover for OWS", "service reports for main engine", etc.
 _HANDOVER_SUBSTRINGS = [
@@ -747,6 +771,8 @@ _COMMERCIAL_GUARD = {
     "inventory",
     "spares",
     "spare parts",
+    "parts",
+    "quantities",
     "equipment",
     "machinery",
     "fitted to",
@@ -782,7 +808,7 @@ _REMINDER_PREFIXES = (
 def classify_text(text: str) -> str:
     """
     Returns one of:
-      new_session | quote_compare | why_higher | show_added |
+      new_session | quote_compare | quote_compare_followup | why_higher | show_added |
       show_missing | what_to_do | show_extraction | compliance_followup |
       commercial_followup | compliance_question | market_check | reminder |
       show_handover_notes | show_open_actions |
@@ -821,6 +847,10 @@ def classify_text(text: str) -> str:
     for phrase in _MARKET_CHECK_FOLLOWUP_SUBSTRINGS:
         if phrase in t:
             return "market_check_followup"
+
+    for phrase in _QUOTE_COMPARE_FOLLOWUP_SUBSTRINGS:
+        if phrase in t:
+            return "quote_compare_followup"
 
     for phrase in _COMMERCIAL_FOLLOWUP_SUBSTRINGS:
         if phrase in t:

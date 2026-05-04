@@ -113,3 +113,109 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         # True when invoice adds items but ALL of them are ancillary charges
         "all_added_are_ancillary": bool(added_items) and not non_ancillary_added,
     }
+
+
+_EMBEDDED_PN_RE = re.compile(r'\b\d{5,}\b')
+
+
+def _extract_embedded_pn(desc: str) -> str:
+    """First 5+-digit sequence in a description, as a probable part number."""
+    m = _EMBEDDED_PN_RE.search(desc or "")
+    return m.group(0) if m else ""
+
+
+def _desc_without_embedded_pn(desc: str) -> str:
+    """Remove all 5+-digit part-number sequences from a description."""
+    return re.sub(r'\b\d{5,}\b', '', desc or "").strip()
+
+
+def _desc_matches_stripped(a: str, b: str) -> bool:
+    """Match descriptions after stripping embedded part numbers."""
+    return _desc_matches(_desc_without_embedded_pn(a), _desc_without_embedded_pn(b))
+
+
+def build_line_item_comparison(doc_a: dict, doc_b: dict) -> dict:
+    """
+    Compare line items between two documents with embedded-part-number detection.
+
+    Matching priority per item:
+    1. Identical embedded 5+-digit PN → definite match
+    2. Fuzzy description match (existing _desc_matches)
+    3. Fuzzy match after stripping embedded PNs → catches same-item different-PN
+
+    Returns:
+    {
+      "matched": [{"item_a", "item_b", "pn_a", "pn_b", "pn_differs", "qty_differs"}],
+      "only_in_a": [...],
+      "only_in_b": [...],
+      "has_pn_differences": bool,
+      "has_qty_differences": bool,
+    }
+    """
+    items_a = [i for i in (doc_a.get("line_items") or []) if (i.get("description") or "").strip()]
+    items_b = [i for i in (doc_b.get("line_items") or []) if (i.get("description") or "").strip()]
+
+    matched = []
+    remaining_b = list(range(len(items_b)))
+    only_in_a = []
+
+    for item_a in items_a:
+        desc_a = (item_a.get("description") or "").strip()
+        pn_a = _extract_embedded_pn(desc_a)
+
+        found_idx = None
+        pn_match = False
+
+        # 1. Exact embedded-PN match
+        if pn_a:
+            for idx in remaining_b:
+                pn_b_candidate = _extract_embedded_pn((items_b[idx].get("description") or "").strip())
+                if pn_b_candidate and pn_a == pn_b_candidate:
+                    found_idx = idx
+                    pn_match = True
+                    break
+
+        # 2. Fuzzy description match
+        if found_idx is None:
+            for idx in remaining_b:
+                desc_b = (items_b[idx].get("description") or "").strip()
+                if _desc_matches(desc_a, desc_b):
+                    found_idx = idx
+                    break
+
+        # 3. Fuzzy match after stripping embedded PNs (same item, different PN)
+        if found_idx is None:
+            for idx in remaining_b:
+                desc_b = (items_b[idx].get("description") or "").strip()
+                if _desc_matches_stripped(desc_a, desc_b):
+                    found_idx = idx
+                    break
+
+        if found_idx is not None:
+            remaining_b.remove(found_idx)
+            item_b = items_b[found_idx]
+            pn_b = _extract_embedded_pn((item_b.get("description") or "").strip())
+            pn_differs = not pn_match and bool(pn_a and pn_b and pn_a != pn_b)
+            qty_a = item_a.get("quantity")
+            qty_b = item_b.get("quantity")
+            qty_differs = qty_a is not None and qty_b is not None and qty_a != qty_b
+            matched.append({
+                "item_a": item_a,
+                "item_b": item_b,
+                "pn_a": pn_a,
+                "pn_b": pn_b,
+                "pn_differs": pn_differs,
+                "qty_differs": qty_differs,
+            })
+        else:
+            only_in_a.append(item_a)
+
+    only_in_b = [items_b[idx] for idx in remaining_b]
+
+    return {
+        "matched": matched,
+        "only_in_a": only_in_a,
+        "only_in_b": only_in_b,
+        "has_pn_differences": any(m["pn_differs"] for m in matched),
+        "has_qty_differences": any(m["qty_differs"] for m in matched),
+    }
