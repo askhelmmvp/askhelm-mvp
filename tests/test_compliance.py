@@ -388,7 +388,8 @@ class TestComplianceFollowUpBehaviour(unittest.TestCase):
         answer_compliance_followup_question("is overdue fire pump testing a non-conformity?", chunks)
 
         call_kwargs = mock_client.messages.create.call_args[1]
-        system_prompt = call_kwargs["system"]
+        _sys = call_kwargs["system"]
+        system_prompt = _sys[0]["text"] if isinstance(_sys, list) else _sys
 
         # Must instruct not to repeat the decision or definition
         self.assertIn("Do NOT repeat", system_prompt)
@@ -504,7 +505,8 @@ class TestComplianceGrounding(unittest.TestCase):
         answer_compliance_question("what does marpol annex vi say about ballast water?", chunks)
 
         call_kwargs = mock_client.messages.create.call_args[1]
-        system_prompt = call_kwargs["system"]
+        _sys = call_kwargs["system"]
+        system_prompt = _sys[0]["text"] if isinstance(_sys, list) else _sys
 
         # System prompt must explicitly forbid external knowledge
         self.assertIn("Do NOT use training knowledge", system_prompt)

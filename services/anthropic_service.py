@@ -22,7 +22,7 @@ def extract_commercial_document_with_claude(text: str) -> dict:
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=3000,
-        system=(
+        system=[{"type": "text", "cache_control": {"type": "ephemeral"}, "text": (
             "You extract yacht commercial documents into strict JSON.\n"
             "Return JSON only.\n"
             "Do not add commentary.\n"
@@ -78,7 +78,7 @@ def extract_commercial_document_with_claude(text: str) -> dict:
             "    }\n"
             "  ]\n"
             "}"
-        ),
+        )}],
         messages=[
             {
                 "role": "user",
@@ -115,7 +115,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=400,
-        system=(
+        system=[{"type": "text", "cache_control": {"type": "ephemeral"}, "text": (
             "You are answering maritime compliance questions using ONLY the regulation excerpts provided.\n"
             "\n"
             "STRICT RULES — NO EXCEPTIONS:\n"
@@ -147,7 +147,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
             "• <action 2 — from excerpts only>\n"
             "• <action 3 — only if needed>\n"
             "• <action 4 — only if needed>"
-        ),
+        )}],
         messages=[
             {
                 "role": "user",
@@ -179,7 +179,7 @@ def answer_compliance_followup_question(topic: str, chunks: List[Dict[str, Any]]
     response = client.messages.create(
         model="claude-sonnet-4-6",
         max_tokens=300,
-        system=(
+        system=[{"type": "text", "cache_control": {"type": "ephemeral"}, "text": (
             "You are a Chief Engineer giving an action brief to the crew.\n"
             "The crew already knows the regulation and the decision. They want to know what to DO.\n"
             "\n"
@@ -202,7 +202,7 @@ def answer_compliance_followup_question(topic: str, chunks: List[Dict[str, Any]]
             "• <action 2>\n"
             "• <action 3>\n"
             "• <action 4 — only if needed>"
-        ),
+        )}],
         messages=[
             {
                 "role": "user",

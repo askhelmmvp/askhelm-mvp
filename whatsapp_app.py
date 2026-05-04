@@ -60,7 +60,7 @@ from services.compliance_profile import (
     add_vessel_document,
     list_vessel_documents,
 )
-from services.market_price_service import check_market_price, commercial_followup_advice
+from services.market_price_service import check_market_price, commercial_followup_advice, invoice_approval_checks
 from domain.component_memory import (
     extract_components_from_doc,
     extract_components_from_text,
@@ -1042,6 +1042,50 @@ def _handle_action_request(
         return commercial_followup_advice(query, "\n\n".join(parts))
 
     return _no_comparison_response()
+
+
+def _handle_invoice_clarification(message: str, state: dict) -> str:
+    """
+    Handle a follow-up clarification when the user explains a pending invoice
+    has no matching quote (instalment, consumption, or agreement-based payment).
+    Provides practical approval checks rather than quote-comparison advice.
+    """
+    # Prefer the most recently pending unmatched invoice; fall back to latest doc
+    doc_record = None
+    pending = state.get("pending_invoice") or {}
+    if pending.get("doc_record"):
+        doc_record = pending["doc_record"]
+    else:
+        for doc in reversed(state.get("documents") or []):
+            if (doc.get("doc_type") or "") in ("invoice", "proforma"):
+                doc_record = doc
+                break
+
+    ctx_parts = []
+    if doc_record:
+        supplier = (doc_record.get("supplier_name") or "").strip()
+        total = doc_record.get("total")
+        currency = (doc_record.get("currency") or "").strip()
+        if supplier:
+            ctx_parts.append(f"Invoice from: {supplier}")
+        if total is not None:
+            ctx_parts.append(f"Total: {total} {currency}".strip())
+        for item in (doc_record.get("line_items") or [])[:8]:
+            desc = (item.get("description") or "").strip()
+            line_total = item.get("line_total")
+            if desc and line_total is not None:
+                ctx_parts.append(f"  - {desc}: {line_total} {currency}".strip())
+            elif desc:
+                ctx_parts.append(f"  - {desc}")
+
+    invoice_ctx = "\n".join(ctx_parts)
+    logger.info(
+        "invoice_clarification: supplier=%r total=%r message=%r",
+        (doc_record or {}).get("supplier_name", ""),
+        (doc_record or {}).get("total", ""),
+        message[:80],
+    )
+    return invoice_approval_checks(invoice_ctx, message)
 
 
 _VAGUE_DOC_REF_WORDS = frozenset({"this", "these", "it", "them"})
@@ -3293,6 +3337,16 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if intent == "spares_query":
         return _handle_spares_query(incoming, state)
 
+    if intent == "invoice_clarification":
+        _pending_inv = state.get("pending_invoice")
+        _has_inv_doc = any(
+            (d.get("doc_type") or "") in ("invoice", "proforma")
+            for d in (state.get("documents") or [])
+        )
+        if _pending_inv or _has_inv_doc:
+            return _handle_invoice_clarification(incoming, state), state
+        return _handle_action_request(incoming, last_ctx, comparison_data, state), state
+
     if intent == "equipment_query":
         return _handle_equipment_query(incoming, state)
 
@@ -3348,6 +3402,20 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             if _comp:
                 state = merge_components(_comp, state)
             return answer, state
+
+    # Unknown intent — but if we have invoice context and the message is substantive,
+    # treat it as invoice clarification rather than returning a generic fallback.
+    if intent == "unknown":
+        _has_inv = bool(state.get("pending_invoice")) or (
+            last_ctx.get("document_type") in ("invoice", "proforma")
+        )
+        if not _has_inv:
+            _has_inv = any(
+                (d.get("doc_type") or "") in ("invoice", "proforma")
+                for d in (state.get("documents") or [])
+            )
+        if _has_inv and len(incoming.split()) >= 3:
+            return _handle_invoice_clarification(incoming, state), state
 
     return _make_response(
         decision="DOCUMENT NOT UNDERSTOOD",

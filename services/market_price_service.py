@@ -190,7 +190,7 @@ def _assess_oem_part_price(query: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=200,
-            system=_OEM_ASSESSMENT_PROMPT,
+            system=[{"type": "text", "text": _OEM_ASSESSMENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
@@ -465,7 +465,7 @@ def _assess_commodity_price(query: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=200,
-            system=_COMMODITY_ASSESSMENT_PROMPT,
+            system=[{"type": "text", "text": _COMMODITY_ASSESSMENT_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
@@ -654,7 +654,7 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=300,
-            system=_SYSTEM_PROMPT,
+            system=[{"type": "text", "text": _SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
@@ -820,7 +820,7 @@ def commercial_followup_advice(query: str, context_summary: str) -> str:
         response = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=300,
-            system=system,
+            system=[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": full_query}],
             timeout=60.0,
         )
@@ -834,4 +834,70 @@ def commercial_followup_advice(query: str, context_summary: str) -> str:
             "• Confirm the quoted price is acceptable\n"
             "• Check vessel requirements for quantity\n"
             "• Place order once satisfied"
+        )
+
+
+_INVOICE_APPROVAL_SYSTEM = """\
+You are a yacht refit and procurement manager advising an owner's representative or Chief Engineer \
+on how to approve an invoice that is based on an existing agreement, instalment schedule, \
+or consumption measurement — not a quote-to-invoice comparison.
+
+RULES:
+1. Do NOT ask the crew to obtain a quote — this invoice is explicitly agreement-based.
+2. Extract the key financial checks from the invoice line items: rates, quantities, \
+durations, agreed methods.
+3. Reference specific figures from the invoice context where provided.
+4. Keep WHY to 2-3 lines maximum.
+5. Maximum 5 ACTIONS bullets. Be specific to the invoice content.
+6. Tone: Chief Engineer / owner's representative, direct and practical.
+
+Respond in this exact format — nothing before, nothing after:
+DECISION:
+<short statement — e.g. NO QUOTE COMPARISON REQUIRED — VALIDATE AGAINST AGREEMENT>
+
+WHY:
+<2-3 lines explaining what kind of invoice this is and the key validation points>
+
+ACTIONS:
+• <specific check 1>
+• <specific check 2>
+• <specific check 3>
+• <optional specific check 4>
+• <optional specific check 5>
+"""
+
+
+def invoice_approval_checks(invoice_context: str, user_message: str) -> str:
+    """
+    Generate practical approval checks for an agreement-based, instalment, or consumption
+    invoice where no quote comparison applies.
+    """
+    content = (
+        f"Invoice details:\n{invoice_context}\n\nUser clarification: {user_message}"
+        if invoice_context
+        else f"User clarification: {user_message}"
+    )
+    logger.info(
+        "invoice_approval_checks: ctx_len=%d message=%r",
+        len(invoice_context), user_message[:80],
+    )
+    try:
+        response = client.messages.create(
+            model="claude-sonnet-4-6",
+            max_tokens=400,
+            system=[{"type": "text", "text": _INVOICE_APPROVAL_SYSTEM, "cache_control": {"type": "ephemeral"}}],
+            messages=[{"role": "user", "content": content}],
+            timeout=60.0,
+        )
+        return response.content[0].text.strip()
+    except Exception as exc:
+        logger.exception("invoice_approval_checks failed: %s", exc)
+        return (
+            "DECISION:\nVALIDATE AGAINST AGREEMENT\n\n"
+            "WHY:\nThis invoice appears to be on an agreement or consumption basis. "
+            "No quote comparison is needed — verify against the refit agreement.\n\n"
+            "ACTIONS:\n"
+            "• Verify rates and quantities match the refit agreement\n"
+            "• Check the invoice total is consistent with the agreed schedule\n"
+            "• Obtain owner's representative approval before paying"
         )
