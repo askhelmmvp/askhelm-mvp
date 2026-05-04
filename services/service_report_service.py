@@ -7,6 +7,7 @@ import hashlib
 import logging
 from dotenv import load_dotenv
 from anthropic import Anthropic
+from services.llm_usage_logger import log_llm_call
 
 load_dotenv(dotenv_path=".env")
 logger = logging.getLogger(__name__)
@@ -109,6 +110,7 @@ def extract_service_report_from_text(text: str) -> dict:
             messages=[{"role": "user", "content": text[:10000]}],
             timeout=90.0,
         )
+        log_llm_call("service_report_extract_text", response, "claude-sonnet-4-6")
         result = _parse_json_response(response.content[0].text)
         logger.info(
             "service_report text extraction: supplier=%r system=%r open_actions=%d",
@@ -116,6 +118,7 @@ def extract_service_report_from_text(text: str) -> dict:
         )
         return result
     except Exception as exc:
+        log_llm_call("service_report_extract_text", None, "claude-sonnet-4-6", error=exc)
         logger.exception("service_report text extraction failed: %s", exc)
         return {}
 
@@ -147,6 +150,7 @@ def extract_service_report_from_images(image_paths: list) -> dict:
             messages=[{"role": "user", "content": content}],
             timeout=90.0,
         )
+        log_llm_call("service_report_extract_image", response, "claude-sonnet-4-6")
         result = _parse_json_response(response.content[0].text)
         logger.info(
             "service_report image extraction: supplier=%r system=%r open_actions=%d",
@@ -154,6 +158,7 @@ def extract_service_report_from_images(image_paths: list) -> dict:
         )
         return result
     except Exception as exc:
+        log_llm_call("service_report_extract_image", None, "claude-sonnet-4-6", error=exc)
         logger.exception("service_report image extraction failed: %s", exc)
         return {}
 

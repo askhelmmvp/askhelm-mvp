@@ -14,6 +14,7 @@ import logging
 from typing import Optional
 from dotenv import load_dotenv
 from anthropic import Anthropic
+from services.llm_usage_logger import log_llm_call
 
 load_dotenv(dotenv_path=".env")
 logger = logging.getLogger(__name__)
@@ -844,6 +845,7 @@ def _call_claude_inventory(content_text: str, max_tokens: int) -> tuple:
         messages=[{"role": "user", "content": content_text}],
         timeout=90.0,
     )
+    log_llm_call("inventory_extract_text", response, "claude-sonnet-4-6")
     raw = response.content[0].text if response.content else ""
     return _parse_json_safe(raw)
 
@@ -961,6 +963,7 @@ def extract_inventory_from_images(image_paths: list) -> dict:
                 messages=[{"role": "user", "content": content}],
                 timeout=90.0,
             )
+            log_llm_call("inventory_extract_image", response, "claude-sonnet-4-6")
             raw = response.content[0].text if response.content else ""
             result, parse_error = _parse_json_safe(raw)
             if parse_error:
@@ -978,6 +981,7 @@ def extract_inventory_from_images(image_paths: list) -> dict:
                 chunk_idx, len(eq), len(st), parse_error,
             )
         except Exception as exc:
+            log_llm_call("inventory_extract_image", None, "claude-sonnet-4-6", error=exc)
             logger.warning(
                 "inventory image: chunk_index=%d inventory_json_parse_failed=True skipped error=%s",
                 chunk_idx, exc,

@@ -4,6 +4,7 @@ import base64
 from typing import List
 from dotenv import load_dotenv
 from anthropic import Anthropic
+from services.llm_usage_logger import log_llm_call
 
 load_dotenv(dotenv_path=".env")
 
@@ -96,6 +97,7 @@ def extract_commercial_document_from_images(image_paths: List[str]) -> dict:
         messages=[{"role": "user", "content": content}],
         timeout=90.0,
     )
+    log_llm_call("vision_extract_document", response, "claude-sonnet-4-6")
 
     raw = response.content[0].text.strip()
 
@@ -163,6 +165,7 @@ def summarise_operational_note_from_image(image_path: str) -> dict:
         messages=[{"role": "user", "content": content}],
         timeout=90.0,
     )
+    log_llm_call("vision_operational_note", response, "claude-sonnet-4-6")
 
     raw = response.content[0].text.strip()
     if raw.startswith("```"):

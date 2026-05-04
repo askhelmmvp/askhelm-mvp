@@ -3,6 +3,7 @@ import json
 from typing import List, Dict, Any
 from dotenv import load_dotenv
 from anthropic import Anthropic
+from services.llm_usage_logger import log_llm_call
 
 NOT_COVERED_FALLBACK = (
     "DECISION: Not explicitly covered in the loaded documents.\n"
@@ -90,6 +91,7 @@ def extract_commercial_document_with_claude(text: str) -> dict:
             }
         ],
     )
+    log_llm_call("extract_document", response, "claude-sonnet-4-6")
 
     raw = response.content[0].text.strip()
 
@@ -160,6 +162,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
             }
         ],
     )
+    log_llm_call("compliance_answer", response, "claude-sonnet-4-6")
 
     return response.content[0].text.strip()
 
@@ -218,5 +221,6 @@ def answer_compliance_followup_question(topic: str, chunks: List[Dict[str, Any]]
             }
         ],
     )
+    log_llm_call("compliance_followup", response, "claude-sonnet-4-6")
 
     return response.content[0].text.strip()

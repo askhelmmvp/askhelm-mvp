@@ -11,6 +11,7 @@ import logging
 from typing import Optional
 from dotenv import load_dotenv
 from anthropic import Anthropic
+from services.llm_usage_logger import log_llm_call
 
 load_dotenv(dotenv_path=".env")
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ def extract_manual_metadata_from_text(text: str, filename: str = "") -> dict:
             messages=[{"role": "user", "content": user_content}],
             timeout=60.0,
         )
+        log_llm_call("manual_extract_text", response, "claude-sonnet-4-6")
         result = _parse_json(response.content[0].text)
         logger.info(
             "manual_service text extraction: manufacturer=%r system=%r topics=%d",
@@ -121,6 +123,7 @@ def extract_manual_metadata_from_text(text: str, filename: str = "") -> dict:
         )
         return result
     except Exception as exc:
+        log_llm_call("manual_extract_text", None, "claude-sonnet-4-6", error=exc)
         logger.exception("manual_service text extraction failed: %s", exc)
         return {}
 
@@ -147,6 +150,7 @@ def extract_manual_metadata_from_images(image_paths: list, filename: str = "") -
             messages=[{"role": "user", "content": content}],
             timeout=60.0,
         )
+        log_llm_call("manual_extract_image", response, "claude-sonnet-4-6")
         result = _parse_json(response.content[0].text)
         logger.info(
             "manual_service image extraction: manufacturer=%r system=%r",
@@ -154,6 +158,7 @@ def extract_manual_metadata_from_images(image_paths: list, filename: str = "") -
         )
         return result
     except Exception as exc:
+        log_llm_call("manual_extract_image", None, "claude-sonnet-4-6", error=exc)
         logger.exception("manual_service image extraction failed: %s", exc)
         return {}
 
@@ -319,7 +324,9 @@ def answer_manual_question(question: str, chunks: list, manual_label: str = "") 
             }],
             timeout=45.0,
         )
+        log_llm_call("manual_qa", response, "claude-sonnet-4-6")
         return response.content[0].text.strip()
     except Exception as exc:
+        log_llm_call("manual_qa", None, "claude-sonnet-4-6", error=exc)
         logger.exception("manual_service: Q&A failed: %s", exc)
         return "Unable to answer from manual at this time."

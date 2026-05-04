@@ -3,6 +3,7 @@ import os
 import logging
 from dotenv import load_dotenv
 from anthropic import Anthropic
+from services.llm_usage_logger import log_llm_call
 
 load_dotenv(dotenv_path=".env")
 
@@ -194,12 +195,14 @@ def _assess_oem_part_price(query: str) -> str:
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
+        log_llm_call("oem_price_assessment", response, "claude-sonnet-4-6")
         result = response.content[0].text.strip()
         if result:
             logger.info("OEM assessment: response_length=%d", len(result))
             return result
         logger.warning("OEM assessment: empty response, using fallback")
     except Exception as exc:
+        log_llm_call("oem_price_assessment", None, "claude-sonnet-4-6", error=exc)
         logger.exception("OEM assessment failed: %s", exc)
     return _INSUFFICIENT_RESPONSE
 
@@ -469,12 +472,14 @@ def _assess_commodity_price(query: str) -> str:
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
+        log_llm_call("commodity_price_assessment", response, "claude-sonnet-4-6")
         result = response.content[0].text.strip()
         if result:
             logger.info("Commodity assessment: response_length=%d", len(result))
             return result
         logger.warning("Commodity assessment: empty response, using fallback")
     except Exception as exc:
+        log_llm_call("commodity_price_assessment", None, "claude-sonnet-4-6", error=exc)
         logger.exception("Commodity assessment failed: %s", exc)
     return _INSUFFICIENT_RESPONSE
 
@@ -658,6 +663,7 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
             messages=[{"role": "user", "content": query}],
             timeout=60.0,
         )
+        log_llm_call("market_price_check", response, "claude-sonnet-4-6")
         raw = response.content[0].text.strip()
         logger.info("Market check: response_length=%d", len(raw))
 
@@ -719,6 +725,7 @@ def check_market_price(query: str, allow_broad_estimate: bool = False) -> str:
         return result
 
     except Exception as exc:
+        log_llm_call("market_price_check", None, "claude-sonnet-4-6", error=exc)
         logger.exception("Market check failed: %s", exc)
         return _INSUFFICIENT_RESPONSE
 
@@ -824,8 +831,10 @@ def commercial_followup_advice(query: str, context_summary: str) -> str:
             messages=[{"role": "user", "content": full_query}],
             timeout=60.0,
         )
+        log_llm_call("commercial_followup", response, "claude-sonnet-4-6")
         return response.content[0].text.strip()
     except Exception as exc:
+        log_llm_call("commercial_followup", None, "claude-sonnet-4-6", error=exc)
         logger.exception("Commercial followup advice failed: %s", exc)
         return (
             "DECISION:\nPROCEED — VERIFY FIRST\n\n"
@@ -889,8 +898,10 @@ def invoice_approval_checks(invoice_context: str, user_message: str) -> str:
             messages=[{"role": "user", "content": content}],
             timeout=60.0,
         )
+        log_llm_call("invoice_approval_checks", response, "claude-sonnet-4-6")
         return response.content[0].text.strip()
     except Exception as exc:
+        log_llm_call("invoice_approval_checks", None, "claude-sonnet-4-6", error=exc)
         logger.exception("invoice_approval_checks failed: %s", exc)
         return (
             "DECISION:\nVALIDATE AGAINST AGREEMENT\n\n"
