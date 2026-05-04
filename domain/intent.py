@@ -217,6 +217,24 @@ _COMMERCIAL_FOLLOWUP_EXACT = {
     "yes proceed",
 }
 
+# Substring triggers for invoice clarification follow-ups.
+# Fires when the user explains an invoice has no matching quote (instalment,
+# consumption, agreement-based) or asks for approval checks on a recent invoice.
+_INVOICE_CLARIFICATION_SUBSTRINGS = [
+    "no quote",
+    "instalment invoice",
+    "installment invoice",
+    "consumption invoice",
+    "against the agreement",
+    "refit agreement",
+    "agreed instalment",
+    "agreed installment",
+    "final instalment",
+    "final installment",
+    "before approving",
+    "what should i check",
+]
+
 # Substring triggers for service report / handover retrieval.
 # "handover for OWS", "service reports for main engine", etc.
 _HANDOVER_SUBSTRINGS = [
@@ -810,6 +828,10 @@ def classify_text(text: str) -> str:
 
     if t_core in _COMMERCIAL_FOLLOWUP_EXACT:
         return "commercial_followup"
+
+    for phrase in _INVOICE_CLARIFICATION_SUBSTRINGS:
+        if phrase in t:
+            return "invoice_clarification"
 
     for phrase in _HANDOVER_SUBSTRINGS:
         if phrase in t:
