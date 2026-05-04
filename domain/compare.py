@@ -60,6 +60,80 @@ def _is_ancillary_item(desc: str) -> bool:
 _is_freight_item = _is_ancillary_item  # backward compatibility alias
 
 
+_GENERIC_QUOTE_WORDS = frozenset({
+    "supply", "of", "and", "for", "the", "with", "per", "set",
+    "unit", "pcs", "qty", "price", "total", "cost", "item",
+    "including", "includes", "service", "repair", "installation",
+    "part", "parts", "spare", "spares", "number", "ref",
+    "inc", "vat", "labour", "material", "materials",
+})
+
+
+def _quote_keywords(doc: dict) -> frozenset:
+    """Distinctive words from all line-item descriptions in a quote document."""
+    words: set = set()
+    for item in (doc.get("line_items") or []):
+        desc = item.get("description") or ""
+        normalized = _normalize_desc(desc)
+        words.update(w for w in normalized.split() if len(w) > 2 and w not in _GENERIC_QUOTE_WORDS)
+    # Supplier name adds identity signal
+    supplier = _normalize_desc(doc.get("supplier_name") or "")
+    words.update(w for w in supplier.split() if len(w) > 2 and w not in _GENERIC_QUOTE_WORDS)
+    return frozenset(words)
+
+
+def _overlap_coefficient(a: frozenset, b: frozenset) -> float:
+    """Overlap coefficient: |A ∩ B| / min(|A|, |B|)."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def filter_quotes_by_relevance(quotes: list, threshold: float = 0.15) -> tuple:
+    """
+    From a list of quote dicts, find the most topically-similar pair and
+    return (selected_quotes, excluded_quotes).
+
+    With only 2 quotes there is nothing to filter — both are always selected.
+    Safety valve: if the best-pair overlap score is < 0.05 the quotes are too
+    sparse to distinguish, so all are passed through unfiltered.
+    """
+    if len(quotes) <= 2:
+        return quotes, []
+
+    kw_sets = [_quote_keywords(q) for q in quotes]
+
+    best_score = -1.0
+    best_pair = (0, 1)
+    for i in range(len(quotes)):
+        for j in range(i + 1, len(quotes)):
+            score = _overlap_coefficient(kw_sets[i], kw_sets[j])
+            if score > best_score:
+                best_score = score
+                best_pair = (i, j)
+
+    if best_score < 0.05:
+        return quotes, []
+
+    best_indices = set(best_pair)
+    selected = []
+    excluded = []
+    for idx, quote in enumerate(quotes):
+        if idx in best_indices:
+            selected.append(quote)
+        else:
+            pair_score = max(
+                _overlap_coefficient(kw_sets[idx], kw_sets[best_pair[0]]),
+                _overlap_coefficient(kw_sets[idx], kw_sets[best_pair[1]]),
+            )
+            if pair_score >= threshold:
+                selected.append(quote)
+            else:
+                excluded.append(quote)
+
+    return selected, excluded
+
+
 def compare_documents(doc_a: dict, doc_b: dict) -> dict:
     total_a = doc_a.get("total")
     total_b = doc_b.get("total")

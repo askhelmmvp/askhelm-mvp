@@ -1,0 +1,36 @@
+{
+  "permissions": {
+    "deny": [
+      "Read(./data/**)",
+      "Read(./storage/**)",
+      "Read(./uploads/**)",
+      "Read(./logs/**)",
+      "Read(./*.pkl)",
+      "Read(./*.jsonl)",
+      "Read(./*.log)",
+      "Read(./*.pdf)",
+      "Read(./*.xlsx)",
+      "Read(./*.xls)",
+      "Read(./*.csv)",
+      "Read(./*.png)",
+      "Read(./*.jpg)",
+      "Read(./*.jpeg)",
+      "Read(./*.webp)",
+      "Read(./.env)",
+      "Read(./.env.*)",
+      "Read(./**/*.pkl)",
+      "Read(./**/*.jsonl)",
+      "Read(./**/*.log)",
+      "Read(./**/*.pdf)",
+      "Read(./**/*.xlsx)",
+      "Read(./**/*.xls)",
+      "Read(./**/*.csv)",
+      "Read(./**/*.png)",
+      "Read(./**/*.jpg)",
+      "Read(./**/*.jpeg)",
+      "Read(./**/*.webp)",
+      "Read(./**/.env)",
+      "Read(./**/.env.*)"
+    ]
+  }
+}

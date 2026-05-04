@@ -257,12 +257,14 @@ def store_comparison_result(
 def create_quote_vs_quote_session(quote_docs: List[dict], state: dict) -> Tuple[dict, dict]:
     """
     Build a new quote_vs_quote session from a list of quote doc records.
-    Closes any currently active session first.
+    Closes ALL active sessions first so stale sessions from earlier uploads
+    cannot contribute quotes to future comparisons.
     """
-    active = get_active_session(state)
-    if active:
-        active = {**active, "status": "closed"}
-        state = _update_session(active, state)
+    state["sessions"] = [
+        {**s, "status": "closed"} if s["status"] == "active" else s
+        for s in state["sessions"]
+    ]
+    state["active_session_id"] = None
 
     anchor_id = quote_docs[0]["document_id"]
     session = _make_session("quote_vs_quote", anchor_id)
@@ -277,7 +279,7 @@ def create_quote_vs_quote_session(quote_docs: List[dict], state: dict) -> Tuple[
     state["sessions"].append(session)
     state["active_session_id"] = session["session_id"]
     logger.info(
-        "quote_vs_quote session %s created with %d quotes: %s",
+        "quote_vs_quote session %s created with %d quotes: %s; all prior active sessions closed",
         session["session_id"],
         len(quote_docs),
         [d.get("supplier_name") for d in quote_docs],
@@ -519,6 +521,8 @@ def gather_quote_docs_for_comparison(state: dict, max_quotes: int = MAX_QUOTES_P
 
     for session in reversed(state.get("sessions", [])):
         if session["status"] != "active":
+            continue
+        if session.get("session_type") == "quote_vs_quote":
             continue
         for did in session["document_ids"]:
             doc = by_id.get(did)
