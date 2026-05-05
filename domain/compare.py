@@ -60,6 +60,155 @@ def _is_ancillary_item(desc: str) -> bool:
 _is_freight_item = _is_ancillary_item  # backward compatibility alias
 
 
+# ---------------------------------------------------------------------------
+# Quote category detection
+# ---------------------------------------------------------------------------
+
+_PROVISIONING_KEYWORDS = frozenset({
+    # fish & seafood
+    "salmon", "bass", "tuna", "prawn", "squid", "octopus", "brill", "cod",
+    "haddock", "halibut", "monkfish", "sole", "turbot", "crab", "lobster",
+    "scallop", "oyster", "mackerel", "herring", "trout", "plaice",
+    # meat & poultry
+    "beef", "chicken", "lamb", "pork", "veal", "duck", "turkey",
+    # product form
+    "fillet", "fillets", "sides", "loin", "portion", "portions",
+    "smoked", "frozen", "peeled", "shelled", "boneless", "skinless",
+    # provisioning / galley
+    "galley", "provisions", "provisioning", "catering", "food", "grocery",
+    "beverage",
+})
+
+_ENGINEERING_KEYWORDS = frozenset({
+    "pump", "valve", "motor", "seal", "bearing", "filter", "gasket",
+    "impeller", "shaft", "gearbox", "compressor", "fan", "alternator",
+    "starter", "belt", "fitting", "coupling", "flange", "thruster",
+    "winch", "windlass", "hydraulic", "pneumatic", "sensor", "transducer",
+})
+
+_TENDER_KEYWORDS = frozenset({
+    "tender", "dinghy", "rib", "inflatable", "davit", "outboard",
+    "zodiac", "highfield",
+})
+
+_REFIT_KEYWORDS = frozenset({
+    "labour", "refit", "drydock", "antifouling", "gelcoat", "fairing",
+    "scaffolding", "osmosis", "painting",
+})
+
+
+def categorize_quote(doc: dict) -> str:
+    """
+    Classify a quote into a broad category using line-item keyword signals.
+    Returns one of: "provisioning", "engineering", "tender", "refit", "unknown".
+    Requires at least 2 keyword hits to avoid misclassifying on sparse items.
+    """
+    text = " ".join(
+        (item.get("description") or "").lower()
+        for item in (doc.get("line_items") or [])
+    ) + " " + (doc.get("supplier_name") or "").lower()
+
+    scores = {
+        "provisioning": sum(1 for kw in _PROVISIONING_KEYWORDS if kw in text),
+        "engineering":  sum(1 for kw in _ENGINEERING_KEYWORDS  if kw in text),
+        "tender":       sum(1 for kw in _TENDER_KEYWORDS        if kw in text),
+        "refit":        sum(1 for kw in _REFIT_KEYWORDS         if kw in text),
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] >= 2 else "unknown"
+
+
+# ---------------------------------------------------------------------------
+# Quote relevance filtering
+# ---------------------------------------------------------------------------
+
+_GENERIC_QUOTE_WORDS = frozenset({
+    "supply", "of", "and", "for", "the", "with", "per", "set",
+    "unit", "pcs", "qty", "price", "total", "cost", "item",
+    "including", "includes", "service", "repair", "installation",
+    "part", "parts", "spare", "spares", "number", "ref",
+    "inc", "vat", "labour", "material", "materials",
+})
+
+
+def _quote_keywords(doc: dict) -> frozenset:
+    """Distinctive words from all line-item descriptions in a quote document."""
+    words: set = set()
+    for item in (doc.get("line_items") or []):
+        desc = item.get("description") or ""
+        normalized = _normalize_desc(desc)
+        words.update(w for w in normalized.split() if len(w) > 2 and w not in _GENERIC_QUOTE_WORDS)
+    supplier = _normalize_desc(doc.get("supplier_name") or "")
+    words.update(w for w in supplier.split() if len(w) > 2 and w not in _GENERIC_QUOTE_WORDS)
+    return frozenset(words)
+
+
+def _overlap_coefficient(a: frozenset, b: frozenset) -> float:
+    """Overlap coefficient: |A ∩ B| / min(|A|, |B|)."""
+    if not a or not b:
+        return 0.0
+    return len(a & b) / min(len(a), len(b))
+
+
+def filter_quotes_by_relevance(quotes: list, threshold: float = 0.15) -> tuple:
+    """
+    From a list of quote dicts, find the most topically-similar pair and
+    return (selected_quotes, excluded_quotes).
+
+    Two layers of filtering:
+    1. Category: quotes in a different known category from the best pair are excluded.
+    2. Keyword overlap: remaining quotes below the overlap threshold are excluded.
+
+    With only 2 quotes there is nothing to filter — both are always selected.
+    Safety: if the best-pair overlap score < 0.05, skip filtering (too sparse to judge).
+    """
+    if len(quotes) <= 2:
+        return quotes, []
+
+    kw_sets = [_quote_keywords(q) for q in quotes]
+    categories = [categorize_quote(q) for q in quotes]
+
+    # Find best-scoring pair by keyword overlap
+    best_score = -1.0
+    best_pair = (0, 1)
+    for i in range(len(quotes)):
+        for j in range(i + 1, len(quotes)):
+            score = _overlap_coefficient(kw_sets[i], kw_sets[j])
+            if score > best_score:
+                best_score = score
+                best_pair = (i, j)
+
+    if best_score < 0.05:
+        return quotes, []
+
+    pair_cat_a = categories[best_pair[0]]
+    pair_cat_b = categories[best_pair[1]]
+    pair_category = pair_cat_a if pair_cat_a == pair_cat_b else "unknown"
+
+    best_indices = set(best_pair)
+    selected = []
+    excluded = []
+    for idx, quote in enumerate(quotes):
+        if idx in best_indices:
+            selected.append(quote)
+            continue
+        cat = categories[idx]
+        # Different known category from the best pair → always exclude
+        if pair_category != "unknown" and cat != "unknown" and cat != pair_category:
+            excluded.append(quote)
+            continue
+        pair_score = max(
+            _overlap_coefficient(kw_sets[idx], kw_sets[best_pair[0]]),
+            _overlap_coefficient(kw_sets[idx], kw_sets[best_pair[1]]),
+        )
+        if pair_score >= threshold:
+            selected.append(quote)
+        else:
+            excluded.append(quote)
+
+    return selected, excluded
+
+
 def compare_documents(doc_a: dict, doc_b: dict) -> dict:
     total_a = doc_a.get("total")
     total_b = doc_b.get("total")

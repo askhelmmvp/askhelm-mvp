@@ -18,7 +18,7 @@ from services.anthropic_vision_service import (
     extract_commercial_document_from_images,
     summarise_operational_note_from_image,
 )
-from domain.compare import compare_documents
+from domain.compare import compare_documents, filter_quotes_by_relevance, categorize_quote
 from domain.session_store import user_id_from_phone, load_user_state, save_user_state
 from domain.session_manager import (
     make_document_record,
@@ -1462,6 +1462,35 @@ def _handle_invoice_upload(
     return "", state
 
 
+def _bundled_vs_itemised_note(doc_a: dict, doc_b: dict) -> str:
+    """Return a scope warning when one quote is itemised and the other is not."""
+    items_a = [i for i in (doc_a.get("line_items") or []) if i.get("description")]
+    items_b = [i for i in (doc_b.get("line_items") or []) if i.get("description")]
+    sup_a = doc_a.get("supplier_name") or "Quote A"
+    sup_b = doc_b.get("supplier_name") or "Quote B"
+    if len(items_a) >= 3 and len(items_b) <= 1:
+        return f"NOTE: {sup_b} is a bundled/lump-sum quote with no itemised breakdown. Confirm scope matches {sup_a} before ordering."
+    if len(items_b) >= 3 and len(items_a) <= 1:
+        return f"NOTE: {sup_a} is a bundled/lump-sum quote with no itemised breakdown. Confirm scope matches {sup_b} before ordering."
+    return ""
+
+
+def _provisioning_comparison_note(doc_a: dict, doc_b: dict) -> str:
+    """Return a like-for-like warning when both quotes are provisioning/food quotes."""
+    if categorize_quote(doc_a) == "provisioning" and categorize_quote(doc_b) == "provisioning":
+        return (
+            "NOTE: Provisioning quotes — verify product form, quality grade, and quantity "
+            "are like-for-like before choosing on price alone "
+            "(e.g. fillet vs sides, fresh vs frozen, kg vs portions)."
+        )
+    return ""
+
+
+def _is_provisioning_doc(doc: dict) -> bool:
+    """Return True when a document is a provisioning/food/galley quote."""
+    return categorize_quote(doc) == "provisioning"
+
+
 def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
     quote_docs = gather_quote_docs_for_comparison(state)
 
@@ -1475,13 +1504,37 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
             ],
         ), state
 
+    # Filter to the most topically-relevant quotes before creating the session.
+    quote_docs, excluded_docs = filter_quotes_by_relevance(quote_docs)
+
+    if len(quote_docs) < 2:
+        return _make_response(
+            decision="NOT ENOUGH QUOTES TO COMPARE",
+            why="After relevance filtering, fewer than 2 quotes cover the same scope.",
+            actions=["Upload quotes for the same equipment or service to enable comparison"],
+        ), state
+
+    exclusion_section = ""
+    if excluded_docs:
+        lines = [
+            f"• {d.get('supplier_name') or 'Unknown'} — unrelated to the current comparison"
+            for d in excluded_docs
+        ]
+        exclusion_section = "EXCLUDED:\n" + "\n".join(lines)
+
     state, session = create_quote_vs_quote_session(quote_docs, state)
 
     if len(quote_docs) == 2:
         doc_a, doc_b = quote_docs[0], quote_docs[1]
         comparison = compare_documents(doc_a, doc_b)
         state = store_comparison_result(session, state, doc_a, doc_b, comparison)
-        return build_comparison_response(doc_a, doc_b, comparison), state
+        response = build_comparison_response(doc_a, doc_b, comparison)
+        bundled_note = _bundled_vs_itemised_note(doc_a, doc_b)
+        prov_note = _provisioning_comparison_note(doc_a, doc_b)
+        for note in (exclusion_section, bundled_note, prov_note):
+            if note:
+                response += "\n\n" + note
+        return response, state
 
     # Three quotes
     ranked = _rank_docs_by_price(quote_docs)
@@ -1489,7 +1542,13 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
     priciest_doc = ranked[-1]["doc"]
     comparison = compare_documents(cheapest_doc, priciest_doc)
     state = store_comparison_result(session, state, cheapest_doc, priciest_doc, comparison)
-    return build_three_way_comparison_response(ranked), state
+    response = build_three_way_comparison_response(ranked)
+    bundled_note = _bundled_vs_itemised_note(cheapest_doc, priciest_doc)
+    prov_note = _provisioning_comparison_note(cheapest_doc, priciest_doc)
+    for note in (exclusion_section, bundled_note, prov_note):
+        if note:
+            response += "\n\n" + note
+    return response, state
 
 
 _COMMERCIAL_DOC_TYPES = {
@@ -3361,6 +3420,25 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         elif eq_ctx:
             doc_ctx = eq_ctx
         if doc_ctx or comp_ctx:
+            # Provisioning/food quotes need a different response — don't ask for make/model.
+            _recent_doc = (state.get("documents") or [None])[-1]
+            if _recent_doc and _is_provisioning_doc(_recent_doc):
+                _prov_response = _make_response(
+                    decision="NEED A LIKE-FOR-LIKE SUPPLIER COMPARISON OR MARKET CHECK FOR PROVISIONING PRICING",
+                    why=(
+                        "This is a galley/provisioning quote. Fair price should be assessed by "
+                        "product type, product form, quantity, unit price, VAT, supplier location, and delivery terms."
+                    ),
+                    actions=[
+                        "Compare against another provisioning or fish supplier quote",
+                        "Check high-value lines first — fish species, cut, and grade affect price significantly",
+                        "Confirm product form and quality grade before comparing (e.g. fillet vs side, loin vs portions)",
+                        "Verify VAT rate applied — provisioning VAT rates vary by country and product type",
+                        "Upload a second supplier quote to run a like-for-like comparison",
+                    ],
+                )
+                state["last_context"] = {"type": "market_check", "topic": incoming, "result": _prov_response}
+                return _prov_response, state
             return _handle_document_market_check(incoming, state, doc_ctx, comp_ctx)
         # No context — enrich vague pronoun references and call directly.
         query = _enrich_with_doc_context(incoming, state)
