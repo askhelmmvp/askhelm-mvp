@@ -548,6 +548,7 @@ class TestProvisioningComparisonFollowUp(unittest.TestCase):
         self.assertNotIn("DOCUMENT NOT UNDERSTOOD", response)
 
 
+
 # ---------------------------------------------------------------------------
 # Test 12: Provisioning product-specific queries
 # ---------------------------------------------------------------------------
@@ -586,6 +587,7 @@ class TestProvisioningProductQuery(unittest.TestCase):
             "we supply" in lower or "riviera" in lower or "salmon" in lower or "like-for-like" in lower,
             "Response does not reference provisioning context",
         )
+
 
 
 if __name__ == "__main__":
