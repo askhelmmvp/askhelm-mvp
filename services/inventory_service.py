@@ -214,6 +214,22 @@ _STOCK_COL_MAP = {
     "remarks": "notes",
     "comment": "notes",
     "comments": "notes",
+    # AMOS / marine management system exports
+    "item id and name": "description",
+    "item id": "description",
+    "barcode": "part_number",
+    "manuf. part #": "part_number",
+    "manuf part #": "part_number",
+    "manufacturer part #": "part_number",
+    "mfr. part #": "part_number",
+    "mfr part #": "part_number",
+    "total qty": "quantity_onboard",
+    "total quantity": "quantity_onboard",
+    "min / max": "notes",
+    "min max": "notes",
+    "suppl. part #": "notes",
+    "suppl part #": "notes",
+    "supplier part #": "notes",
 }
 
 # Fields unique to each type (used for voting)
@@ -479,6 +495,12 @@ _HEADER_SIGNAL_TOKENS = frozenset({
     "part number", "part no",
 })
 
+# Tokens that uniquely identify an AMOS/MMS primary-data header row.
+# Scoring +3 (vs. +2 for regular col-map hits) ensures Row A wins over Row B.
+_PRIMARY_ITEM_INDICATORS = frozenset({
+    "item id and name", "item id", "total qty", "total quantity", "barcode",
+})
+
 
 def _flatten_csv_header(raw: str) -> str:
     """
@@ -496,40 +518,56 @@ def _flatten_csv_header(raw: str) -> str:
     return raw  # nothing mapped — pass through unchanged
 
 
+def _score_row_as_header(row: list) -> int:
+    """Score one row as a potential header row.
+
+    Primary item indicators (AMOS/MMS) score +3; direct col-map hits score +2;
+    header-signal tokens score +1.
+    """
+    score = 0
+    for cell in row:
+        cell_s = str(cell).strip()
+        if not cell_s:
+            continue
+        flat_norm = _normalise_col(_flatten_csv_header(cell_s))
+        if flat_norm in _PRIMARY_ITEM_INDICATORS:
+            score += 3
+        elif flat_norm in _STOCK_COL_MAP or flat_norm in _EQUIPMENT_COL_MAP:
+            score += 2
+        elif any(tok in _normalise_col(cell_s) for tok in _HEADER_SIGNAL_TOKENS):
+            score += 1
+    return score
+
+
 def _find_header_row(all_rows: list, max_scan: int = 10) -> int:
     """
     Scan the first max_scan rows and return the index of the row most likely
     to be the header row.
 
-    Each candidate row is scored by the number of its cells that resolve to a
-    known column name (after compound-header flattening).  Direct map hits
-    score 2; cells that contain a header-signal token score 1.  Blank rows and
-    single-cell title rows (e.g. 'Components') score 0 and are skipped.
-
-    Returns 0 if no row scores above the default of -1 (safe fallback: use
-    the first row as header, which is the original behaviour).
+    Returns 0 if no row scores above -1 (safe fallback: use the first row).
     """
     best_idx = 0
     best_score = -1
 
     for idx, row in enumerate(all_rows[:max_scan]):
-        non_empty = [str(c).strip() for c in row if str(c).strip()]
-        if not non_empty:
+        if not any(str(c).strip() for c in row):
             continue
-
-        score = 0
-        for cell in non_empty:
-            flat_norm = _normalise_col(_flatten_csv_header(cell))
-            if flat_norm in _STOCK_COL_MAP or flat_norm in _EQUIPMENT_COL_MAP:
-                score += 2
-            elif any(tok in _normalise_col(cell) for tok in _HEADER_SIGNAL_TOKENS):
-                score += 1
-
+        score = _score_row_as_header(row)
         if score > best_score:
             best_score = score
             best_idx = idx
 
     return best_idx
+
+
+# Matches AMOS-style section headers: 3-5 digit code followed by text, e.g. '0210 Main Engines'.
+_SECTION_HEADER_RE = re.compile(r'^\d{3,5}\s+\S')
+
+
+def _is_section_header_row(row: list) -> bool:
+    """True if the row is a sparse AMOS section header (≤2 non-empty cells, first matches code+text)."""
+    non_empty = [str(c).strip() for c in row if str(c).strip()]
+    return bool(non_empty) and len(non_empty) <= 2 and bool(_SECTION_HEADER_RE.match(non_empty[0]))
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +578,75 @@ def _find_header_row(all_rows: list, max_scan: int = 10) -> int:
 # latin-1 and iso-8859-1 are byte-transparent fallbacks that never raise on any
 # single-byte file.
 _CSV_ENCODINGS = ("utf-8-sig", "utf-8", "cp1252", "latin-1", "iso-8859-1")
+
+
+def _finalise_stock_record(
+    record: dict, section: Optional[str], out: list, confidence: float
+) -> None:
+    item = _extract_stock_row(record)
+    if item:
+        if section and not item.get("linked_equipment"):
+            item["linked_equipment"] = section
+        item["confidence"] = confidence
+        out.append(item)
+
+
+def _extract_two_row_stock_items(
+    data_rows: list, col_map_a: dict, col_map_b: dict, confidence: float = 0.8
+) -> dict:
+    """
+    Parse AMOS-style two-row-per-item CSV data.
+
+    Row A carries primary fields (description, part_number, quantity, make).
+    Row B carries supplementary fields (storage_location, supplier, model).
+    Section headers ('0210 Main Engines') set linked_equipment for following items.
+    """
+    desc_cols_a = {idx for idx, field in col_map_a.items() if field == "description"}
+    # Columns only in the primary header tell Row A from Row B when both share col 0.
+    a_exclusive_cols = set(col_map_a.keys()) - set(col_map_b.keys())
+    row_a_indicator_cols = a_exclusive_cols if a_exclusive_cols else desc_cols_a
+
+    stock_items: list = []
+    current_section: Optional[str] = None
+    pending: Optional[dict] = None
+
+    for row in data_rows:
+        if not any(str(c).strip() for c in row):
+            continue
+
+        if _is_section_header_row(row):
+            if pending is not None:
+                _finalise_stock_record(pending, current_section, stock_items, confidence)
+                pending = None
+            current_section = str(row[0]).strip()
+            continue
+
+        row_is_a = any(
+            col < len(row) and str(row[col]).strip()
+            for col in row_a_indicator_cols
+        )
+
+        if row_is_a:
+            if pending is not None:
+                _finalise_stock_record(pending, current_section, stock_items, confidence)
+            pending = {}
+            for col_idx, field in col_map_a.items():
+                if col_idx < len(row):
+                    val = str(row[col_idx]).strip()
+                    if val:
+                        pending[field] = val
+        elif pending is not None:
+            for col_idx, field in col_map_b.items():
+                if col_idx < len(row):
+                    val = str(row[col_idx]).strip()
+                    if val and field not in pending:
+                        pending[field] = val
+
+    if pending is not None:
+        _finalise_stock_record(pending, current_section, stock_items, confidence)
+
+    logger.info("inventory csv two-row: rows_mapped=%d", len(stock_items))
+    return {"equipment": [], "stock": stock_items}
 
 
 def extract_inventory_from_csv(file_path: str) -> dict:
@@ -589,12 +696,20 @@ def extract_inventory_from_csv(file_path: str) -> dict:
             header_idx, header_idx, fname,
         )
 
-    # Flatten compound headers (e.g. 'Serial # / Type' → 'Serial #') so that
-    # _map_headers can resolve them to canonical field names.
-    headers = [_flatten_csv_header(h) for h in all_rows[header_idx]]
-    rows = all_rows[header_idx + 1:]
+    headers_a = [_flatten_csv_header(h) for h in all_rows[header_idx]]
+    data_start = header_idx + 1
 
-    result = extract_inventory_from_tabular(headers, rows, confidence=0.8)
+    # Detect AMOS-style two-row header: secondary header immediately follows primary.
+    if data_start < len(all_rows) and _score_row_as_header(all_rows[data_start]) >= 4:
+        headers_b = [_flatten_csv_header(h) for h in all_rows[data_start]]
+        data_start += 1
+        logger.info("inventory csv: two_row_header_detected file=%s", fname)
+        col_map_a = _map_headers(headers_a)
+        col_map_b = _map_headers(headers_b)
+        result = _extract_two_row_stock_items(all_rows[data_start:], col_map_a, col_map_b, confidence=0.8)
+    else:
+        result = extract_inventory_from_tabular(headers_a, all_rows[data_start:], confidence=0.8)
+
     logger.info(
         "inventory csv: equipment=%d stock=%d encoding=%s file=%s",
         len(result["equipment"]), len(result["stock"]), used_encoding, fname,

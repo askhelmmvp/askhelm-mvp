@@ -365,5 +365,108 @@ class TestEquipmentLinking(unittest.TestCase):
         self.assertNotIn("equipment_link", updated[0])
 
 
+class TestMachineryInventoryCSV(unittest.TestCase):
+    """AMOS two-row-header machinery inventory CSV must import as stock."""
+
+    # Minimal AMOS-style CSV that exercises two-row headers + section header + paired rows.
+    _AMOS_ROWS = [
+        # Row 0: title
+        ["H3 Machinery Inventory"],
+        # Row 1: Header A (primary)
+        ["Item ID and Name", "Barcode", "Manufacturer", "Manuf. Part #", "Total Qty"],
+        # Row 2: Header B (supplementary)
+        ["Type", "Storage", "Supplier", "Min / Max", ""],
+        # Row 3: section header
+        ["0210 Main Engines", "", "", "", ""],
+        # Row 4: Data A — item
+        ["Main Engine Air Filter", "BAR001", "MAN", "MAN-AF-001", "5"],
+        # Row 5: Data B — supplementary
+        ["Air Filter", "Engine Room", "MAN SE", "2/10", ""],
+        # Row 6: Data A — second item (no part number)
+        ["Main Engine Lube Oil Filter", "", "MAN", "", "3"],
+        # Row 7: Data B
+        ["Oil Filter", "Engine Room Store", "MAN SE", "1/5", ""],
+    ]
+
+    def _make_csv(self, rows):
+        f = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".csv", encoding="utf-8", delete=False, newline=""
+        )
+        w = csv.writer(f)
+        for row in rows:
+            w.writerow(row)
+        f.close()
+        return f.name
+
+    def _import(self):
+        from services.inventory_service import extract_inventory_from_csv
+        fname = self._make_csv(self._AMOS_ROWS)
+        try:
+            return extract_inventory_from_csv(fname)
+        finally:
+            os.unlink(fname)
+
+    def test_machinery_csv_classifies_as_stock(self):
+        result = self._import()
+        self.assertGreater(len(result.get("stock", [])), 0, "expected stock records")
+        self.assertEqual(len(result.get("equipment", [])), 0, "expected no equipment records")
+
+    def test_machinery_csv_rows_mapped_greater_than_zero(self):
+        result = self._import()
+        self.assertGreater(len(result.get("stock", [])), 0)
+
+    def test_machinery_csv_item_row_merged_with_detail_row(self):
+        result = self._import()
+        stock = result.get("stock", [])
+        descriptions = [s.get("description") for s in stock]
+        self.assertIn("Main Engine Air Filter", descriptions)
+        item = next(s for s in stock if s.get("description") == "Main Engine Air Filter")
+        self.assertEqual(item.get("part_number"), "MAN-AF-001")
+        self.assertEqual(item.get("quantity_onboard"), 5.0)
+        self.assertEqual(item.get("storage_location"), "Engine Room")
+        self.assertEqual(item.get("supplier"), "MAN SE")
+
+    def test_machinery_csv_section_header_attached(self):
+        result = self._import()
+        stock = result.get("stock", [])
+        for item in stock:
+            self.assertEqual(
+                item.get("linked_equipment"), "0210 Main Engines",
+                f"item {item.get('description')!r} missing linked_equipment"
+            )
+
+    def test_machinery_csv_item_without_part_number_is_imported(self):
+        result = self._import()
+        descriptions = [s.get("description") for s in result.get("stock", [])]
+        self.assertIn("Main Engine Lube Oil Filter", descriptions)
+
+    def test_equipment_csv_regression(self):
+        """Standard single-header equipment CSV must still import correctly."""
+        rows = [
+            ["Equipment Name", "Make", "Model", "Serial Number", "Location"],
+            ["Main Engine", "MAN", "6L27/38", "12345", "Engine Room"],
+            ["Generator", "Caterpillar", "3412", "67890", "Engine Room"],
+        ]
+        from services.inventory_service import extract_inventory_from_csv
+        fname = self._make_csv(rows)
+        try:
+            result = extract_inventory_from_csv(fname)
+        finally:
+            os.unlink(fname)
+        self.assertGreater(len(result.get("equipment", [])), 0)
+        self.assertEqual(len(result.get("stock", [])), 0)
+
+    def test_flat_stock_csv_regression(self):
+        """Standard single-header stock CSV must still import correctly."""
+        from services.inventory_service import extract_inventory_from_csv
+        fname = self._make_csv(_stock_csv_rows())
+        try:
+            result = extract_inventory_from_csv(fname)
+        finally:
+            os.unlink(fname)
+        self.assertGreater(len(result.get("stock", [])), 0)
+        self.assertEqual(len(result.get("equipment", [])), 0)
+
+
 if __name__ == "__main__":
     unittest.main()
