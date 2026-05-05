@@ -165,11 +165,12 @@ class TestCompassTendersExcluded(unittest.TestCase):
         state = self._three_quote_state()
         from whatsapp_app import _handle_quote_compare_intent
         response, _ = _handle_quote_compare_intent(state)
-        self.assertIn("NOTE:", response)
-        # Should contain provisioning warning
+        # The provisioning comparison must contain product form / like-for-like guidance
+        lower = response.lower()
         self.assertTrue(
-            "provisioning" in response.lower() or "like-for-like" in response.lower(),
-            "No provisioning/like-for-like note found",
+            "product form" in lower or "like-for-like" in lower
+            or "check before ordering" in lower or "before ordering" in lower,
+            f"No product-form or like-for-like guidance found: {response[:300]}",
         )
 
 
@@ -327,6 +328,226 @@ class TestComplianceRegression(unittest.TestCase):
             state, _ = create_quote_session(_we_supply_quote(), state)
             response, _ = _handle_text_message("is this compliant with MARPOL Annex VI?", state)
         self.assertIn("DECISION", response)
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Line-by-line provisioning comparison (ASK-28 Part 2)
+# ---------------------------------------------------------------------------
+
+class TestProvisioningLineComparison(unittest.TestCase):
+
+    def _two_fish_state(self):
+        state = _empty_state()
+        state, _ = create_quote_session(_we_supply_quote(), state)
+        state, _ = create_quote_session(_riviera_quote(), state)
+        return state
+
+    def test_response_has_line_by_line_section(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertIn("LINE-BY-LINE", response)
+
+    def test_response_has_headline_comparison(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertIn("HEADLINE COMPARISON", response)
+
+    def test_decision_names_cheaper_supplier(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        # Riviera total 5459.85 < We Supply 6809.38 → Riviera is cheaper
+        lower = response.lower()
+        self.assertIn("riviera", lower, "Cheaper supplier (Riviera) not named in decision")
+        self.assertTrue(
+            "cheaper" in lower or "lower" in lower or "better value" in lower,
+            f"No cheaper/lower/better-value wording: {response[:200]}",
+        )
+
+    def test_salmon_line_shows_per_kg_price(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertIn("/kg", response)
+        lower = response.lower()
+        self.assertIn("salmon", lower)
+        # Must not show line_total as per-kg price
+        self.assertNotIn("210.00/kg", response)
+        self.assertNotIn("375.55/kg", response)
+        self.assertNotIn("166.75/kg", response)
+
+    def test_recommended_actions_present(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertIn("RECOMMENDED ACTIONS", response)
+
+    def test_no_engineering_wording(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        lower = response.lower()
+        self.assertNotIn("make/model", lower)
+        self.assertNotIn("equipment make", lower)
+        self.assertNotIn("confirm with the chef", lower)
+
+    def test_product_form_caveats_present(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        # There are product form differences (e.g. loin vs side for cod) — must appear
+        lower = response.lower()
+        self.assertTrue(
+            "check before ordering" in lower or "product form" in lower
+            or "loin" in lower or "fillet" in lower,
+            f"No product form caveats found: {response[:400]}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Follow-up routing and re-use of existing comparison (ASK-28 Part 2)
+# ---------------------------------------------------------------------------
+
+class TestProvisioningComparisonFollowUp(unittest.TestCase):
+
+    def _state_after_comparison(self):
+        state = _empty_state()
+        state, _ = create_quote_session(_we_supply_quote(), state)
+        state, _ = create_quote_session(_riviera_quote(), state)
+        from whatsapp_app import _handle_quote_compare_intent
+        _, state = _handle_quote_compare_intent(state)
+        return state
+
+    def test_which_quote_should_i_go_for_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("which quote should i go for"), "quote_compare")
+
+    def test_summarise_the_quotes_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("summarise the quotes"), "quote_compare")
+
+    def test_give_me_more_information_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("give me more information on the quotations"), "quote_compare")
+
+    def test_overview_of_each_quote_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("give me an overview of each quote"), "quote_compare")
+
+    def test_are_these_like_for_like_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("are these like for like"), "quote_compare")
+
+    def test_follow_up_reuses_existing_comparison(self):
+        state = self._state_after_comparison()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertNotIn("NOT ENOUGH QUOTES", response)
+        self.assertIn("LINE-BY-LINE", response)
+
+    def test_follow_up_names_cheaper_supplier(self):
+        state = self._state_after_comparison()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        lower = response.lower()
+        self.assertIn("riviera", lower)
+
+
+# ---------------------------------------------------------------------------
+# Test 9: Product-specific provisioning queries (ASK-28 Part 2)
+# ---------------------------------------------------------------------------
+
+class TestProvisioningProductQuery(unittest.TestCase):
+
+    def _state_after_comparison(self):
+        state = _empty_state()
+        state, _ = create_quote_session(_we_supply_quote(), state)
+        state, _ = create_quote_session(_riviera_quote(), state)
+        from whatsapp_app import _handle_quote_compare_intent
+        _, state = _handle_quote_compare_intent(state)
+        return state
+
+    def test_compare_the_salmon_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("compare the salmon"), "quote_compare")
+
+    def test_price_per_kg_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("how is the salmon price per kg?"), "quote_compare")
+
+    def test_product_query_shows_detail_section(self):
+        state = self._state_after_comparison()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state, "compare the salmon")
+        lower = response.lower()
+        self.assertIn("salmon", lower)
+        # Should show per-kg price, not line total as unit price
+        self.assertNotIn("210.00/kg", response)
+        self.assertNotIn("375.55/kg", response)
+
+    def test_product_query_shows_correct_unit_price_not_line_total(self):
+        """Unit price regression: must show €12.00/kg for salmon, not €210.00/kg."""
+        state = self._state_after_comparison()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state, "how is the salmon price per kg?")
+        # We Supply salmon: unit_rate=12.00, qty=17.5, line_total=210.00 → must show 12.00
+        self.assertNotIn("210.00/kg", response, "Line total shown as unit price for salmon")
+        self.assertIn("salmon", response.lower())
+
+    def test_are_prices_fair_with_active_comparison_returns_comparison(self):
+        """'Are the prices fair?' with active comparison must return provisioning overview."""
+        state = self._state_after_comparison()
+        from whatsapp_app import _handle_text_message
+        response, _ = _handle_text_message("are the prices fair?", state)
+        # Must NOT route to engineering market check (which asks for part numbers)
+        self.assertNotIn("part number", response.lower())
+        self.assertNotIn("equipment make", response.lower())
+        # Must NOT ask for more info in a way that implies engineering context
+        self.assertNotIn("make/model", response.lower())
+        # Should contain provisioning-relevant content
+        lower = response.lower()
+        self.assertTrue(
+            "provisioning" in lower or "product form" in lower
+            or "line-by-line" in lower or "headline comparison" in lower
+            or "riviera" in lower or "we supply" in lower,
+            f"Response lacks provisioning context: {response[:200]}",
+        )
+
+
+# ---------------------------------------------------------------------------
+# Test 10: Unit price regression (ASK-28 Part 2)
+# ---------------------------------------------------------------------------
+
+class TestUnitPriceComputation(unittest.TestCase):
+
+    def test_correct_unit_rate_returned_when_product_checks_out(self):
+        from whatsapp_app import _compute_unit_price
+        item = {"unit_rate": 14.50, "quantity": 15, "line_total": 217.50}
+        self.assertAlmostEqual(_compute_unit_price(item), 14.50, places=2)
+
+    def test_falls_back_to_line_total_div_qty_when_unit_rate_is_wrong(self):
+        """Simulates extractor error where unit_rate = line_total (common in Riviera Gourmet PDFs)."""
+        from whatsapp_app import _compute_unit_price
+        # Sea bass: 17.5 kg, line_total = 1013.25, extractor puts 1013.25 in unit_rate
+        item = {"unit_rate": 1013.25, "quantity": 17.5, "line_total": 1013.25}
+        result = _compute_unit_price(item)
+        self.assertAlmostEqual(result, 57.90, places=1)
+        self.assertNotAlmostEqual(result, 1013.25, places=0)
+
+    def test_salmon_unit_price_not_line_total(self):
+        """Riviera salmon: 14.5 kg @ 25.90/kg = 375.55 — must show 25.90, not 375.55."""
+        from whatsapp_app import _compute_unit_price
+        item = {"unit_rate": 375.55, "quantity": 14.5, "line_total": 375.55}
+        result = _compute_unit_price(item)
+        self.assertAlmostEqual(result, 25.90, places=1)
+
+    def test_we_supply_salmon_unit_price(self):
+        """We Supply salmon fillet: qty=17.5, unit_rate=12.00, line_total=210.00."""
+        from whatsapp_app import _compute_unit_price
+        item = {"unit_rate": 12.00, "quantity": 17.5, "unit": "kg", "line_total": 210.00}
+        self.assertAlmostEqual(_compute_unit_price(item), 12.00, places=2)
 
 
 if __name__ == "__main__":

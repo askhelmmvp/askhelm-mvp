@@ -18,7 +18,10 @@ from services.anthropic_vision_service import (
     extract_commercial_document_from_images,
     summarise_operational_note_from_image,
 )
-from domain.compare import compare_documents, filter_quotes_by_relevance, categorize_quote
+from domain.compare import (
+    compare_documents, filter_quotes_by_relevance, categorize_quote,
+    _desc_matches, _normalize_desc,
+)
 from domain.session_store import user_id_from_phone, load_user_state, save_user_state
 from domain.session_manager import (
     make_document_record,
@@ -1462,6 +1465,384 @@ def _handle_invoice_upload(
     return "", state
 
 
+# ---------------------------------------------------------------------------
+# Provisioning / galley quote comparison helpers
+# ---------------------------------------------------------------------------
+
+# Product form words (singular only — plurals are normalised to singular in _prov_form_set)
+_PROV_FORM_WORDS = frozenset({
+    "fillet", "side", "loin", "portion", "steak", "whole",
+    "slice", "peeled", "unpeeled", "boneless", "skinless", "ring",
+})
+
+# Words that change the product nature (smoked ≠ fresh, cooked ≠ raw)
+_PROV_ALTERING_WORDS = frozenset({
+    "smoked", "cooked", "cured", "marinated", "salted", "dried",
+})
+
+# Core protein/product names for provisioning items
+_PROV_PROTEIN_NAMES = tuple(sorted([
+    "smoked salmon", "sea bass", "bluefin tuna", "squid rings",
+    "salmon", "bass", "tuna", "bluefin", "prawn", "squid", "octopus", "brill",
+    "cod", "haddock", "halibut", "monkfish", "sole", "turbot", "crab", "lobster",
+    "scallop", "oyster", "mackerel", "herring", "trout", "plaice",
+    "beef", "chicken", "lamb", "pork", "veal", "duck", "turkey",
+], key=len, reverse=True))  # longest first so "smoked salmon" matches before "salmon"
+
+
+def _compute_unit_price(item: dict) -> Optional[float]:
+    """Return the per-unit price, correcting for extractor errors where unit_rate = line_total."""
+    unit_rate = item.get("unit_rate")
+    line_total = item.get("line_total")
+    qty = item.get("quantity")
+
+    if unit_rate is not None and qty and line_total is not None:
+        computed = unit_rate * qty
+        # If unit_rate × qty ≈ line_total, the unit_rate is correct
+        if line_total and abs(computed - line_total) / max(abs(line_total), 0.01) < 0.02:
+            return unit_rate
+        # Otherwise the extractor put the line_total in unit_rate — compute properly
+        return line_total / qty
+    if unit_rate is not None and qty:
+        return unit_rate
+    if line_total is not None and qty:
+        return line_total / qty
+    return unit_rate
+
+
+def _prov_form_set(desc: str) -> frozenset:
+    """Extract product form words from a description, normalised to singular."""
+    words = _normalize_desc(desc).split()
+    forms = set()
+    for w in words:
+        if w in _PROV_FORM_WORDS:
+            forms.add(w)
+        elif w.endswith("s") and w[:-1] in _PROV_FORM_WORDS:
+            forms.add(w[:-1])  # normalise plural → singular
+    return frozenset(forms)
+
+
+def _match_provisioning_items(desc_a: str, desc_b: str) -> tuple:
+    """
+    Returns (matched: bool, caveat: str).
+    Extends _desc_matches with protein-based matching for different cuts/forms.
+    Smoked vs fresh are treated as different products (not matched).
+    """
+    if _desc_matches(desc_a, desc_b):
+        return True, ""
+
+    norm_a = _normalize_desc(desc_a)
+    norm_b = _normalize_desc(desc_b)
+
+    # Find shared protein (longest match first)
+    shared = None
+    for protein in _PROV_PROTEIN_NAMES:
+        if protein in norm_a and protein in norm_b:
+            shared = protein
+            break
+
+    if not shared:
+        return False, ""
+
+    # Different form-altering words = fundamentally different product (smoked vs fresh)
+    altering_a = {w for w in _PROV_ALTERING_WORDS if w in norm_a}
+    altering_b = {w for w in _PROV_ALTERING_WORDS if w in norm_b}
+    if altering_a != altering_b:
+        return False, ""
+
+    # Same protein, check for product form differences
+    form_a = _prov_form_set(norm_a)
+    form_b = _prov_form_set(norm_b)
+
+    if form_a == form_b or not (form_a or form_b):
+        return True, ""
+
+    a_str = "/".join(sorted(form_a)) or "unspecified"
+    b_str = "/".join(sorted(form_b)) or "unspecified"
+    return True, f"{a_str} vs {b_str}"
+
+
+def _build_provisioning_line_comparison(
+    items_a: list, items_b: list, sup_a: str, sup_b: str, cur: str
+) -> tuple:
+    """
+    Match provisioning line items across two quotes.
+    Returns (bullet_lines, caveats) where:
+    - bullet_lines: list of formatted bullet strings for LINE-BY-LINE section
+    - caveats: list of short strings for CHECK BEFORE ORDERING section
+    """
+    bullet_lines = []
+    caveats = []
+    matched_b: set = set()
+
+    for item_a in items_a:
+        desc_a = (item_a.get("description") or "").strip()
+        if not desc_a:
+            continue
+
+        best_b = None
+        best_b_idx = None
+        best_caveat = ""
+
+        for idx_b, item_b in enumerate(items_b):
+            if idx_b in matched_b:
+                continue
+            desc_b = (item_b.get("description") or "").strip()
+            if not desc_b:
+                continue
+            ok, cav = _match_provisioning_items(desc_a, desc_b)
+            if ok:
+                best_b = item_b
+                best_b_idx = idx_b
+                best_caveat = cav
+                break
+
+        price_a = _compute_unit_price(item_a)
+        qty_a = item_a.get("quantity")
+        unit_a = (item_a.get("unit") or "kg").lower()
+
+        if best_b is not None:
+            matched_b.add(best_b_idx)
+            desc_b = (best_b.get("description") or "").strip()
+            price_b = _compute_unit_price(best_b)
+            qty_b = best_b.get("quantity")
+
+            price_part = ""
+            if price_a is not None and price_b is not None and price_a != 0:
+                diff_pct = ((price_b - price_a) / price_a) * 100
+                if abs(diff_pct) < 2:
+                    verdict = "(same)"
+                elif diff_pct > 0:
+                    verdict = f"({sup_b} +{diff_pct:.0f}%)"
+                else:
+                    verdict = f"({sup_b} {diff_pct:.0f}%)"
+                price_part = f"{cur}{price_a:.2f}/{unit_a} vs {cur}{price_b:.2f}/{unit_a} {verdict}"
+            elif price_a is not None:
+                price_part = f"{cur}{price_a:.2f}/{unit_a} ({sup_b}: price unavailable)"
+            elif price_b is not None:
+                price_part = f"({sup_a}: price unavailable) vs {cur}{price_b:.2f}/{unit_a}"
+
+            line = f"• {desc_a}: {price_part}" if price_part else f"• {desc_a}: both quoted"
+
+            if best_caveat:
+                line += f"\n  ↳ check product form: {best_caveat}"
+                caveats.append(f"{desc_a.split()[0].title()} (product form: {best_caveat})")
+            if qty_a is not None and qty_b is not None and abs(qty_a - qty_b) > 0.01:
+                line += f"\n  ↳ qty: {sup_a} {qty_a}{unit_a}, {sup_b} {qty_b}{unit_a}"
+                caveats.append(f"{desc_a.split()[0].title()} (quantity differs: {qty_a} vs {qty_b}{unit_a})")
+            bullet_lines.append(line)
+        else:
+            if price_a is not None:
+                bullet_lines.append(
+                    f"• {desc_a}: {cur}{price_a:.2f}/{unit_a} ({sup_b} — not in quote)"
+                )
+            else:
+                bullet_lines.append(f"• {desc_a}: {sup_a} only ({sup_b} — not in quote)")
+
+    for idx_b, item_b in enumerate(items_b):
+        if idx_b in matched_b:
+            continue
+        desc_b = (item_b.get("description") or "").strip()
+        if not desc_b:
+            continue
+        price_b = _compute_unit_price(item_b)
+        unit_b = (item_b.get("unit") or "kg").lower()
+        if price_b is not None:
+            bullet_lines.append(
+                f"• {desc_b}: {cur}{price_b:.2f}/{unit_b} ({sup_a} — not in quote)"
+            )
+        else:
+            bullet_lines.append(f"• {desc_b}: {sup_b} only ({sup_a} — not in quote)")
+
+    return bullet_lines, caveats
+
+
+def build_provisioning_comparison_response(doc_a: dict, doc_b: dict) -> str:
+    """Build a full structured comparison response for provisioning/galley/food quotes."""
+    sup_a = (doc_a.get("supplier_name") or "Supplier A").strip()
+    sup_b = (doc_b.get("supplier_name") or "Supplier B").strip()
+    total_a = doc_a.get("total")
+    total_b = doc_b.get("total")
+    subtotal_a = doc_a.get("subtotal")
+    subtotal_b = doc_b.get("subtotal")
+    tax_a = doc_a.get("tax")
+    tax_b = doc_b.get("tax")
+    cur_a = (doc_a.get("currency") or "EUR").strip().upper()
+    cur_b = (doc_b.get("currency") or "EUR").strip().upper()
+    cur = cur_a if cur_a == cur_b else cur_a
+
+    items_a = doc_a.get("line_items") or []
+    items_b = doc_b.get("line_items") or []
+    bullet_lines, caveats = _build_provisioning_line_comparison(items_a, items_b, sup_a, sup_b, cur)
+
+    if total_a is not None and total_b is not None and total_a != 0:
+        delta = total_b - total_a
+        delta_pct = (delta / total_a) * 100
+        # delta < 0 → total_b < total_a → sup_b is cheaper
+        cheaper = sup_b if delta < 0 else sup_a
+        dearer = sup_a if delta < 0 else sup_b
+
+        if caveats:
+            decision = (
+                f"{cheaper.upper()} IS LOWER OVERALL — "
+                f"BUT CHECK PRODUCT FORM BEFORE ORDERING"
+            )
+            why = (
+                f"{cheaper} is {abs(delta_pct):.1f}% cheaper overall "
+                f"({cur}{abs(delta):,.2f} less than {dearer}). "
+                f"Some lines are not exactly like-for-like — confirm product form "
+                f"and quality are acceptable before ordering."
+            )
+        else:
+            decision = f"{cheaper.upper()} IS BETTER VALUE"
+            why = (
+                f"{cheaper} is {abs(delta_pct):.1f}% cheaper than {dearer} "
+                f"({cur}{abs(delta):,.2f} difference). "
+                f"Items appear directly comparable."
+            )
+
+        headline = []
+        if subtotal_a is not None and tax_a is not None:
+            headline.append(
+                f"• {sup_a}: ex-tax {cur_a} {subtotal_a:,.2f}, "
+                f"tax {cur_a} {tax_a:,.2f}, total {cur_a} {total_a:,.2f}"
+            )
+        else:
+            headline.append(f"• {sup_a}: total {cur_a} {total_a:,.2f}")
+        if subtotal_b is not None and tax_b is not None:
+            headline.append(
+                f"• {sup_b}: ex-tax {cur_b} {subtotal_b:,.2f}, "
+                f"tax {cur_b} {tax_b:,.2f}, total {cur_b} {total_b:,.2f}"
+            )
+        else:
+            headline.append(f"• {sup_b}: total {cur_b} {total_b:,.2f}")
+        headline.append(
+            f"• {dearer} is {cur}{abs(delta):,.2f} higher ({abs(delta_pct):.1f}% more)"
+        )
+
+        actions = [
+            f"Choose {cheaper} if the product forms and quality work for the menu",
+            f"Use {dearer} if their cuts, grade, or delivery reliability are required",
+            "Confirm delivery terms and lead times with both suppliers",
+            "Negotiate on high-value lines first",
+        ]
+    else:
+        decision = "PROVISIONING QUOTES — COMPARISON BELOW"
+        why = "Totals could not be compared — see line-by-line breakdown."
+        headline = []
+        actions = [
+            "Review line-by-line comparison before deciding",
+            "Confirm delivery terms and lead times with both suppliers",
+        ]
+
+    response = _make_response(decision=decision, why=why, actions=actions)
+
+    if headline:
+        response += "\n\nHEADLINE COMPARISON:\n" + "\n".join(headline)
+
+    if bullet_lines:
+        response += "\n\nLINE-BY-LINE:\n" + "\n".join(bullet_lines)
+
+    if caveats:
+        check_lines = "\n".join(f"• {c}" for c in caveats)
+        response += f"\n\nCHECK BEFORE ORDERING:\n{check_lines}"
+
+    return response
+
+
+def _extract_provisioning_product(message: str) -> str:
+    """Return the first provisioning protein name found in the message, or empty string."""
+    msg_lower = message.lower()
+    for protein in _PROV_PROTEIN_NAMES:
+        if protein in msg_lower:
+            return protein
+    return ""
+
+
+def _handle_provisioning_product_query(message: str, doc_a: dict, doc_b: dict) -> str:
+    """Return a focused comparison for a single product from the active provisioning comparison."""
+    product = _extract_provisioning_product(message)
+    sup_a = (doc_a.get("supplier_name") or "Supplier A").strip()
+    sup_b = (doc_b.get("supplier_name") or "Supplier B").strip()
+    cur_a = (doc_a.get("currency") or "EUR").strip().upper()
+    cur_b = (doc_b.get("currency") or "EUR").strip().upper()
+    cur = cur_a if cur_a == cur_b else cur_a
+
+    items_a = [
+        i for i in (doc_a.get("line_items") or [])
+        if product in _normalize_desc(i.get("description") or "")
+    ]
+    items_b = [
+        i for i in (doc_b.get("line_items") or [])
+        if product in _normalize_desc(i.get("description") or "")
+    ]
+
+    if not items_a and not items_b:
+        return build_provisioning_comparison_response(doc_a, doc_b)
+
+    detail_lines = []
+    for item in items_a:
+        desc = (item.get("description") or "").strip()
+        price = _compute_unit_price(item)
+        qty = item.get("quantity")
+        unit = (item.get("unit") or "kg").lower()
+        total = item.get("line_total")
+        if price is not None:
+            total_str = f" = {cur}{total:,.2f}" if total else ""
+            detail_lines.append(
+                f"• {sup_a}: {desc} — {qty}{unit} @ {cur}{price:.2f}/{unit}{total_str}"
+            )
+    for item in items_b:
+        desc = (item.get("description") or "").strip()
+        price = _compute_unit_price(item)
+        qty = item.get("quantity")
+        unit = (item.get("unit") or "kg").lower()
+        total = item.get("line_total")
+        if price is not None:
+            total_str = f" = {cur}{total:,.2f}" if total else ""
+            detail_lines.append(
+                f"• {sup_b}: {desc} — {qty}{unit} @ {cur}{price:.2f}/{unit}{total_str}"
+            )
+
+    # Build verdict
+    if items_a and items_b:
+        price_a = _compute_unit_price(items_a[0])
+        price_b = _compute_unit_price(items_b[0])
+        _, caveat = _match_provisioning_items(
+            items_a[0].get("description", ""),
+            items_b[0].get("description", ""),
+        )
+        if price_a and price_b and price_a != 0:
+            diff_pct = ((price_b - price_a) / price_a) * 100
+            if abs(diff_pct) < 2:
+                verdict = "both suppliers quote similar per-unit prices"
+            elif diff_pct > 0:
+                verdict = f"{sup_a} is cheaper per unit ({abs(diff_pct):.0f}% less)"
+            else:
+                verdict = f"{sup_b} is cheaper per unit ({abs(diff_pct):.0f}% less)"
+        else:
+            verdict = "prices not directly comparable"
+        why = verdict + (f". Check product form: {caveat}" if caveat else "")
+        actions = ["Confirm product form and quality match your requirements"]
+        if caveat:
+            actions.insert(0, f"Product form differs: {caveat} — verify before ordering")
+    elif items_a:
+        why = f"Only {sup_a} quotes {product}. {sup_b} does not include this item."
+        actions = [f"Request {product} pricing from {sup_b} if needed"]
+    else:
+        why = f"Only {sup_b} quotes {product}. {sup_a} does not include this item."
+        actions = [f"Request {product} pricing from {sup_a} if needed"]
+
+    response = _make_response(
+        decision=f"{product.upper()} — PRICE COMPARISON",
+        why=why,
+        actions=actions,
+    )
+    if detail_lines:
+        response += "\n\nDETAIL:\n" + "\n".join(detail_lines)
+    return response
+
+
 def _bundled_vs_itemised_note(doc_a: dict, doc_b: dict) -> str:
     """Return a scope warning when one quote is itemised and the other is not."""
     items_a = [i for i in (doc_a.get("line_items") or []) if i.get("description")]
@@ -1491,10 +1872,22 @@ def _is_provisioning_doc(doc: dict) -> bool:
     return categorize_quote(doc) == "provisioning"
 
 
-def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
+def _handle_quote_compare_intent(state: dict, message: str = "") -> Tuple[str, dict]:
     quote_docs = gather_quote_docs_for_comparison(state)
 
     if len(quote_docs) < 2:
+        # No new quotes available — check for an existing completed comparison to re-use.
+        active = get_active_session(state)
+        if active and active.get("session_type") == "quote_vs_quote":
+            existing = active.get("last_comparison")
+            if existing:
+                doc_a = existing["doc_a"]
+                doc_b = existing["doc_b"]
+                if _is_provisioning_doc(doc_a) and _is_provisioning_doc(doc_b):
+                    if message and _extract_provisioning_product(message):
+                        return _handle_provisioning_product_query(message, doc_a, doc_b), state
+                    return build_provisioning_comparison_response(doc_a, doc_b), state
+                return build_comparison_response(doc_a, doc_b, existing["comparison"]), state
         return _make_response(
             decision="NOT ENOUGH QUOTES TO COMPARE",
             why=f"Found {len(quote_docs)} quote(s) in recent sessions. At least 2 are needed.",
@@ -1516,11 +1909,11 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
 
     exclusion_section = ""
     if excluded_docs:
-        lines = [
+        exc_lines = [
             f"• {d.get('supplier_name') or 'Unknown'} — unrelated to the current comparison"
             for d in excluded_docs
         ]
-        exclusion_section = "EXCLUDED:\n" + "\n".join(lines)
+        exclusion_section = "EXCLUDED:\n" + "\n".join(exc_lines)
 
     state, session = create_quote_vs_quote_session(quote_docs, state)
 
@@ -1528,12 +1921,17 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
         doc_a, doc_b = quote_docs[0], quote_docs[1]
         comparison = compare_documents(doc_a, doc_b)
         state = store_comparison_result(session, state, doc_a, doc_b, comparison)
-        response = build_comparison_response(doc_a, doc_b, comparison)
-        bundled_note = _bundled_vs_itemised_note(doc_a, doc_b)
-        prov_note = _provisioning_comparison_note(doc_a, doc_b)
-        for note in (exclusion_section, bundled_note, prov_note):
-            if note:
-                response += "\n\n" + note
+        if _is_provisioning_doc(doc_a) and _is_provisioning_doc(doc_b):
+            response = build_provisioning_comparison_response(doc_a, doc_b)
+        else:
+            response = build_comparison_response(doc_a, doc_b, comparison)
+            bundled_note = _bundled_vs_itemised_note(doc_a, doc_b)
+            prov_note = _provisioning_comparison_note(doc_a, doc_b)
+            for note in (bundled_note, prov_note):
+                if note:
+                    response += "\n\n" + note
+        if exclusion_section:
+            response += "\n\n" + exclusion_section
         return response, state
 
     # Three quotes
@@ -3272,7 +3670,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         return _equipment_reset_response(), state
 
     if intent == "quote_compare":
-        return _handle_quote_compare_intent(state)
+        return _handle_quote_compare_intent(state, incoming)
 
     # Commercial context computed early — needed for follow-up routing decisions.
     active = get_active_session(state)
@@ -3423,18 +3821,28 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             # Provisioning/food quotes need a different response — don't ask for make/model.
             _recent_doc = (state.get("documents") or [None])[-1]
             if _recent_doc and _is_provisioning_doc(_recent_doc):
+                # If an active comparison already exists, return the full comparison overview.
+                _active = get_active_session(state)
+                if _active and _active.get("session_type") == "quote_vs_quote":
+                    _existing = _active.get("last_comparison")
+                    if _existing:
+                        _da, _db = _existing["doc_a"], _existing["doc_b"]
+                        if _is_provisioning_doc(_da) and _is_provisioning_doc(_db):
+                            _prov_response = build_provisioning_comparison_response(_da, _db)
+                            state["last_context"] = {"type": "market_check", "topic": incoming, "result": _prov_response}
+                            return _prov_response, state
                 _prov_response = _make_response(
-                    decision="NEED A LIKE-FOR-LIKE SUPPLIER COMPARISON OR MARKET CHECK FOR PROVISIONING PRICING",
+                    decision="PROVISIONING PRICING — LIKE-FOR-LIKE COMPARISON NEEDED",
                     why=(
-                        "This is a galley/provisioning quote. Fair price should be assessed by "
-                        "product type, product form, quantity, unit price, VAT, supplier location, and delivery terms."
+                        "This is a galley/provisioning quote. Fair price depends on product form, "
+                        "grade, quantity, VAT, supplier location, and delivery terms. "
+                        "Upload a second supplier quote to run a full comparison."
                     ),
                     actions=[
-                        "Compare against another provisioning or fish supplier quote",
+                        "Upload a second provisioning supplier quote to compare",
                         "Check high-value lines first — fish species, cut, and grade affect price significantly",
-                        "Confirm product form and quality grade before comparing (e.g. fillet vs side, loin vs portions)",
-                        "Verify VAT rate applied — provisioning VAT rates vary by country and product type",
-                        "Upload a second supplier quote to run a like-for-like comparison",
+                        "Confirm product form before comparing (fillet vs sides, loin vs portions)",
+                        "Verify VAT rate — provisioning rates vary by country and product type",
                     ],
                 )
                 state["last_context"] = {"type": "market_check", "topic": incoming, "result": _prov_response}
@@ -3463,6 +3871,16 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             "what ", "how ", "should ", "would ", "will ", "can ",
         ))
         if _is_q:
+            # For provisioning questions with an active comparison, return the comparison.
+            _active_fb = get_active_session(state)
+            if _active_fb and _active_fb.get("session_type") == "quote_vs_quote":
+                _fb_existing = _active_fb.get("last_comparison")
+                if _fb_existing:
+                    _fb_a, _fb_b = _fb_existing["doc_a"], _fb_existing["doc_b"]
+                    if _is_provisioning_doc(_fb_a) and _is_provisioning_doc(_fb_b):
+                        if _extract_provisioning_product(incoming):
+                            return _handle_provisioning_product_query(incoming, _fb_a, _fb_b), state
+                        return build_provisioning_comparison_response(_fb_a, _fb_b), state
             _ctx_parts = []
             if _comp_ctx:
                 _ctx_parts.append(_comp_ctx)
