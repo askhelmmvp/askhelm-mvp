@@ -468,6 +468,36 @@ class TestProvisioningDetailResponse(unittest.TestCase):
         self.assertLessEqual(len(resp), 1500, f"Default compare response too long: {len(resp)}")
         self.assertIn("line by line", resp.lower())
 
+    def test_detail_response_header(self):
+        from whatsapp_app import build_provisioning_detail_response
+        resp = build_provisioning_detail_response(self.doc_a, self.doc_b)
+        self.assertIn("ITEM-BY-ITEM COMPARISON", resp)
+
+    def test_detail_response_uses_new_currency_format(self):
+        from whatsapp_app import build_provisioning_detail_response
+        resp = build_provisioning_detail_response(self.doc_a, self.doc_b)
+        self.assertIn("EUR/kg", resp)
+        self.assertNotIn("@EUR", resp)
+        self.assertNotIn("=EUR", resp)
+
+    def test_detail_response_has_better_price_line(self):
+        from whatsapp_app import build_provisioning_detail_response
+        resp = build_provisioning_detail_response(self.doc_a, self.doc_b)
+        self.assertIn("Better price/kg:", resp)
+
+    def test_detail_response_smoked_salmon_label(self):
+        from whatsapp_app import build_provisioning_detail_response
+        resp = build_provisioning_detail_response(self.doc_a, self.doc_b)
+        self.assertIn("Smoked Salmon", resp)
+
+    def test_detail_response_multiline_per_item(self):
+        from whatsapp_app import build_provisioning_detail_response
+        resp = build_provisioning_detail_response(self.doc_a, self.doc_b)
+        # Each item block has indented sub-lines (two leading spaces)
+        self.assertIn("\n  ", resp)
+        # Items are separated by blank lines
+        self.assertIn("\n\n•", resp)
+
 
 # ---------------------------------------------------------------------------
 # Test 10: Unit price regression — OCR/extractor error correction

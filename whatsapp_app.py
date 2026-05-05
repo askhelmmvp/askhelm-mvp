@@ -1704,6 +1704,59 @@ def _build_item_diffs(items_a: list, items_b: list) -> tuple:
     return item_diffs, unmatched_a, unmatched_b
 
 
+# ---------------------------------------------------------------------------
+# Provisioning formatting helpers
+# ---------------------------------------------------------------------------
+
+_LEGAL_ENTITY_SUFFIXES = frozenset({
+    "bv", "sas", "sarl", "srl", "spa", "sa", "nv", "ag",
+    "ltd", "limited", "llc", "inc", "corp", "plc", "gmbh",
+})
+
+
+def _short_supplier_name(name: str) -> str:
+    """Strip trailing legal-entity identifiers and return the first two words."""
+    parts = name.strip().split()
+    while parts:
+        if parts[-1].lower().replace(".", "") in _LEGAL_ENTITY_SUFFIXES:
+            parts.pop()
+        else:
+            break
+    return " ".join(parts[:2]) if parts else name
+
+
+def _item_label(desc: str) -> str:
+    """
+    Human-readable item heading from a provisioning line-item description.
+    Prepends altering words (smoked, cured) when they appear in the description
+    but aren't already captured in the protein name — fixes "Salmon, Smoked …"
+    being labelled as just "Salmon".
+    """
+    protein = _extract_provisioning_product(desc)
+    if not protein:
+        return desc.split()[0].title() if desc.split() else desc
+    normalized = _normalize_desc(desc)
+    altering = [
+        w for w in normalized.split()
+        if w in _PROV_ALTERING_WORDS and w not in protein
+    ]
+    if altering:
+        return f"{' '.join(a.title() for a in altering)} {protein.title()}"
+    return protein.title()
+
+
+def _fmt_amount(value: float, currency: str) -> str:
+    """Format a monetary total as '1,013.25 EUR'."""
+    s = f"{value:,.2f}"
+    return f"{s} {currency}" if currency else s
+
+
+def _fmt_unit_price(up: float, currency: str) -> str:
+    """Format a per-kg unit price as '57.90 EUR/kg'."""
+    s = f"{up:.2f}"
+    return f"{s} {currency}/kg" if currency else f"{s}/kg"
+
+
 def build_provisioning_comparison_response(doc_a: dict, doc_b: dict) -> str:
     """
     Concise provisioning summary targeting ~700-900 characters.
@@ -1797,7 +1850,11 @@ def build_provisioning_comparison_response(doc_a: dict, doc_b: dict) -> str:
 
 
 def build_provisioning_detail_response(doc_a: dict, doc_b: dict) -> str:
-    """Full line-by-line provisioning comparison. May exceed 1,500 chars — caller splits."""
+    """
+    Full item-by-item provisioning comparison in a WhatsApp-friendly multi-line layout.
+    Each item spans multiple lines with blank-line separation. May need splitting — caller
+    uses _split_whatsapp_body.
+    """
     sup_a = doc_a.get("supplier_name") or "Supplier A"
     sup_b = doc_b.get("supplier_name") or "Supplier B"
     cur_a = doc_a.get("currency") or ""
@@ -1805,13 +1862,15 @@ def build_provisioning_detail_response(doc_a: dict, doc_b: dict) -> str:
     items_a = [i for i in (doc_a.get("line_items") or []) if i.get("description")]
     items_b = [i for i in (doc_b.get("line_items") or []) if i.get("description")]
 
+    short_a = _short_supplier_name(sup_a)
+    short_b = _short_supplier_name(sup_b)
+
     item_diffs, unmatched_a, unmatched_b = _build_item_diffs(items_a, items_b)
 
-    lines = [f"LINE-BY-LINE: {sup_a} vs {sup_b}\n"]
+    sections = [f"ITEM-BY-ITEM COMPARISON\n{sup_a} vs {sup_b}"]
 
     for desc_a, up_a, desc_b, up_b, _, chp_idx, caveat in item_diffs:
-        protein = _extract_provisioning_product(desc_a)
-        label = protein.title() if protein else desc_a.split()[0].title()
+        label = _item_label(desc_a)
         item_a = next((i for i in items_a if i.get("description") == desc_a), {})
         item_b = next((i for i in items_b if i.get("description") == desc_b), {})
         qty_a = item_a.get("quantity")
@@ -1819,41 +1878,45 @@ def build_provisioning_detail_response(doc_a: dict, doc_b: dict) -> str:
         qty_b = item_b.get("quantity")
         lt_b = item_b.get("line_total")
 
-        def _fmt(sup, cur, up, qty, lt):
-            parts = [sup]
-            if qty:
-                parts.append(f"{qty}kg")
+        def _side(short, up, qty, lt, cur):
+            parts = []
+            if qty is not None:
+                parts.append(f"{qty} kg")
             if up is not None:
-                parts.append(f"@{cur}{up:.2f}/kg")
+                parts.append(f"× {_fmt_unit_price(up, cur)}")
             if lt is not None:
-                parts.append(f"={cur}{lt:,.2f}")
-            return " ".join(parts)
+                parts.append(f"= {_fmt_amount(lt, cur)}")
+            return f"  {short}: " + " ".join(parts) if parts else f"  {short}: n/a"
 
-        side_a = _fmt(sup_a, cur_a, up_a, qty_a, lt_a)
-        side_b = _fmt(sup_b, cur_b, up_b, qty_b, lt_b)
-        notes = []
+        block = [f"• {label}"]
+        block.append(_side(short_a, up_a, qty_a, lt_a, cur_a))
+        block.append(_side(short_b, up_b, qty_b, lt_b, cur_b))
         if chp_idx == 0:
-            notes.append(f"{sup_a} cheaper per kg")
+            block.append(f"  Better price/kg: {short_a}")
         elif chp_idx == 1:
-            notes.append(f"{sup_b} cheaper per kg")
+            block.append(f"  Better price/kg: {short_b}")
         if caveat:
-            notes.append(f"check {caveat}")
-        note_str = ("; " + "; ".join(notes)) if notes else ""
-        lines.append(f"• {label}: {side_a}; {side_b}{note_str}.")
+            block.append(f"  Check: {caveat}")
+
+        sections.append("\n".join(block))
 
     if unmatched_a:
-        lines.append(f"\nIn {sup_a} only:")
+        lines = [f"In {short_a} only:"]
         for desc, up, qty, lt in unmatched_a:
-            up_str = f" @{cur_a}{up:.2f}/kg" if up is not None else ""
-            lines.append(f"  – {desc}{up_str}")
+            label = _item_label(desc)
+            up_str = f" — {_fmt_unit_price(up, cur_a)}" if up is not None else ""
+            lines.append(f"• {label}{up_str}")
+        sections.append("\n".join(lines))
 
     if unmatched_b:
-        lines.append(f"\nIn {sup_b} only:")
+        lines = [f"In {short_b} only:"]
         for desc, up, qty, lt in unmatched_b:
-            up_str = f" @{cur_b}{up:.2f}/kg" if up is not None else ""
-            lines.append(f"  – {desc}{up_str}")
+            label = _item_label(desc)
+            up_str = f" — {_fmt_unit_price(up, cur_b)}" if up is not None else ""
+            lines.append(f"• {label}{up_str}")
+        sections.append("\n".join(lines))
 
-    return "\n".join(lines)
+    return "\n\n".join(sections)
 
 
 def _handle_provisioning_product_query(message: str, doc_a: dict, doc_b: dict) -> str:
@@ -1882,16 +1945,16 @@ def _handle_provisioning_product_query(message: str, doc_a: dict, doc_b: dict) -
         desc = item.get("description") or ""
         qty = item.get("quantity") or "?"
         lt = item.get("line_total")
-        up_str = f"{cur_a}{up:.2f}/kg" if up is not None else "n/a"
-        lt_str = f" = {cur_a}{lt:,.2f}" if lt is not None else ""
+        up_str = _fmt_unit_price(up, cur_a) if up is not None else "n/a"
+        lt_str = f" = {_fmt_amount(lt, cur_a)}" if lt is not None else ""
         lines.append(f"{sup_a}: {desc} — {up_str} ×{qty}{lt_str}")
     for item in hits_b:
         up = _compute_unit_price(item)
         desc = item.get("description") or ""
         qty = item.get("quantity") or "?"
         lt = item.get("line_total")
-        up_str = f"{cur_b}{up:.2f}/kg" if up is not None else "n/a"
-        lt_str = f" = {cur_b}{lt:,.2f}" if lt is not None else ""
+        up_str = _fmt_unit_price(up, cur_b) if up is not None else "n/a"
+        lt_str = f" = {_fmt_amount(lt, cur_b)}" if lt is not None else ""
         lines.append(f"{sup_b}: {desc} — {up_str} ×{qty}{lt_str}")
 
     if hits_a and hits_b:
@@ -1900,7 +1963,7 @@ def _handle_provisioning_product_query(message: str, doc_a: dict, doc_b: dict) -
         if up_a is not None and up_b is not None and up_a != up_b:
             cheaper = sup_a if up_a < up_b else sup_b
             diff = abs(up_a - up_b)
-            lines.append(f"\n{cheaper} is cheaper per kg: saves {cur_a}{diff:.2f}/kg")
+            lines.append(f"\n{cheaper} is cheaper per kg: saves {_fmt_unit_price(diff, cur_a)}")
             _, caveat = _match_provisioning_items(
                 hits_a[0].get("description") or "", hits_b[0].get("description") or "",
             )
