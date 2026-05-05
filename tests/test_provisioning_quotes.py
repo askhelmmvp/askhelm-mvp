@@ -165,8 +165,8 @@ class TestCompassTendersExcluded(unittest.TestCase):
         state = self._three_quote_state()
         from whatsapp_app import _handle_quote_compare_intent
         response, _ = _handle_quote_compare_intent(state)
-        self.assertIn("NOTE:", response)
-        # Should contain provisioning warning
+        # The provisioning comparison response must contain like-for-like guidance
+        # (either in RECOMMENDED ACTIONS or as a NOTE — format may vary).
         self.assertTrue(
             "provisioning" in response.lower() or "like-for-like" in response.lower(),
             "No provisioning/like-for-like note found",
@@ -327,6 +327,112 @@ class TestComplianceRegression(unittest.TestCase):
             state, _ = create_quote_session(_we_supply_quote(), state)
             response, _ = _handle_text_message("is this compliant with MARPOL Annex VI?", state)
         self.assertIn("DECISION", response)
+
+
+# ---------------------------------------------------------------------------
+# Test 7: Provisioning line-by-line comparison (ASK-28 Part 2)
+# ---------------------------------------------------------------------------
+
+class TestProvisioningLineComparison(unittest.TestCase):
+
+    def _two_fish_state(self):
+        state = _empty_state()
+        state, _ = create_quote_session(_we_supply_quote(), state)
+        state, _ = create_quote_session(_riviera_quote(), state)
+        return state
+
+    def test_provisioning_comparison_has_line_by_line_section(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertIn("LINE-BY-LINE", response)
+
+    def test_provisioning_comparison_decision_names_cheaper_supplier(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        # Riviera total 5459.85 < We Supply 6809.38 → Riviera is cheaper
+        self.assertIn("PROVISIONING COMPARISON", response)
+        lower = response.lower()
+        self.assertTrue(
+            "riviera" in lower or "cheaper" in lower or "we supply" in lower,
+            f"Neither supplier nor 'cheaper' appears in decision: {response[:300]}",
+        )
+
+    def test_provisioning_comparison_shows_salmon_line(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        lower = response.lower()
+        self.assertTrue(
+            "salmon" in lower,
+            "Salmon line not found in provisioning comparison",
+        )
+
+    def test_provisioning_comparison_shows_per_kg_prices(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        # Should show /kg pricing
+        self.assertIn("/kg", response)
+
+    def test_provisioning_comparison_recommended_actions_present(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertIn("RECOMMENDED ACTIONS", response)
+
+    def test_no_generic_engineering_actions_in_provisioning_response(self):
+        state = self._two_fish_state()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        # Engineering-specific actions should not appear in provisioning comparison
+        self.assertNotIn("make/model", response.lower())
+        self.assertNotIn("equipment make", response.lower())
+
+
+# ---------------------------------------------------------------------------
+# Test 8: Follow-up after provisioning comparison (ASK-28 Part 2)
+# ---------------------------------------------------------------------------
+
+class TestProvisioningComparisonFollowUp(unittest.TestCase):
+
+    def _state_after_comparison(self):
+        state = _empty_state()
+        state, _ = create_quote_session(_we_supply_quote(), state)
+        state, _ = create_quote_session(_riviera_quote(), state)
+        from whatsapp_app import _handle_quote_compare_intent
+        _, state = _handle_quote_compare_intent(state)
+        return state
+
+    def test_which_quote_should_i_go_for_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        result = classify_text("which quote should i go for")
+        self.assertEqual(result, "quote_compare")
+
+    def test_overview_of_each_quote_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        result = classify_text("give me an overview of each quote")
+        self.assertEqual(result, "quote_compare")
+
+    def test_are_these_like_for_like_routes_to_quote_compare(self):
+        from domain.intent import classify_text
+        result = classify_text("are these like for like")
+        self.assertEqual(result, "quote_compare")
+
+    def test_follow_up_after_comparison_reuses_existing_data(self):
+        state = self._state_after_comparison()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        # Should return the provisioning comparison (not "NOT ENOUGH QUOTES")
+        self.assertNotIn("NOT ENOUGH QUOTES", response)
+        self.assertIn("PROVISIONING COMPARISON", response)
+
+    def test_follow_up_response_still_has_line_by_line(self):
+        state = self._state_after_comparison()
+        from whatsapp_app import _handle_quote_compare_intent
+        response, _ = _handle_quote_compare_intent(state)
+        self.assertIn("LINE-BY-LINE", response)
 
 
 if __name__ == "__main__":

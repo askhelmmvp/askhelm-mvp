@@ -18,7 +18,7 @@ from services.anthropic_vision_service import (
     extract_commercial_document_from_images,
     summarise_operational_note_from_image,
 )
-from domain.compare import compare_documents, filter_quotes_by_relevance, categorize_quote
+from domain.compare import compare_documents, filter_quotes_by_relevance, categorize_quote, _desc_matches
 from domain.session_store import user_id_from_phone, load_user_state, save_user_state
 from domain.session_manager import (
     make_document_record,
@@ -1462,6 +1462,143 @@ def _handle_invoice_upload(
     return "", state
 
 
+def _compute_unit_price(item: dict) -> Optional[float]:
+    """Return the per-unit price for a line item.
+
+    The extractor sometimes places line_total in the unit_rate field when
+    quantity is absent or unclear. We detect this by checking whether
+    unit_rate × quantity ≈ line_total; if so, unit_rate is correct as-is.
+    If not, we compute line_total / quantity as the fallback.
+    """
+    unit_rate = item.get("unit_rate")
+    line_total = item.get("line_total")
+    qty = item.get("quantity")
+
+    if unit_rate is not None and qty and line_total is not None:
+        computed = unit_rate * qty
+        if abs(computed - line_total) / max(abs(line_total), 0.01) < 0.02:
+            return unit_rate
+        return line_total / qty if qty else unit_rate
+    if unit_rate is not None and qty:
+        return unit_rate
+    if line_total is not None and qty:
+        return line_total / qty
+    return unit_rate
+
+
+def _build_provisioning_line_comparison(
+    items_a: list, items_b: list, sup_a: str, sup_b: str, cur: str
+) -> str:
+    """Match provisioning line items across two quotes and return compact bullet lines."""
+    lines = []
+    matched_b_indices: set = set()
+
+    for item_a in items_a:
+        desc_a = (item_a.get("description") or "").strip()
+        if not desc_a:
+            continue
+
+        matched_b = None
+        matched_b_idx = None
+        for idx_b, item_b in enumerate(items_b):
+            if idx_b in matched_b_indices:
+                continue
+            desc_b = (item_b.get("description") or "").strip()
+            if _desc_matches(desc_a, desc_b):
+                matched_b = item_b
+                matched_b_idx = idx_b
+                break
+
+        price_a = _compute_unit_price(item_a)
+        qty_a = item_a.get("quantity")
+
+        if matched_b is not None:
+            matched_b_indices.add(matched_b_idx)
+            price_b = _compute_unit_price(matched_b)
+            qty_b = matched_b.get("quantity")
+
+            if price_a is not None and price_b is not None and price_a != 0:
+                diff_pct = ((price_b - price_a) / price_a) * 100
+                if abs(diff_pct) < 2:
+                    diff_str = " (same)"
+                elif diff_pct > 0:
+                    diff_str = f" ({sup_b} +{diff_pct:.0f}%)"
+                else:
+                    diff_str = f" ({sup_b} {diff_pct:.0f}%)"
+                qty_note = ""
+                if qty_a is not None and qty_b is not None and abs(qty_a - qty_b) > 0.01:
+                    qty_note = f" ⚠ qty mismatch: {sup_a}={qty_a}kg, {sup_b}={qty_b}kg"
+                lines.append(
+                    f"• {desc_a}: {cur}{price_a:.2f}/kg vs {cur}{price_b:.2f}/kg{diff_str}{qty_note}"
+                )
+            elif price_a is not None or price_b is not None:
+                lines.append(f"• {desc_a}: {sup_a} ✓, {sup_b} ✓")
+        else:
+            if price_a is not None:
+                lines.append(f"• {desc_a}: {cur}{price_a:.2f}/kg ({sup_b} — not quoted)")
+            else:
+                lines.append(f"• {desc_a}: {sup_a} only ({sup_b} — not quoted)")
+
+    for idx_b, item_b in enumerate(items_b):
+        if idx_b in matched_b_indices:
+            continue
+        desc_b = (item_b.get("description") or "").strip()
+        if not desc_b:
+            continue
+        price_b = _compute_unit_price(item_b)
+        if price_b is not None:
+            lines.append(f"• {desc_b}: {cur}{price_b:.2f}/kg ({sup_a} — not quoted)")
+        else:
+            lines.append(f"• {desc_b}: {sup_a} — not quoted, {sup_b} ✓")
+
+    return "\n".join(lines)
+
+
+def build_provisioning_comparison_response(doc_a: dict, doc_b: dict) -> str:
+    """Build a structured line-by-line comparison response for provisioning/food quotes."""
+    sup_a = (doc_a.get("supplier_name") or "Supplier A").strip()
+    sup_b = (doc_b.get("supplier_name") or "Supplier B").strip()
+    total_a = doc_a.get("total")
+    total_b = doc_b.get("total")
+    cur_a = (doc_a.get("currency") or "EUR").strip().upper()
+    cur_b = (doc_b.get("currency") or "EUR").strip().upper()
+    cur = cur_a if cur_a == cur_b else cur_a
+
+    if total_a is not None and total_b is not None and total_a != 0:
+        delta = total_b - total_a
+        delta_pct = (delta / total_a) * 100
+        if delta < 0:
+            decision = f"PROVISIONING COMPARISON — {sup_a.upper()} IS CHEAPER"
+        elif delta > 0:
+            decision = f"PROVISIONING COMPARISON — {sup_b.upper()} IS CHEAPER"
+        else:
+            decision = "PROVISIONING COMPARISON — SAME TOTAL"
+        why = (
+            f"{sup_a}: {cur_a} {total_a:,.2f}\n"
+            f"{sup_b}: {cur_b} {total_b:,.2f}\n"
+            f"Difference: {cur_a} {abs(delta):,.2f} ({abs(delta_pct):.1f}%)"
+        )
+    else:
+        decision = "PROVISIONING COMPARISON"
+        why = "Totals could not be compared — see line-by-line breakdown below."
+
+    items_a = doc_a.get("line_items") or []
+    items_b = doc_b.get("line_items") or []
+    line_comparison = _build_provisioning_line_comparison(items_a, items_b, sup_a, sup_b, cur)
+
+    actions = [
+        "Verify product form is like-for-like (fillet vs sides, fresh vs frozen)",
+        "Check quantities match your order requirements on all lines",
+        "Confirm delivery terms and lead times with both suppliers",
+        "Review high-value lines first and negotiate on those",
+    ]
+
+    response = _make_response(decision=decision, why=why, actions=actions)
+    if line_comparison:
+        response += f"\n\nLINE-BY-LINE:\n{line_comparison}"
+    return response
+
+
 def _bundled_vs_itemised_note(doc_a: dict, doc_b: dict) -> str:
     """Return a scope warning when one quote is itemised and the other is not."""
     items_a = [i for i in (doc_a.get("line_items") or []) if i.get("description")]
@@ -1495,6 +1632,16 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
     quote_docs = gather_quote_docs_for_comparison(state)
 
     if len(quote_docs) < 2:
+        # No new quotes — check if there is an existing comparison to replay.
+        active = get_active_session(state)
+        if active and active.get("session_type") == "quote_vs_quote":
+            existing = active.get("last_comparison")
+            if existing:
+                doc_a = existing["doc_a"]
+                doc_b = existing["doc_b"]
+                if _is_provisioning_doc(doc_a) and _is_provisioning_doc(doc_b):
+                    return build_provisioning_comparison_response(doc_a, doc_b), state
+                return build_comparison_response(doc_a, doc_b, existing["comparison"]), state
         return _make_response(
             decision="NOT ENOUGH QUOTES TO COMPARE",
             why=f"Found {len(quote_docs)} quote(s) in recent sessions. At least 2 are needed.",
@@ -1528,12 +1675,15 @@ def _handle_quote_compare_intent(state: dict) -> Tuple[str, dict]:
         doc_a, doc_b = quote_docs[0], quote_docs[1]
         comparison = compare_documents(doc_a, doc_b)
         state = store_comparison_result(session, state, doc_a, doc_b, comparison)
-        response = build_comparison_response(doc_a, doc_b, comparison)
-        bundled_note = _bundled_vs_itemised_note(doc_a, doc_b)
-        prov_note = _provisioning_comparison_note(doc_a, doc_b)
-        for note in (exclusion_section, bundled_note, prov_note):
-            if note:
-                response += "\n\n" + note
+        if _is_provisioning_doc(doc_a) and _is_provisioning_doc(doc_b):
+            response = build_provisioning_comparison_response(doc_a, doc_b)
+        else:
+            response = build_comparison_response(doc_a, doc_b, comparison)
+            bundled_note = _bundled_vs_itemised_note(doc_a, doc_b)
+            if bundled_note:
+                response += "\n\n" + bundled_note
+        if exclusion_section:
+            response += "\n\n" + exclusion_section
         return response, state
 
     # Three quotes
