@@ -263,6 +263,56 @@ def format_item_list(items, empty_message):
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp message length guard
+# ---------------------------------------------------------------------------
+
+_WA_MAX_CHARS = 1500
+
+
+def _split_whatsapp_body(body: str, max_chars: int = _WA_MAX_CHARS) -> list:
+    """
+    Split a WhatsApp body into chunks no longer than max_chars.
+    Splits at paragraph boundaries first (double newlines), then line boundaries.
+    Returns a list with at least one element.
+    """
+    if len(body) <= max_chars:
+        return [body]
+
+    chunks = []
+    current = ""
+    for para in body.split("\n\n"):
+        candidate = (current + "\n\n" + para).strip() if current else para
+        if len(candidate) <= max_chars:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            # Para itself may exceed max_chars — split at line boundaries
+            if len(para) <= max_chars:
+                current = para
+            else:
+                current = ""
+                for line in para.split("\n"):
+                    candidate_line = (current + "\n" + line).strip() if current else line
+                    if len(candidate_line) <= max_chars:
+                        current = candidate_line
+                    else:
+                        if current:
+                            chunks.append(current)
+                        current = line[:max_chars]
+    if current:
+        chunks.append(current)
+
+    if not chunks:
+        chunks = [body[:max_chars]]
+
+    lengths = [len(c) for c in chunks]
+    if len(chunks) > 1:
+        logger.info("whatsapp_split: body_length=%d chunks=%d chunk_lengths=%s", len(body), len(chunks), lengths)
+    return chunks
+
+
+# ---------------------------------------------------------------------------
 # Response formatting
 # ---------------------------------------------------------------------------
 
@@ -1501,11 +1551,16 @@ _PROV_FORM_WORDS = frozenset({
     "boneless", "skinless", "ring", "rings",
 })
 
+_PROV_FORM_SINGULAR = {
+    "fillets": "fillet", "sides": "side", "loins": "loin",
+    "portions": "portion", "steaks": "steak", "slices": "slice", "rings": "ring",
+}
+
 _PROV_ALTERING_WORDS = frozenset({
-    "smoked", "cooked", "cured", "marinated", "salted", "dried",
+    "smoked", "cured", "marinated", "salted", "dried",
 })
 
-# Sorted longest-first so multi-word names ("smoked salmon") match before shorter ones ("salmon").
+# Sorted longest-first so multi-word names ("smoked salmon", "sea bass") match before shorter ones.
 _PROV_PROTEIN_NAMES = tuple(sorted([
     "smoked salmon", "sea bass", "bluefin tuna", "squid rings",
     "salmon", "bass", "tuna", "bluefin", "prawn", "prawns", "squid", "octopus", "brill",
@@ -1514,11 +1569,30 @@ _PROV_PROTEIN_NAMES = tuple(sorted([
     "beef", "chicken", "lamb", "pork", "veal", "duck", "turkey",
 ], key=len, reverse=True))
 
+_DETAIL_REQUEST_SUBSTRINGS = frozenset({
+    "line by line", "full item comparison", "item by item",
+    "detailed comparison", "show all items", "full comparison",
+})
+
+
+def _is_detail_request(message: str) -> bool:
+    t = message.strip().lower()
+    return any(phrase in t for phrase in _DETAIL_REQUEST_SUBSTRINGS)
+
+
+def _prov_form_set(norm_desc: str) -> frozenset:
+    """Singular-normalised form words from a normalised description."""
+    return frozenset(
+        _PROV_FORM_SINGULAR.get(w, w)
+        for w in norm_desc.split()
+        if w in _PROV_FORM_WORDS
+    )
+
 
 def _compute_unit_price(item: dict) -> Optional[float]:
     """
-    Return the per-unit price from a line item, correcting for OCR/extractor
-    errors where unit_rate is set to line_total instead of the actual unit rate.
+    Return the per-unit price, correcting for OCR errors where unit_rate
+    contains the line total instead of the actual rate (unit_rate × qty ≠ line_total).
     """
     unit_rate = item.get("unit_rate")
     line_total = item.get("line_total")
@@ -1538,23 +1612,33 @@ def _compute_unit_price(item: dict) -> Optional[float]:
 def _match_provisioning_items(desc_a: str, desc_b: str) -> tuple:
     """
     Match two provisioning line-item descriptions by protein name.
-    Returns (matched: bool, caveat: str) where caveat describes product form differences.
-    Smoked/cooked/cured items are treated as distinct products from their raw equivalents.
+    Returns (matched: bool, caveat: str) where caveat notes form or processing differences.
+    Smoked/cured salmon is treated as a distinct product from fresh salmon.
     """
     da = _normalize_desc(desc_a)
     db = _normalize_desc(desc_b)
     for protein in _PROV_PROTEIN_NAMES:
         if protein in da and protein in db:
-            alter_a = {w for w in da.split() if w in _PROV_ALTERING_WORDS}
-            alter_b = {w for w in db.split() if w in _PROV_ALTERING_WORDS}
-            if alter_a != alter_b:
+            alter_a = frozenset(w for w in da.split() if w in _PROV_ALTERING_WORDS)
+            alter_b = frozenset(w for w in db.split() if w in _PROV_ALTERING_WORDS)
+            # Smoked/cured salmon is a distinct product — smoked vs fresh must not match
+            if "salmon" in protein and alter_a != alter_b:
                 return False, ""
-            form_a = {w for w in da.split() if w in _PROV_FORM_WORDS}
-            form_b = {w for w in db.split() if w in _PROV_FORM_WORDS}
-            caveat = ""
-            if form_a and form_b and form_a != form_b:
-                caveat = f"{', '.join(sorted(form_a))} vs {', '.join(sorted(form_b))}"
-            return True, caveat
+            form_a = _prov_form_set(da)
+            form_b = _prov_form_set(db)
+            caveat_parts = []
+            if form_a != form_b:
+                if form_a and form_b:
+                    caveat_parts.append(f"{', '.join(sorted(form_a))} vs {', '.join(sorted(form_b))}")
+                elif form_a:
+                    caveat_parts.append(', '.join(sorted(form_a)))
+                else:
+                    caveat_parts.append(', '.join(sorted(form_b)))
+            if alter_a != alter_b:
+                a_str = ', '.join(sorted(alter_a)) or 'unprocessed'
+                b_str = ', '.join(sorted(alter_b)) or 'unprocessed'
+                caveat_parts.append(f"{a_str} vs {b_str}")
+            return True, " — ".join(caveat_parts)
     return False, ""
 
 
@@ -1567,112 +1651,209 @@ def _extract_provisioning_product(message: str) -> Optional[str]:
     return None
 
 
+def _build_item_diffs(items_a: list, items_b: list) -> tuple:
+    """
+    Match items between two provisioning quotes.
+    Returns (item_diffs, unmatched_a, unmatched_b) where:
+      item_diffs = list of (desc_a, up_a, desc_b, up_b, pct_diff, cheaper_idx, caveat)
+      unmatched_a/b = list of (desc, up, qty, line_total) for unmatched items.
+    cheaper_idx: 0=A cheaper, 1=B cheaper, None=same.
+    """
+    matched_b = set()
+    item_diffs = []
+    unmatched_a = []
+
+    for item_a in items_a:
+        desc_a = item_a.get("description") or ""
+        up_a = _compute_unit_price(item_a)
+        found = False
+        for j, item_b in enumerate(items_b):
+            if j in matched_b:
+                continue
+            desc_b = item_b.get("description") or ""
+            is_match, caveat = _match_provisioning_items(desc_a, desc_b)
+            if is_match:
+                matched_b.add(j)
+                found = True
+                up_b = _compute_unit_price(item_b)
+                pct_diff = 0.0
+                cheaper_idx = None
+                if up_a is not None and up_b is not None:
+                    mx = max(up_a, up_b)
+                    pct_diff = abs(up_a - up_b) / mx * 100 if mx > 0 else 0.0
+                    if up_a < up_b:
+                        cheaper_idx = 0
+                    elif up_b < up_a:
+                        cheaper_idx = 1
+                item_diffs.append((desc_a, up_a, desc_b, up_b, pct_diff, cheaper_idx, caveat))
+                break
+        if not found:
+            unmatched_a.append((
+                desc_a, up_a, item_a.get("quantity"), item_a.get("line_total")
+            ))
+
+    unmatched_b = []
+    for j, item_b in enumerate(items_b):
+        if j not in matched_b:
+            desc_b = item_b.get("description") or ""
+            unmatched_b.append((
+                desc_b, _compute_unit_price(item_b),
+                item_b.get("quantity"), item_b.get("line_total")
+            ))
+
+    return item_diffs, unmatched_a, unmatched_b
+
+
 def build_provisioning_comparison_response(doc_a: dict, doc_b: dict) -> str:
-    """Structured provisioning comparison: DECISION → WHY → RECOMMENDED ACTIONS → LINE-BY-LINE → CHECK BEFORE ORDERING."""
+    """
+    Concise provisioning summary targeting ~700-900 characters.
+    Ends with a 'line by line' follow-up hint so users can get detail on request.
+    """
     sup_a = doc_a.get("supplier_name") or "Supplier A"
     sup_b = doc_b.get("supplier_name") or "Supplier B"
     total_a = doc_a.get("total") or 0.0
     total_b = doc_b.get("total") or 0.0
+    cur = doc_a.get("currency") or doc_b.get("currency") or ""
+    items_a = [i for i in (doc_a.get("line_items") or []) if i.get("description")]
+    items_b = [i for i in (doc_b.get("line_items") or []) if i.get("description")]
+
+    # Determine cheaper supplier
+    cheaper_sup = pricier_sup = None
+    saving = saving_pct = None
+    same_cur = (doc_a.get("currency") or "") == (doc_b.get("currency") or "")
+    if same_cur and total_a and total_b:
+        if total_b < total_a:
+            cheaper_sup, pricier_sup = sup_b, sup_a
+            saving = total_a - total_b
+            saving_pct = saving / total_a * 100
+        elif total_a < total_b:
+            cheaper_sup, pricier_sup = sup_a, sup_b
+            saving = total_b - total_a
+            saving_pct = saving / total_b * 100
+
+    item_diffs, unmatched_a, unmatched_b = _build_item_diffs(items_a, items_b)
+
+    # DECISION
+    if cheaper_sup:
+        decision = f"{cheaper_sup} looks better value, but not all items are like-for-like."
+    else:
+        decision = "Items differ in form and quantity — check before choosing on price."
+
+    # WHY (compact)
+    if saving is not None:
+        why = (
+            f"{sup_a}: {cur}{total_a:,.2f} | {sup_b}: {cur}{total_b:,.2f}\n"
+            f"Saving with {cheaper_sup}: {cur}{saving:,.2f} ({saving_pct:.1f}%)\n"
+            f"Not fully like-for-like — forms and quantities differ."
+        )
+    else:
+        why = (
+            f"{sup_a}: {total_a:,.2f} ({len(items_a)} items)\n"
+            f"{sup_b}: {total_b:,.2f} ({len(items_b)} items)"
+        )
+
+    # KEY CHECKS — top 5 items by price difference
+    item_diffs_sorted = sorted(item_diffs, key=lambda x: x[4], reverse=True)
+    checks = []
+    for desc_a, up_a, _db, up_b, _, chp_idx, caveat in item_diffs_sorted[:5]:
+        protein = _extract_provisioning_product(desc_a)
+        label = protein.title() if protein else desc_a.split()[0].title()
+        if chp_idx == 0:
+            note = f"{sup_a} cheaper"
+        elif chp_idx == 1:
+            note = f"{sup_b} cheaper"
+        else:
+            note = "same price"
+        if caveat:
+            note += f" — {caveat}"
+        checks.append(f"• {label}: {note}")
+
+    if unmatched_a:
+        labels = [(_extract_provisioning_product(d) or d.split()[0]).title() for d, *_ in unmatched_a[:2]]
+        checks.append(f"• {', '.join(labels)}: in {sup_a} only")
+    if unmatched_b:
+        labels = [(_extract_provisioning_product(d) or d.split()[0]).title() for d, *_ in unmatched_b[:2]]
+        checks.append(f"• {', '.join(labels)}: in {sup_b} only")
+
+    # ACTIONS
+    if cheaper_sup and pricier_sup:
+        actions = (
+            f"Use {cheaper_sup} if product forms and quality match what you need.\n"
+            f"Use {pricier_sup} if its cuts, grade, or delivery are required."
+        )
+    else:
+        actions = "Check product forms match before placing the order."
+
+    sections = [
+        f"DECISION:\n{decision}",
+        f"WHY:\n{why}",
+    ]
+    if checks:
+        sections.append("KEY CHECKS:\n" + "\n".join(checks))
+    sections.append(f"ACTIONS:\n{actions}")
+    sections.append('Reply "line by line" for full item comparison.')
+
+    return "\n\n".join(sections)
+
+
+def build_provisioning_detail_response(doc_a: dict, doc_b: dict) -> str:
+    """Full line-by-line provisioning comparison. May exceed 1,500 chars — caller splits."""
+    sup_a = doc_a.get("supplier_name") or "Supplier A"
+    sup_b = doc_b.get("supplier_name") or "Supplier B"
     cur_a = doc_a.get("currency") or ""
     cur_b = doc_b.get("currency") or ""
     items_a = [i for i in (doc_a.get("line_items") or []) if i.get("description")]
     items_b = [i for i in (doc_b.get("line_items") or []) if i.get("description")]
 
-    # Determine cheaper supplier
-    cheaper_sup = None
-    saving = None
-    pct = None
-    if cur_a == cur_b and total_a and total_b:
-        if total_b < total_a:
-            cheaper_sup, saving, pct = sup_b, total_a - total_b, (total_a - total_b) / total_a * 100
-        elif total_a < total_b:
-            cheaper_sup, saving, pct = sup_a, total_b - total_a, (total_b - total_a) / total_b * 100
+    item_diffs, unmatched_a, unmatched_b = _build_item_diffs(items_a, items_b)
 
-    decision = (
-        f"{cheaper_sup} is cheaper for this provisioning order"
-        if cheaper_sup else "PROVISIONING QUOTE COMPARISON"
-    )
+    lines = [f"LINE-BY-LINE: {sup_a} vs {sup_b}\n"]
 
-    why_lines = [
-        f"{sup_a}: {cur_a}{total_a:,.2f} total ({len(items_a)} items)",
-        f"{sup_b}: {cur_b}{total_b:,.2f} total ({len(items_b)} items)",
-    ]
-    if saving is not None:
-        why_lines.append(f"Saving with {cheaper_sup}: {cur_a}{saving:,.2f} ({pct:.1f}%)")
-    why = "\n".join(why_lines)
-
-    actions = [
-        "Verify product form is like-for-like before choosing on price alone",
-        "Check high-value items — fish species, cut, and grade affect price significantly",
-        "Confirm quantities match exactly before placing the order",
-        "Verify VAT rate applied — provisioning VAT rates vary by product type and country",
-    ]
-
-    # Build line-by-line comparison
-    line_parts = []
-    form_diffs = []
-    matched_b_indices = set()
-
-    for item_a in items_a:
-        desc_a = item_a.get("description") or ""
-        up_a = _compute_unit_price(item_a)
+    for desc_a, up_a, desc_b, up_b, _, chp_idx, caveat in item_diffs:
+        protein = _extract_provisioning_product(desc_a)
+        label = protein.title() if protein else desc_a.split()[0].title()
+        item_a = next((i for i in items_a if i.get("description") == desc_a), {})
+        item_b = next((i for i in items_b if i.get("description") == desc_b), {})
         qty_a = item_a.get("quantity")
-        matched = False
-        for j, item_b in enumerate(items_b):
-            if j in matched_b_indices:
-                continue
-            desc_b = item_b.get("description") or ""
-            is_match, caveat = _match_provisioning_items(desc_a, desc_b)
-            if is_match:
-                matched_b_indices.add(j)
-                matched = True
-                up_b = _compute_unit_price(item_b)
-                qty_b = item_b.get("quantity")
-                up_a_str = f"{cur_a}{up_a:.2f}/unit" if up_a is not None else "n/a"
-                up_b_str = f"{cur_b}{up_b:.2f}/unit" if up_b is not None else "n/a"
-                qty_str_a = f" ×{qty_a}" if qty_a else ""
-                qty_str_b = f" ×{qty_b}" if qty_b else ""
-                cheaper_tag = ""
-                if up_a is not None and up_b is not None and up_a != up_b:
-                    cheaper_tag = f" [{sup_a if up_a < up_b else sup_b} cheaper]"
-                caveat_tag = f" ({caveat})" if caveat else ""
-                line_parts.append(
-                    f"  {desc_a}{caveat_tag} | {up_a_str}{qty_str_a} vs {up_b_str}{qty_str_b}{cheaper_tag}"
-                )
-                if caveat:
-                    form_diffs.append(f"{desc_a}: {caveat}")
-                break
-        if not matched:
-            line_parts.append(f"  {desc_a} | {cur_a}{_compute_unit_price(item_a) or '?':.2f}/unit ×{qty_a or '?'} | NOT IN {sup_b}")
+        lt_a = item_a.get("line_total")
+        qty_b = item_b.get("quantity")
+        lt_b = item_b.get("line_total")
 
-    for j, item_b in enumerate(items_b):
-        if j not in matched_b_indices:
-            desc_b = item_b.get("description") or ""
-            up_b = _compute_unit_price(item_b)
-            qty_b = item_b.get("quantity")
-            line_parts.append(f"  {desc_b} | NOT IN {sup_a} | {cur_b}{up_b or '?':.2f}/unit ×{qty_b or '?'}")
+        def _fmt(sup, cur, up, qty, lt):
+            parts = [sup]
+            if qty:
+                parts.append(f"{qty}kg")
+            if up is not None:
+                parts.append(f"@{cur}{up:.2f}/kg")
+            if lt is not None:
+                parts.append(f"={cur}{lt:,.2f}")
+            return " ".join(parts)
 
-    sections = [
-        f"DECISION:\n{decision}",
-        f"WHY:\n{why}",
-        "RECOMMENDED ACTIONS:\n• " + "\n• ".join(actions),
-    ]
+        side_a = _fmt(sup_a, cur_a, up_a, qty_a, lt_a)
+        side_b = _fmt(sup_b, cur_b, up_b, qty_b, lt_b)
+        notes = []
+        if chp_idx == 0:
+            notes.append(f"{sup_a} cheaper per kg")
+        elif chp_idx == 1:
+            notes.append(f"{sup_b} cheaper per kg")
+        if caveat:
+            notes.append(f"check {caveat}")
+        note_str = ("; " + "; ".join(notes)) if notes else ""
+        lines.append(f"• {label}: {side_a}; {side_b}{note_str}.")
 
-    if line_parts:
-        sections.append(f"LINE-BY-LINE ({sup_a} vs {sup_b}):\n" + "\n".join(line_parts))
+    if unmatched_a:
+        lines.append(f"\nIn {sup_a} only:")
+        for desc, up, qty, lt in unmatched_a:
+            up_str = f" @{cur_a}{up:.2f}/kg" if up is not None else ""
+            lines.append(f"  – {desc}{up_str}")
 
-    check_items = []
-    if form_diffs:
-        check_items.append(
-            "Product form differences — confirm like-for-like:\n" +
-            "\n".join(f"  – {d}" for d in form_diffs)
-        )
-    check_items.append(
-        "Smoked, cured, or cooked variants are treated as distinct products — verify grade and processing"
-    )
-    sections.append("CHECK BEFORE ORDERING:\n• " + "\n• ".join(check_items))
+    if unmatched_b:
+        lines.append(f"\nIn {sup_b} only:")
+        for desc, up, qty, lt in unmatched_b:
+            up_str = f" @{cur_b}{up:.2f}/kg" if up is not None else ""
+            lines.append(f"  – {desc}{up_str}")
 
-    return "\n\n".join(sections)
+    return "\n".join(lines)
 
 
 def _handle_provisioning_product_query(message: str, doc_a: dict, doc_b: dict) -> str:
@@ -1687,43 +1868,41 @@ def _handle_provisioning_product_query(message: str, doc_a: dict, doc_b: dict) -
     cur_b = doc_b.get("currency") or ""
 
     def _find(doc, prod):
-        return [
-            i for i in (doc.get("line_items") or [])
-            if prod in (i.get("description") or "").lower()
-        ]
+        return [i for i in (doc.get("line_items") or []) if prod in (i.get("description") or "").lower()]
 
-    items_a = _find(doc_a, product)
-    items_b = _find(doc_b, product)
+    hits_a = _find(doc_a, product)
+    hits_b = _find(doc_b, product)
 
-    if not items_a and not items_b:
+    if not hits_a and not hits_b:
         return build_provisioning_comparison_response(doc_a, doc_b)
 
     lines = [f"PRICE CHECK: {product.title()}\n"]
-    for item in items_a:
+    for item in hits_a:
         up = _compute_unit_price(item)
         desc = item.get("description") or ""
         qty = item.get("quantity") or "?"
-        total = item.get("line_total") or "?"
-        up_str = f"{cur_a}{up:.2f}/unit" if up is not None else "n/a"
-        lines.append(f"{sup_a}: {desc} — {up_str} ×{qty} = {cur_a}{total}")
-    for item in items_b:
+        lt = item.get("line_total")
+        up_str = f"{cur_a}{up:.2f}/kg" if up is not None else "n/a"
+        lt_str = f" = {cur_a}{lt:,.2f}" if lt is not None else ""
+        lines.append(f"{sup_a}: {desc} — {up_str} ×{qty}{lt_str}")
+    for item in hits_b:
         up = _compute_unit_price(item)
         desc = item.get("description") or ""
         qty = item.get("quantity") or "?"
-        total = item.get("line_total") or "?"
-        up_str = f"{cur_b}{up:.2f}/unit" if up is not None else "n/a"
-        lines.append(f"{sup_b}: {desc} — {up_str} ×{qty} = {cur_b}{total}")
+        lt = item.get("line_total")
+        up_str = f"{cur_b}{up:.2f}/kg" if up is not None else "n/a"
+        lt_str = f" = {cur_b}{lt:,.2f}" if lt is not None else ""
+        lines.append(f"{sup_b}: {desc} — {up_str} ×{qty}{lt_str}")
 
-    if items_a and items_b:
-        up_a = _compute_unit_price(items_a[0])
-        up_b = _compute_unit_price(items_b[0])
+    if hits_a and hits_b:
+        up_a = _compute_unit_price(hits_a[0])
+        up_b = _compute_unit_price(hits_b[0])
         if up_a is not None and up_b is not None and up_a != up_b:
             cheaper = sup_a if up_a < up_b else sup_b
             diff = abs(up_a - up_b)
-            lines.append(f"\n{cheaper} is cheaper for {product}: saves {cur_a}{diff:.2f}/unit")
+            lines.append(f"\n{cheaper} is cheaper per kg: saves {cur_a}{diff:.2f}/kg")
             _, caveat = _match_provisioning_items(
-                (items_a[0].get("description") or ""),
-                (items_b[0].get("description") or ""),
+                hits_a[0].get("description") or "", hits_b[0].get("description") or "",
             )
             if caveat:
                 lines.append(f"Note: {caveat} — confirm like-for-like before ordering")
@@ -1735,7 +1914,7 @@ def _handle_quote_compare_intent(state: dict, message: str = "") -> Tuple[str, d
     quote_docs = gather_quote_docs_for_comparison(state)
 
     if len(quote_docs) < 2:
-        # Re-use existing comparison if one is active (e.g. "give me a summary" after compare)
+        # Re-use existing comparison for follow-up requests ("give me a summary", "line by line", etc.)
         active = get_active_session(state)
         if active and active.get("session_type") == "quote_vs_quote":
             existing = active.get("last_comparison")
@@ -1745,6 +1924,8 @@ def _handle_quote_compare_intent(state: dict, message: str = "") -> Tuple[str, d
                 if _is_provisioning_doc(doc_a) and _is_provisioning_doc(doc_b):
                     if message and _extract_provisioning_product(message):
                         return _handle_provisioning_product_query(message, doc_a, doc_b), state
+                    if message and _is_detail_request(message):
+                        return build_provisioning_detail_response(doc_a, doc_b), state
                     return build_provisioning_comparison_response(doc_a, doc_b), state
                 return build_comparison_response(doc_a, doc_b, existing["comparison"]), state
         return _make_response(
@@ -1782,7 +1963,10 @@ def _handle_quote_compare_intent(state: dict, message: str = "") -> Tuple[str, d
         state = store_comparison_result(session, state, doc_a, doc_b, comparison)
         # Provisioning path must be checked BEFORE generic comparison
         if _is_provisioning_doc(doc_a) and _is_provisioning_doc(doc_b):
-            response = build_provisioning_comparison_response(doc_a, doc_b)
+            if _is_detail_request(message):
+                response = build_provisioning_detail_response(doc_a, doc_b)
+            else:
+                response = build_provisioning_comparison_response(doc_a, doc_b)
         else:
             response = build_comparison_response(doc_a, doc_b, comparison)
             bundled_note = _bundled_vs_itemised_note(doc_a, doc_b)
@@ -3681,15 +3865,17 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             # Provisioning/food quotes need a different response — don't ask for make/model.
             _recent_doc = (state.get("documents") or [None])[-1]
             if _recent_doc and _is_provisioning_doc(_recent_doc):
-                # If an active provisioning comparison exists, use it directly
+                # If active provisioning comparison exists, serve it directly
                 _prov_active = get_active_session(state)
                 if _prov_active and _prov_active.get("session_type") == "quote_vs_quote":
-                    _prov_existing = _prov_active.get("last_comparison")
-                    if _prov_existing:
-                        _pda, _pdb = _prov_existing["doc_a"], _prov_existing["doc_b"]
+                    _prov_ex = _prov_active.get("last_comparison")
+                    if _prov_ex:
+                        _pda, _pdb = _prov_ex["doc_a"], _prov_ex["doc_b"]
                         if _is_provisioning_doc(_pda) and _is_provisioning_doc(_pdb):
                             if _extract_provisioning_product(incoming):
                                 return _handle_provisioning_product_query(incoming, _pda, _pdb), state
+                            if _is_detail_request(incoming):
+                                return build_provisioning_detail_response(_pda, _pdb), state
                             return build_provisioning_comparison_response(_pda, _pdb), state
                 _prov_response = _make_response(
                     decision="NEED A LIKE-FOR-LIKE SUPPLIER COMPARISON OR MARKET CHECK FOR PROVISIONING PRICING",
@@ -3734,12 +3920,14 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             # If active provisioning comparison exists, use it instead of generic market check
             _fb_active = get_active_session(state)
             if _fb_active and _fb_active.get("session_type") == "quote_vs_quote":
-                _fb_existing = _fb_active.get("last_comparison")
-                if _fb_existing:
-                    _fb_a, _fb_b = _fb_existing["doc_a"], _fb_existing["doc_b"]
+                _fb_ex = _fb_active.get("last_comparison")
+                if _fb_ex:
+                    _fb_a, _fb_b = _fb_ex["doc_a"], _fb_ex["doc_b"]
                     if _is_provisioning_doc(_fb_a) and _is_provisioning_doc(_fb_b):
                         if _extract_provisioning_product(incoming):
                             return _handle_provisioning_product_query(incoming, _fb_a, _fb_b), state
+                        if _is_detail_request(incoming):
+                            return build_provisioning_detail_response(_fb_a, _fb_b), state
                         return build_provisioning_comparison_response(_fb_a, _fb_b), state
             _ctx_parts = []
             if _comp_ctx:
@@ -4012,22 +4200,25 @@ def whatsapp_reply():
     resp = MessagingResponse()
     if answer is not None:
         body = f"⚓ AskHelm \n\n{answer}"
+        chunks = _split_whatsapp_body(body)
         if _was_media:
             # Document/media replies go via REST so Twilio webhook can return 200 quickly.
-            logger.info(
-                "outbound_whatsapp: method=REST final_response=True to=%s body_length=%d "
-                "body_empty=%s user=%s reply_body_preview=%r",
-                phone, len(body), not body.strip(), user_id, body[:500],
-            )
-            _send_whatsapp_message(phone, body)
-            # Return empty TwiML — REST call above delivers the actual reply.
+            for _i, _chunk in enumerate(chunks):
+                logger.info(
+                    "outbound_whatsapp: method=REST chunk=%d/%d to=%s body_length=%d "
+                    "body_empty=%s user=%s reply_body_preview=%r",
+                    _i + 1, len(chunks), phone, len(_chunk), not _chunk.strip(), user_id, _chunk[:500],
+                )
+                _send_whatsapp_message(phone, _chunk)
+            # Return empty TwiML — REST calls above deliver the actual reply.
         else:
-            logger.info(
-                "outbound_whatsapp: method=TwiML to=%s body_length=%d body_empty=%s "
-                "save_state=%s user=%s reply_body_preview=%r",
-                phone, len(body), not body.strip(), save_state, user_id, body[:500],
-            )
-            resp.message(body)
+            for _i, _chunk in enumerate(chunks):
+                logger.info(
+                    "outbound_whatsapp: method=TwiML chunk=%d/%d to=%s body_length=%d "
+                    "body_empty=%s save_state=%s user=%s reply_body_preview=%r",
+                    _i + 1, len(chunks), phone, len(_chunk), not _chunk.strip(), save_state, user_id, _chunk[:500],
+                )
+                resp.message(_chunk)
     else:
         logger.info(
             "outbound_whatsapp: method=TwiML to=%s body_empty=True deferred=True "

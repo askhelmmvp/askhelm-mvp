@@ -70,6 +70,13 @@ _QUOTE_COMPARE_SUBSTRINGS = [
     "summarize both quotes",
     "explain the quotations",
     "what is in each quote",
+    # Detailed / line-by-line requests
+    "line by line",
+    "full item comparison",
+    "item by item",
+    "detailed comparison",
+    "show all items",
+    "full comparison",
     # Like-for-like / differences
     "are these like for like",
     "are they like for like",
