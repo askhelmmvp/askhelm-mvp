@@ -2488,19 +2488,82 @@ def _extract_subject_from_query(query: str, prefixes: list) -> str:
     return query.strip()
 
 
+# Alphanumeric part-number token (letters+digits mixed) or long barcode (5+ digits).
+_PART_NUMBER_LIKE_RE = re.compile(
+    r'\b(?:\d+[A-Z][A-Z0-9]*|[A-Z][A-Z0-9]*\d[A-Z0-9]*|\d{5,})\b',
+    re.IGNORECASE,
+)
+
+# Boilerplate words stripped when extracting the meaningful subject from a query.
+_STOCK_QUERY_NOISE = frozenset({
+    "how", "many", "much", "do", "we", "have", "i", "on", "board",
+    "onboard", "can", "find", "this", "the", "is", "what", "stock",
+    "of", "where", "which", "equipment", "does", "belong", "to",
+    "list", "show", "spares", "spare", "parts", "part", "a", "an",
+    "any", "are", "get", "for", "got", "there", "our", "all",
+})
+
+_STOCK_QUERY_PREFIXES = [
+    "do we have ", "do we stock ", "have we got ", "is there any ",
+    "do we carry ", "how many do we have ", "how much do we have ",
+    "how many have we got ", "do we have any ",
+    "what is the stock of ", "stock of ",
+    "where can i find ", "where is this ",
+    "which equipment does this belong to ",
+    "how many ",
+]
+
+
+def _strip_query_noise(query: str) -> str:
+    """Remove stock-query boilerplate words, returning the meaningful content."""
+    words = [w.rstrip("?!.,").strip() for w in query.lower().split()]
+    return " ".join(w for w in words if w and w not in _STOCK_QUERY_NOISE)
+
+
+def _extract_stock_search_term(query: str) -> str:
+    """
+    Extract the best search term from a stock/inventory query.
+
+    Priority:
+    1. Part-number-like token (alphanumeric or long pure-numeric) — avoids
+       extracting trailing words like 'on board' instead of the part code.
+    2. Prefix stripping against known stock-query patterns.
+    3. Noise-word removal (for 'list MTU spares' → 'MTU').
+    """
+    m = _PART_NUMBER_LIKE_RE.search(query)
+    if m:
+        logger.info(
+            "inventory_query: inventory_query=True search_term_type=part_number search_term=%r query=%r",
+            m.group(0), query[:80],
+        )
+        return m.group(0)
+
+    term = _extract_subject_from_query(query, _STOCK_QUERY_PREFIXES)
+    q_norm = query.lower().strip().rstrip("?!").strip()
+    if term.lower().strip() != q_norm:
+        logger.info(
+            "inventory_query: inventory_query=True search_term_type=prefix_stripped search_term=%r query=%r",
+            term, query[:80],
+        )
+        return term
+
+    stripped = _strip_query_noise(query)
+    logger.info(
+        "inventory_query: inventory_query=True search_term_type=noise_stripped search_term=%r query=%r",
+        stripped, query[:80],
+    )
+    return stripped or q_norm
+
+
 def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
     from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
     _yid = _gyid(user_id)
+    subject = _extract_stock_search_term(query)
     logger.info(
-        "whatsapp_app: stock_query user=%s yacht_id=%s path=%s query=%r",
-        user_id, _yid, _gsp(_yid), query,
+        "whatsapp_app: stock_query inventory_query=True user=%s yacht_id=%s path=%s search_term=%r query=%r",
+        user_id, _yid, _gsp(_yid), subject, query,
     )
-    subject = _extract_subject_from_query(query, [
-        "do we have ", "do we stock ", "have we got ", "is there any ",
-        "do we carry ", "how many do we have ", "how much do we have ",
-        "how many have we got ", "do we have any ",
-    ])
     if not subject:
         subject = query
     results = find_stock_by_query(user_id, subject)
@@ -2553,9 +2616,17 @@ def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
         "show spares for ", "spares for ", "spare parts for ",
         "what spares for ", "what spares do we have for ", "parts for ",
         "what stock do we have for ", "stock for ", "what stock for ",
+        "show stock for ", "list spares for ",
     ])
+    # Fallback for "list MTU spares" / "show CAT spares" — prefix before keyword
+    if not system or system.lower().strip() == query.lower().strip().rstrip("?!").strip():
+        system = _strip_query_noise(query)
     if not system:
         system = query
+    logger.info(
+        "whatsapp_app: spares_query inventory_query=True search_term=%r query=%r",
+        system, query,
+    )
     results = find_stock_for_system(user_id, system)
     if not results:
         return _make_response(
