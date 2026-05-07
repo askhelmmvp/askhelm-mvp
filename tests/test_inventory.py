@@ -468,5 +468,165 @@ class TestMachineryInventoryCSV(unittest.TestCase):
         self.assertEqual(len(result.get("equipment", [])), 0)
 
 
+class TestStockQueryRouting(unittest.TestCase):
+    """Intent routing must send inventory questions to stock/spares handlers."""
+
+    def _cls(self, text: str) -> str:
+        from domain.intent import classify_text
+        return classify_text(text)
+
+    # --- Part-number queries ---
+    def test_how_many_part_number_on_board_routes_to_stock(self):
+        self.assertEqual(self._cls("how many 03GCPMS005 do we have on board?"), "stock_query")
+
+    def test_how_many_numeric_barcode_on_board_routes_to_stock(self):
+        self.assertEqual(self._cls("how many 447533430 on board?"), "stock_query")
+
+    def test_how_many_alphanumeric_part_routes_to_stock(self):
+        self.assertEqual(self._cls("how many XP52718300060 on board?"), "stock_query")
+
+    def test_what_is_the_stock_of_routes_to_stock(self):
+        self.assertEqual(self._cls("what is the stock of 447533430"), "stock_query")
+
+    def test_stock_of_routes_to_stock(self):
+        self.assertEqual(self._cls("stock of 447533430"), "stock_query")
+
+    # --- Location queries ---
+    def test_where_can_i_find_routes_to_stock(self):
+        self.assertEqual(self._cls("where can I find this? XP52718300060"), "stock_query")
+
+    def test_where_is_this_routes_to_stock(self):
+        self.assertEqual(self._cls("where is this XP52718300060"), "stock_query")
+
+    def test_which_equipment_does_this_belong_to_routes_to_stock(self):
+        self.assertEqual(self._cls("which equipment does this belong to? XP52718300060"), "stock_query")
+
+    # --- Manufacturer spares ---
+    def test_list_manufacturer_spares_routes_to_spares(self):
+        self.assertEqual(self._cls("list MTU spares"), "spares_query")
+
+    def test_show_manufacturer_spares_routes_to_spares(self):
+        self.assertEqual(self._cls("show MTU spares"), "spares_query")
+
+    # --- Regression: existing stock queries still work ---
+    def test_do_we_have_still_routes_to_stock(self):
+        self.assertEqual(self._cls("do we have mechanical seal onboard?"), "stock_query")
+
+    def test_show_stock_still_routes_to_show_stock(self):
+        self.assertEqual(self._cls("show stock"), "show_stock")
+
+    def test_list_spares_still_routes_to_show_stock(self):
+        self.assertEqual(self._cls("list spares"), "show_stock")
+
+    # --- Regression: non-stock queries not captured ---
+    def test_compliance_question_not_captured(self):
+        self.assertNotEqual(self._cls("is this compliant with marpol?"), "stock_query")
+
+    def test_market_check_how_much_not_captured(self):
+        self.assertNotEqual(self._cls("how much for an impeller?"), "stock_query")
+
+    def test_equipment_query_how_many_stabilisers(self):
+        self.assertEqual(self._cls("how many stabilisers do we have?"), "equipment_query")
+
+
+class TestStockSearchTermExtraction(unittest.TestCase):
+    """_extract_stock_search_term must return the part number, not noise words."""
+
+    def _term(self, query: str) -> str:
+        from whatsapp_app import _extract_stock_search_term
+        return _extract_stock_search_term(query)
+
+    def test_part_number_extracted_over_on_board(self):
+        self.assertEqual(self._term("how many 03GCPMS005 do we have on board?"), "03GCPMS005")
+
+    def test_numeric_barcode_extracted(self):
+        self.assertEqual(self._term("how many 447533430 on board?"), "447533430")
+
+    def test_alphanumeric_part_extracted(self):
+        self.assertEqual(self._term("where can I find this? XP52718300060"), "XP52718300060")
+
+    def test_manufacturer_extracted_via_noise_strip(self):
+        term = self._term("list MTU spares")
+        self.assertEqual(term, "mtu")
+
+    def test_description_words_extracted_via_prefix_strip(self):
+        term = self._term("do we have mechanical seal onboard?")
+        self.assertIn("mechanical", term)
+        self.assertIn("seal", term)
+
+
+class TestStockQueryLookup(unittest.TestCase):
+    """Stock lookup must return the right item and location for part-number queries."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        items = [
+            {
+                "description": "Mechanical seal",
+                "part_number": "03GCPMS005",
+                "quantity_onboard": 1.0,
+                "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+                "confidence": 0.9,
+            },
+            {
+                "description": "MTU Oil Filter",
+                "part_number": "X59407700014",
+                "quantity_onboard": 3.0,
+                "storage_location": "Engine Room Store",
+                "make": "MTU",
+                "confidence": 0.9,
+            },
+        ]
+        inv_store.merge_stock("", items, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def test_part_number_query_returns_stock_found(self):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(
+            "how many 03GCPMS005 do we have on board?", {"user_id": ""}
+        )
+        self.assertIn("STOCK FOUND", result)
+        self.assertIn("Mechanical seal", result)
+
+    def test_part_number_query_shows_location(self):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(
+            "how many 03GCPMS005 do we have on board?", {"user_id": ""}
+        )
+        self.assertIn("Fresh Water System Box 1", result)
+
+    def test_where_can_i_find_returns_location(self):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(
+            "where can I find this? X59407700014", {"user_id": ""}
+        )
+        self.assertIn("STOCK FOUND", result)
+        self.assertIn("Engine Room Store", result)
+
+    def test_manufacturer_spares_query_returns_results(self):
+        from whatsapp_app import _handle_spares_query
+        result, _ = _handle_spares_query("list MTU spares", {"user_id": ""})
+        self.assertIn("STOCK FOUND", result.upper().replace("SPARES FOUND", "STOCK FOUND")
+                      if "SPARES FOUND" in result else result)
+
+    def test_wrong_part_number_returns_no_stock_found(self):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(
+            "how many 99999999999 on board?", {"user_id": ""}
+        )
+        self.assertIn("NO STOCK FOUND", result)
+
+
 if __name__ == "__main__":
     unittest.main()

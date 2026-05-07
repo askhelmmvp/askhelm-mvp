@@ -349,6 +349,16 @@ _STOCK_QUERY_SUBSTRINGS = [
     "how much do we have",
     "how many have we got",
     "do we have any",
+    # Part-number / location queries
+    "what is the stock of",
+    "stock of ",
+    "onboard stock",
+    "where can i find",
+    "where is this",
+    "which equipment does this belong to",
+    # Broad quantity query — placed after equipment-noun checks so
+    # equipment_query wins for "how many stabilisers do we have?"
+    "how many ",
 ]
 
 _SPARES_QUERY_SUBSTRINGS = [
@@ -361,6 +371,10 @@ _SPARES_QUERY_SUBSTRINGS = [
     "what stock do we have for ",
     "stock for ",
     "what stock for ",
+    "show stock for ",
+    "list spares for ",
+    " spare parts",   # "list MTU spare parts"
+    " spares",        # "list MTU spares" — after "spares for" entries
 ]
 
 _EQUIPMENT_QUERY_SUBSTRINGS = [
