@@ -770,5 +770,123 @@ class TestStockResponseFormat(unittest.TestCase):
         self.assertIn("1", r)
 
 
+class TestItemSystemStockQuery(unittest.TestCase):
+    """Item+system combined queries: 'how many liners for main engine?'"""
+
+    _ITEMS = [
+        {
+            "description": "Cylinder liner",
+            "part_number": "MTU-CL-001",
+            "quantity_onboard": 2.0,
+            "storage_location": "Engine Room / Shelf A",
+            "make": "MTU",
+            "linked_equipment": "0210 Main Engines",
+            "confidence": 0.9,
+        },
+        {
+            "description": "Generator filter cartridge",
+            "part_number": "GEN-FLT-007",
+            "quantity_onboard": 4.0,
+            "storage_location": "Generator Room",
+            "make": "Caterpillar",
+            "linked_equipment": "0290 Generators",
+            "confidence": 0.9,
+        },
+        {
+            "description": "Bilge pump impeller",
+            "part_number": "BP-IMP-003",
+            "quantity_onboard": 1.0,
+            "storage_location": "Bilge Store",
+            "linked_equipment": "0410 Bilge System",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _stock(self, query: str) -> str:
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(query, {"user_id": ""})
+        return result
+
+    # --- Routing tests ---
+
+    def test_liner_for_main_engine_routes_to_stock(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("how many liners for main engine?"), "stock_query")
+
+    def test_filters_for_generator_routes_to_stock(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("how many filters for the generator?"), "stock_query")
+
+    def test_show_main_engine_routes_to_equipment(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("show main engine"), "equipment_query")
+
+    def test_show_main_engine_not_document_unknown(self):
+        from domain.intent import classify_text
+        self.assertNotEqual(classify_text("show main engine"), "unknown")
+
+    def test_how_many_stabilisers_still_equipment(self):
+        """Regression: pure equipment count queries must not route to stock."""
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("how many stabilisers do we have?"), "equipment_query")
+
+    def test_compliance_question_not_captured(self):
+        """Regression: compliance questions without 'how many' stay as compliance."""
+        from domain.intent import classify_text
+        result = classify_text("are we allowed to discharge bilge water?")
+        self.assertEqual(result, "compliance_question")
+
+    # --- _parse_item_system_query ---
+
+    def test_parse_liner_main_engine(self):
+        from whatsapp_app import _parse_item_system_query
+        item_terms, system = _parse_item_system_query("how many liners for main engine?")
+        self.assertIn("liner", item_terms)
+        self.assertIn("cylinder liner", item_terms)
+        self.assertEqual(system, "main engine")
+
+    def test_parse_filters_generator(self):
+        from whatsapp_app import _parse_item_system_query
+        item_terms, system = _parse_item_system_query("show filters for generators")
+        self.assertIn("filter", item_terms)
+        self.assertIn("generator", system)
+
+    def test_parse_no_system_returns_none(self):
+        from whatsapp_app import _parse_item_system_query
+        item_terms, system = _parse_item_system_query("how many liners on board?")
+        self.assertIsNone(system)
+
+    # --- Combined item+system lookup ---
+
+    def test_liner_for_main_engine_returns_stock(self):
+        r = self._stock("how many liners for main engine?")
+        self.assertIn("STOCK FOUND", r)
+        self.assertIn("Cylinder liner", r)
+
+    def test_liner_for_main_engine_not_no_stock(self):
+        r = self._stock("how many liners for main engine?")
+        self.assertNotIn("NO STOCK FOUND", r)
+
+    def test_filter_for_generator_returns_stock(self):
+        r = self._stock("how many filters for the generator?")
+        self.assertIn("STOCK FOUND", r)
+        self.assertIn("Generator filter cartridge", r)
+
+
 if __name__ == "__main__":
     unittest.main()

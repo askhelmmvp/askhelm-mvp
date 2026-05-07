@@ -458,6 +458,20 @@ _EQUIPMENT_QUESTION_WORDS = frozenset({
 })
 
 
+# Spare-part component words: when these appear in a query the user is asking
+# about inventory stock, not equipment metadata in memory.
+_STOCK_SPARE_PART_WORDS = frozenset({
+    "liner", "liners",
+    "seal", "seals",
+    "filter", "filters",
+    "gasket", "gaskets",
+    "impeller", "impellers",
+    "belt", "belts",
+    "o-ring", "o-rings",
+    "bearing", "bearings",
+    "injector", "injectors",
+})
+
 # "what is the X" / "what is our X" — identity queries for equipment nouns.
 # These contain no _EQUIPMENT_QUESTION_WORDS keyword so the two-set check
 # misses them; a dedicated prefix pattern closes the gap.
@@ -467,6 +481,7 @@ _EQUIPMENT_IDENTITY_PREFIXES = (
     "tell me about the ", "tell me about our ",
     "describe the ", "describe our ",
     "show me the ", "show me our ",
+    "show ",
 )
 
 # When these words appear alongside an equipment noun the query is asking
@@ -501,6 +516,9 @@ def _is_equipment_memory_query(t: str) -> bool:
     if re.search(r'\bspare\b', t) and any(qw in t for qw in (
         "do we have", "have we got", "do we carry", "is there"
     )):
+        return False
+    # Component/spare-part words mean inventory stock, not equipment metadata
+    if any(re.search(r'\b' + re.escape(w) + r'\b', t) for w in _STOCK_SPARE_PART_WORDS):
         return False
     has_equipment = any(w in t for w in _MARINE_EQUIPMENT_WORDS)
     if not has_equipment:
