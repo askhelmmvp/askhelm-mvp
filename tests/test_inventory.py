@@ -628,5 +628,147 @@ class TestStockQueryLookup(unittest.TestCase):
         self.assertIn("NO STOCK FOUND", result)
 
 
+class TestStockResponseFormat(unittest.TestCase):
+    """Response format: explicit ANSWER, correct qty, exact-match filtering."""
+
+    # Stock fixture with one exact-match item plus an unrelated item
+    # whose part number is a short number that could false-match as a substring.
+    _ITEMS = [
+        {
+            "description": "Oil filter paper inserts",
+            "part_number": "XP52718300060",
+            "quantity_onboard": 28.0,
+            "storage_location": "LD / Generator Room / Filter Cabinet",
+            "make": "MTU",
+            "linked_equipment": "0290 Generators",
+            "confidence": 0.9,
+        },
+        {
+            # Short part number "1" would be a substring of many alphanumeric codes.
+            "description": "Torque driver (1Nm-5Nm)",
+            "part_number": "1",
+            "quantity_onboard": 1.0,
+            "storage_location": "LD / ER Exhaust Duct / MTU Tool Box 1",
+            "confidence": 0.9,
+        },
+        {
+            "description": "Mechanical seal",
+            "part_number": "03GCPMS005",
+            "quantity_onboard": 1.0,
+            "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+            "confidence": 0.9,
+        },
+        {
+            "description": "MTU Air Filter",
+            "part_number": "X12345678901",
+            "quantity_onboard": 2.0,
+            "storage_location": "Engine Room Store",
+            "make": "MTU",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _stock(self, query: str) -> str:
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(query, {"user_id": ""})
+        return result
+
+    def _spares(self, query: str) -> str:
+        from whatsapp_app import _handle_spares_query
+        result, _ = _handle_spares_query(query, {"user_id": ""})
+        return result
+
+    # --- Quantity response ---
+
+    def test_quantity_query_leads_with_answer(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertIn("ANSWER:", r)
+        self.assertIn("You have 28 × XP52718300060 onboard.", r)
+
+    def test_quantity_query_integer_not_float(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertNotIn("28.0", r)
+        self.assertIn("28", r)
+
+    def test_quantity_query_includes_location_detail(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertIn("Generator Room / Filter Cabinet", r)
+
+    # --- Location response ---
+
+    def test_location_query_leads_with_location(self):
+        r = self._stock("where can I find this? XP52718300060")
+        self.assertIn("ANSWER:", r)
+        self.assertIn("LD / Generator Room / Filter Cabinet", r)
+
+    def test_location_query_includes_item_name(self):
+        r = self._stock("where can I find this? XP52718300060")
+        self.assertIn("Oil filter paper inserts", r)
+
+    # --- Exact match excludes unrelated fuzzy hits ---
+
+    def test_exact_pn_excludes_torque_driver(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertNotIn("Torque driver", r)
+
+    def test_exact_pn_excludes_unrelated_item(self):
+        r = self._stock("how many 03GCPMS005 do we have on board?")
+        self.assertNotIn("XP52718300060", r)
+        self.assertNotIn("Torque driver", r)
+
+    # --- Quantity formatting across query types ---
+
+    def test_whole_number_quantity_no_dot_zero(self):
+        from whatsapp_app import _fmt_qty
+        self.assertEqual(_fmt_qty(28.0), "28")
+        self.assertEqual(_fmt_qty(1.0), "1")
+        self.assertEqual(_fmt_qty(3), "3")
+
+    def test_fractional_quantity_preserved(self):
+        from whatsapp_app import _fmt_qty
+        self.assertEqual(_fmt_qty(1.5), "1.5")
+
+    # --- Equipment/system response ---
+
+    def test_equipment_query_shows_manufacturer(self):
+        r = self._stock("which equipment does this belong to? XP52718300060")
+        self.assertIn("ANSWER:", r)
+        self.assertIn("MTU", r)
+
+    # --- Manufacturer list still returns multiple records ---
+
+    def test_manufacturer_list_returns_multiple(self):
+        r = self._spares("list MTU spares")
+        self.assertIn("Oil filter paper inserts", r)
+        self.assertIn("MTU Air Filter", r)
+
+    # --- Broad description query still works ---
+
+    def test_broad_description_query_returns_match(self):
+        r = self._stock("do we have a mechanical seal onboard?")
+        self.assertIn("STOCK FOUND", r)
+        self.assertIn("Mechanical seal", r)
+
+    def test_broad_query_shows_integer_qty(self):
+        r = self._stock("do we have a mechanical seal onboard?")
+        self.assertNotIn("1.0", r)
+        self.assertIn("1", r)
+
+
 if __name__ == "__main__":
     unittest.main()
