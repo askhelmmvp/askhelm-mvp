@@ -355,6 +355,24 @@ def get_all_stock(user_id: str) -> list:
     return load_stock(user_id).get("stock", [])
 
 
+def find_stock_by_part_number(user_id: str, part_number: str) -> list:
+    """Exact case-insensitive match on part_number field only.
+
+    Used for part-code lookups to avoid fuzzy false-positives from short
+    part numbers matching as substrings of the query string.
+    """
+    pn_lower = part_number.lower().strip()
+    results = [
+        item for item in get_all_stock(user_id)
+        if (item.get("part_number") or "").lower() == pn_lower
+    ]
+    logger.info(
+        "inventory_store: find_stock_by_part_number user=%s pn=%r results=%d",
+        user_id, part_number, len(results),
+    )
+    return results
+
+
 def find_stock_by_query(user_id: str, query: str) -> list:
     """Fuzzy substring match against description, part_number, linked_equipment."""
     q = query.lower().strip()

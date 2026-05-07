@@ -120,6 +120,7 @@ from domain.inventory_store import (
     get_all_equipment,
     get_all_stock,
     find_stock_by_query,
+    find_stock_by_part_number,
     find_stock_for_system,
     find_equipment_by_query,
     clear_equipment,
@@ -2555,18 +2556,56 @@ def _extract_stock_search_term(query: str) -> str:
     return stripped or q_norm
 
 
+def _fmt_qty(qty) -> str:
+    """Format a stock quantity: drop trailing .0 for whole numbers."""
+    if qty is None:
+        return ""
+    try:
+        n = float(qty)
+        return str(int(n)) if n == int(n) else str(n)
+    except (TypeError, ValueError):
+        return str(qty)
+
+
+def _detect_stock_query_type(query: str) -> str:
+    """
+    Classify a stock query to drive response formatting.
+    Returns one of: 'quantity', 'location', 'equipment', 'general'.
+    """
+    t = query.lower()
+    if any(w in t for w in ("how many", "how much", "stock of", "what is the stock", "quantity")):
+        return "quantity"
+    if "where" in t or "find this" in t:
+        return "location"
+    if any(w in t for w in ("which equipment", "belong to", "fitted to", "what system")):
+        return "equipment"
+    return "general"
+
+
 def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
     from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
     _yid = _gyid(user_id)
-    subject = _extract_stock_search_term(query)
+    subject = _extract_stock_search_term(query) or query
+    query_type = _detect_stock_query_type(query)
+
+    # Exact part-number lookup first — avoids short-PN false positives from fuzzy match.
+    is_pn = " " not in subject.strip() and bool(_PART_NUMBER_LIKE_RE.search(subject.strip()))
+    exact = find_stock_by_part_number(user_id, subject) if is_pn else []
+
+    if exact:
+        results = exact
+        fuzzy_only = False
+    else:
+        results = find_stock_by_query(user_id, subject)
+        fuzzy_only = is_pn  # flagged when we expected exact but fell back to fuzzy
+
     logger.info(
-        "whatsapp_app: stock_query inventory_query=True user=%s yacht_id=%s path=%s search_term=%r query=%r",
-        user_id, _yid, _gsp(_yid), subject, query,
+        "whatsapp_app: stock_query inventory_query=True user=%s yacht_id=%s "
+        "search_term=%r query_type=%s exact=%d fuzzy_only=%s",
+        user_id, _yid, subject, query_type, len(exact), fuzzy_only,
     )
-    if not subject:
-        subject = query
-    results = find_stock_by_query(user_id, subject)
+
     if not results:
         return _make_response(
             decision="NO STOCK FOUND",
@@ -2576,31 +2615,76 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
                 "Upload latest stock list if inventory is incomplete",
             ],
         ), state
-    lines = [
-        "DECISION:",
-        "STOCK FOUND",
-        "",
-        "WHY:",
-        f"{results[0].get('description') or results[0].get('part_number') or subject} is held onboard.",
-        "",
-        "STOCK:",
-    ]
-    for item in results[:8]:
-        desc = item.get("description") or item.get("part_number") or "Unknown"
-        qty = item.get("quantity_onboard")
-        unit = item.get("unit") or ""
-        loc = item.get("storage_location") or ""
-        pn = item.get("part_number") or ""
-        qty_str = f" — {qty}{(' ' + unit).rstrip()}" if qty is not None else ""
-        loc_str = f" — {loc}" if loc else ""
-        pn_str = f" ({pn})" if pn and pn != desc else ""
-        lines.append(f"• {desc}{pn_str}{qty_str}{loc_str}")
-    lines += [
-        "",
-        "ACTIONS:",
-        "• Check stock location before ordering",
-        "• Ask \"show spares for <system>\" if you need related parts",
-    ]
+
+    lines = ["DECISION:", "STOCK FOUND", ""]
+    first = results[0]
+    desc = first.get("description") or first.get("part_number") or subject
+    pn   = first.get("part_number") or subject
+    qty  = _fmt_qty(first.get("quantity_onboard"))
+    loc  = first.get("storage_location") or ""
+    make = first.get("make") or ""
+    linked = first.get("linked_equipment") or ""
+
+    if not fuzzy_only and is_pn and query_type != "general":
+        # Specific part-number query → ANSWER + DETAILS
+        if query_type == "quantity":
+            lines += ["ANSWER:", f"You have {qty} × {pn} onboard.", ""]
+            lines += ["DETAILS:"]
+            lines.append(f"• Item: {desc}")
+            if loc:
+                lines.append(f"• Location: {loc}")
+            if linked:
+                lines.append(f"• Section/system: {linked}")
+
+        elif query_type == "location":
+            loc_msg = loc or "location not recorded"
+            lines += ["ANSWER:", f"{pn} is stored in {loc_msg}.", ""]
+            lines += ["DETAILS:"]
+            lines.append(f"• Item: {desc}")
+            if qty:
+                lines.append(f"• Quantity onboard: {qty}")
+            if linked:
+                lines.append(f"• Section/system: {linked}")
+
+        elif query_type == "equipment":
+            system = make or linked or "unknown system"
+            lines += ["ANSWER:", f"{pn} is a spare for {system}.", ""]
+            lines += ["DETAILS:"]
+            lines.append(f"• Item: {desc}")
+            if qty:
+                lines.append(f"• Quantity onboard: {qty}")
+            if loc:
+                lines.append(f"• Location: {loc}")
+            if linked:
+                lines.append(f"• Section/system: {linked}")
+            if make:
+                lines.append(f"• Manufacturer: {make}")
+
+    else:
+        # General / description query or fuzzy fallback → list format
+        why = (
+            f"Found {len(results)} possible match(es) for '{subject}'."
+            if fuzzy_only else
+            f"{desc} is held onboard."
+        )
+        lines += ["WHY:", why, "", "STOCK:"]
+        if fuzzy_only:
+            lines.append("Possible matches:")
+        for item in results[:8]:
+            d = item.get("description") or item.get("part_number") or "Unknown"
+            q = item.get("quantity_onboard")
+            u = item.get("unit") or ""
+            l = item.get("storage_location") or ""
+            p = item.get("part_number") or ""
+            qty_s = f" — {_fmt_qty(q)}{(' ' + u).rstrip()}" if q is not None else ""
+            loc_s = f" — {l}" if l else ""
+            pn_s  = f" ({p})" if p and p != d else ""
+            lines.append(f"• {d}{pn_s}{qty_s}{loc_s}")
+
+    lines += ["", "ACTIONS:", "• Check stock location before ordering"]
+    if query_type == "general":
+        lines.append('• Ask "show spares for <system>" if you need related parts')
+
     return "\n".join(lines).strip(), state
 
 
