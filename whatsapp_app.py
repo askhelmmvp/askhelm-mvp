@@ -2582,6 +2582,74 @@ def _detect_stock_query_type(query: str) -> str:
     return "general"
 
 
+# Spare-part component words expanded to stock-search terms (handles plurals and
+# natural-language variants).
+_ITEM_SYNONYMS: dict = {
+    "liner": ["liner", "cylinder liner"],
+    "liners": ["liner", "cylinder liner"],
+    "seal": ["seal"],
+    "seals": ["seal"],
+    "filter": ["filter"],
+    "filters": ["filter"],
+    "gasket": ["gasket"],
+    "gaskets": ["gasket"],
+    "impeller": ["impeller"],
+    "impellers": ["impeller"],
+    "belt": ["belt"],
+    "belts": ["belt"],
+    "o-ring": ["o-ring"],
+    "o-rings": ["o-ring"],
+    "bearing": ["bearing"],
+    "bearings": ["bearing"],
+    "injector": ["injector"],
+    "injectors": ["injector"],
+}
+
+# System/section names recognisable in natural-language queries.
+# Sorted longest-first so "main engine" is matched before "engine".
+_SYSTEM_SEARCH_TERMS: tuple = tuple(sorted([
+    "main engine", "main engines",
+    "generator", "generators",
+    "steering gear", "steering",
+    "stabiliser", "stabilizer", "stabilisers", "stabilizers",
+    "bow thruster", "stern thruster", "thruster", "thrusters",
+    "bilge system", "bilge",
+    "sea water system", "sea water",
+    "fresh water system", "fresh water", "freshwater",
+    "oily water separator", "ows",
+    "watermaker", "water maker",
+    "hvac", "air conditioning",
+    "hydraulic system", "hydraulics",
+    "fuel system", "fuel",
+    "exhaust system",
+    "fire system", "fire fighting",
+], key=len, reverse=True))
+
+
+def _parse_item_system_query(query: str):
+    """
+    Detect a combined item+system stock query such as "how many liners for main engine?".
+
+    Returns (item_terms, system_term) where item_terms is a list of search strings
+    (synonyms included) and system_term is the matched system name, or (None, None).
+    """
+    t = query.lower()
+    system = None
+    for sys_key in _SYSTEM_SEARCH_TERMS:
+        if sys_key in t:
+            system = sys_key
+            break
+    if system is None:
+        return None, None
+    item_terms = None
+    for word in t.split():
+        w = word.rstrip("?!.,")
+        if w in _ITEM_SYNONYMS:
+            item_terms = _ITEM_SYNONYMS[w]
+            break
+    return item_terms, system
+
+
 def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
     from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
@@ -2605,6 +2673,23 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
         "search_term=%r query_type=%s exact=%d fuzzy_only=%s",
         user_id, _yid, subject, query_type, len(exact), fuzzy_only,
     )
+
+    # Item+system combined search: "how many liners for main engine?"
+    if not results:
+        item_terms, system_term = _parse_item_system_query(query)
+        if item_terms and system_term:
+            system_results = find_stock_for_system(user_id, system_term)
+            results = [
+                item for item in system_results
+                if any(term in (item.get("description") or "").lower() for term in item_terms)
+            ]
+            if not results:
+                results = system_results  # fallback: all items for that system
+            logger.info(
+                "whatsapp_app: stock_query item_system_fallback user=%s "
+                "item_terms=%r system=%r results=%d",
+                user_id, item_terms, system_term, len(results),
+            )
 
     if not results:
         return _make_response(
