@@ -921,14 +921,48 @@ _PROCEDURE_KEYWORDS = frozenset([
 ])
 
 
+# Multi-word phrases that unambiguously identify regulatory/compliance guidance
+# from external bodies (ILO, IMO, flag states, port state control, etc.).
+_REGULATORY_STRONG_PHRASES = frozenset([
+    "maritime labour convention",
+    "mlc, 2006",
+    "mlc 2006",
+    "international labour organization",
+    "international labour organisation",
+    "flag state responsibilities",
+    "port state control",
+    "maritime labour certificate",
+    "declaration of maritime labour compliance",
+    "seafarer rights",
+    "certification and compliance",
+])
+
+# Filename fragments that signal a regulatory guidance document.
+_REGULATORY_GUIDANCE_FILENAME_KW = frozenset([
+    "mlc",
+    "maritime labour",
+    "ilo ",
+    "flag state",
+    "port state",
+])
+
+
 def classify_compliance_doc(text: str, filename: str) -> Optional[str]:
     """
     Heuristic classifier for uploaded compliance documents.
-    Returns 'yacht_sms', 'yacht_procedure', or None.
+    Returns 'regulatory_guidance', 'yacht_sms', 'yacht_procedure', or None.
     Conservative — only classifies when confident.
     """
+    fname_base = os.path.splitext(filename.lower())[0]
     fname = filename.lower()
     t = text.lower()[:8000]
+
+    # Regulatory guidance pre-screen: ILO, MLC, flag-state documents must not
+    # be mis-classified as equipment manuals or SMS/procedure documents.
+    if any(kw in fname_base for kw in _REGULATORY_GUIDANCE_FILENAME_KW):
+        return "regulatory_guidance"
+    if any(phrase in t for phrase in _REGULATORY_STRONG_PHRASES):
+        return "regulatory_guidance"
 
     if any(kw in fname for kw in ("sms", "safety management", "safety mgmt", "safety manual")):
         return "yacht_sms"

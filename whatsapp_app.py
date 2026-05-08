@@ -106,6 +106,7 @@ from domain.manual_store import (
     get_all_manuals,
     find_manuals_by_equipment,
     search_manual_chunks,
+    delete_manual_by_source,
 )
 from domain.handover_store import (
     save_service_report,
@@ -3194,12 +3195,21 @@ def _handle_manual_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
     manual = doc_record.get("manual_data") or {}
     chunks = doc_record.get("manual_chunks") or []
     user_id = state.get("user_id", "")
-    save_manual(user_id, manual, chunks, doc_record.get("file_path", ""))
+    file_path = doc_record.get("file_path", "")
+    save_manual(user_id, manual, chunks, file_path)
+    _mfr = manual.get("manufacturer") or ""
+    _pname = manual.get("product_name") or ""
+    _src_name = " ".join(filter(None, [_mfr, _pname])) or (
+        os.path.splitext(os.path.basename(file_path))[0].replace("-", " ").replace("_", " ").strip()
+        if file_path else ""
+    )
     state["last_context"] = {
         "type": "manual_imported",
-        "manufacturer": manual.get("manufacturer") or "",
-        "product_name": manual.get("product_name") or "",
+        "manufacturer": _mfr,
+        "product_name": _pname,
         "system": manual.get("system") or "",
+        "file_path": file_path,
+        "source_name": _src_name,
     }
     return format_manual_import_response(manual), state
 
@@ -3622,6 +3632,102 @@ def _handle_yacht_compliance_doc(doc_record: dict, state: dict) -> Tuple[str, di
     ), state
 
 
+def _handle_regulatory_guidance_doc(doc_record: dict, state: dict) -> Tuple[str, dict]:
+    """Ingest a regulatory guidance PDF (ILO, MLC, flag-state, etc.) into the global compliance KB."""
+    file_path = doc_record.get("file_path", "")
+    source_name = doc_record.get("source_name") or (
+        os.path.splitext(os.path.basename(file_path))[0].replace("-", " ").replace("_", " ").strip()
+        if file_path else ""
+    )
+    try:
+        total = ingest_compliance_pdf(file_path, source_name)
+        _reset_compliance_retriever()
+    except Exception as exc:
+        logger.exception("regulatory_guidance: ingest failed file=%s: %s", file_path, exc)
+        return _make_response(
+            decision="IMPORT FAILED",
+            why=f"Could not process {source_name}: {exc}",
+            actions=["Check that the PDF contains selectable text"],
+        ), state
+    logger.info(
+        "whatsapp_app: regulatory_guidance imported name=%r total_chunks=%d",
+        source_name, total,
+    )
+    state["last_context"] = {
+        "type": "compliance_doc_imported",
+        "source_name": source_name,
+        "file_path": file_path,
+        "doc_type": "regulatory_guidance",
+    }
+    return _make_response(
+        decision="COMPLIANCE DOCUMENT IMPORTED",
+        why=f"{source_name} has been saved as compliance/regulatory guidance.",
+        actions=[
+            'Ask "search compliance for [topic]" to query this document',
+            'Reply "show compliance sources" to confirm it is listed',
+        ],
+    ), state
+
+
+def _handle_reclassify_as_compliance(state: dict) -> Tuple[str, dict]:
+    """Move the most recently imported manual to the global compliance knowledge base."""
+    last_ctx = state.get("last_context") or {}
+    user_id = state.get("user_id", "")
+
+    if last_ctx.get("type") != "manual_imported":
+        return _make_response(
+            decision="RECLASSIFICATION NOT POSSIBLE",
+            why="No recently imported manual found in this session.",
+            actions=["Upload the document again, then say 'add this to compliance'"],
+        ), state
+
+    file_path = last_ctx.get("file_path", "")
+    source_name = last_ctx.get("source_name", "") or (
+        os.path.splitext(os.path.basename(file_path))[0].replace("-", " ").replace("_", " ").strip()
+        if file_path else ""
+    )
+
+    if not file_path:
+        return _make_response(
+            decision="RECLASSIFICATION NOT POSSIBLE",
+            why="File path was not recorded for the last upload.",
+            actions=["Upload the document again, then say 'add this to compliance'"],
+        ), state
+
+    delete_manual_by_source(user_id, file_path)
+
+    try:
+        total = ingest_compliance_pdf(file_path, source_name)
+        _reset_compliance_retriever()
+    except Exception as exc:
+        logger.exception("reclassify_as_compliance: ingest failed file=%s: %s", file_path, exc)
+        return _make_response(
+            decision="RECLASSIFICATION FAILED",
+            why=f"Could not ingest {source_name} into compliance library: {exc}",
+            actions=["Check that the PDF contains selectable text"],
+        ), state
+
+    logger.info(
+        "whatsapp_app: reclassified manual→compliance name=%r chunks=%d user=%s",
+        source_name, total, user_id,
+    )
+    state["last_context"] = {
+        "type": "compliance_doc_imported",
+        "source_name": source_name,
+        "file_path": file_path,
+        "doc_type": "regulatory_guidance",
+    }
+    return _make_response(
+        decision="DOCUMENT MOVED TO COMPLIANCE LIBRARY",
+        why=f"{source_name} has been removed from the manual library and saved as compliance guidance.",
+        actions=[
+            'Reply "show manuals" to confirm it has been removed from the manual library',
+            'Reply "show compliance sources" to confirm it is listed as compliance',
+            'Ask "search compliance for [topic]" to query this document',
+        ],
+    ), state
+
+
 def _handle_compliance_pdf_upload(file_path: str, state: dict) -> Tuple[str, dict]:
     """Ingest a compliance PDF into the global knowledge base."""
     import os
@@ -3719,12 +3825,12 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
     if text.strip():
         filename = os.path.basename(file_path)
 
-        # Compliance document pre-screen: run first so an SMS is not mis-classified
-        # as inventory or a technical manual.
+        # Compliance document pre-screen: run first so an SMS, procedure, or
+        # regulatory guidance document is not mis-classified as a technical manual.
         _compliance_type = classify_compliance_doc(text, filename)
-        if _compliance_type in ("yacht_sms", "yacht_procedure"):
+        if _compliance_type in ("yacht_sms", "yacht_procedure", "regulatory_guidance"):
             logger.info(
-                "PDF: compliance document detected doc_type=%s file=%s, routing to yacht compliance",
+                "PDF: compliance document detected doc_type=%s file=%s, routing to compliance",
                 _compliance_type, filename,
             )
             source_name = os.path.splitext(filename)[0].replace("-", " ").replace("_", " ").strip()
@@ -3852,6 +3958,10 @@ def _dispatch_doc_record(doc_record: dict, state: dict) -> Tuple[str, dict]:
 
     if doc_type in ("yacht_sms", "yacht_procedure"):
         answer, state = _handle_yacht_compliance_doc(doc_record, state)
+        return answer, state
+
+    if doc_type == "regulatory_guidance":
+        answer, state = _handle_regulatory_guidance_doc(doc_record, state)
         return answer, state
 
     if doc_type == "quote":
@@ -4095,6 +4205,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "add_to_handover":
         return _handle_add_to_handover(state)
+
+    if intent == "reclassify_as_compliance":
+        return _handle_reclassify_as_compliance(state)
 
     if intent == "show_handover_notes":
         return _handle_show_handover_notes(incoming, state)
