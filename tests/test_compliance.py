@@ -1,4 +1,5 @@
 """Tests for compliance engine and intent routing."""
+import os
 import unittest
 from unittest.mock import patch, MagicMock
 
@@ -912,6 +913,197 @@ class TestComplianceAnswerLength(unittest.TestCase):
         import services.anthropic_service as svc
         src = inspect.getsource(svc.answer_compliance_question)
         self.assertIn("max_tokens=400", src)
+
+
+class TestDocumentClassification(unittest.TestCase):
+    """MLC FAQ and similar regulatory guidance should classify as regulatory_guidance."""
+
+    def _classify(self, text: str, filename: str):
+        from services.compliance_ingest import classify_compliance_doc
+        return classify_compliance_doc(text, filename)
+
+    # --- filename-based detection ---
+
+    def test_mlc_filename_classifies_as_regulatory_guidance(self):
+        self.assertEqual(self._classify("", "MLC FAQs.pdf"), "regulatory_guidance")
+
+    def test_mlc_lowercase_filename(self):
+        self.assertEqual(self._classify("", "mlc_guidance.pdf"), "regulatory_guidance")
+
+    def test_maritime_labour_filename(self):
+        self.assertEqual(self._classify("", "maritime labour convention.pdf"), "regulatory_guidance")
+
+    def test_flag_state_filename(self):
+        self.assertEqual(self._classify("", "flag state guidance.pdf"), "regulatory_guidance")
+
+    # --- text-based detection ---
+
+    def test_ilo_text_classifies_as_regulatory_guidance(self):
+        text = "International Labour Organization Maritime Labour Convention, 2006 FAQ"
+        self.assertEqual(self._classify(text, "guidance.pdf"), "regulatory_guidance")
+
+    def test_flag_state_responsibilities_text(self):
+        text = "flag state responsibilities under the convention"
+        self.assertEqual(self._classify(text, "doc.pdf"), "regulatory_guidance")
+
+    def test_port_state_control_text(self):
+        text = "port state control inspection requirements"
+        self.assertEqual(self._classify(text, "doc.pdf"), "regulatory_guidance")
+
+    def test_seafarer_rights_text(self):
+        text = "seafarer rights and entitlements under MLC 2006"
+        self.assertEqual(self._classify(text, "doc.pdf"), "regulatory_guidance")
+
+    def test_mlc_2006_text(self):
+        text = "mlc, 2006 applies to all ships of 500 GT or more"
+        self.assertEqual(self._classify(text, "doc.pdf"), "regulatory_guidance")
+
+    # --- should NOT classify as regulatory_guidance ---
+
+    def test_equipment_manual_text_not_regulatory(self):
+        text = "owner's manual installation guide troubleshooting chapter appendix"
+        result = self._classify(text, "watermaker_manual.pdf")
+        self.assertNotEqual(result, "regulatory_guidance")
+
+    def test_sms_text_not_regulatory(self):
+        text = "safety management system designated person company safety policy master's responsibility"
+        result = self._classify(text, "sms.pdf")
+        self.assertEqual(result, "yacht_sms")
+
+    # --- intent routing for reclassification ---
+
+    def test_reclassify_add_to_regulations_routing(self):
+        self.assertEqual(classify_text("add this to regulations / compliance instead"), "reclassify_as_compliance")
+
+    def test_reclassify_move_to_compliance(self):
+        self.assertEqual(classify_text("move this to compliance"), "reclassify_as_compliance")
+
+    def test_reclassify_this_is_not_a_manual(self):
+        self.assertEqual(classify_text("this is not a manual"), "reclassify_as_compliance")
+
+    def test_reclassify_save_as_compliance(self):
+        self.assertEqual(classify_text("save this as compliance"), "reclassify_as_compliance")
+
+    def test_reclassify_does_not_route_to_compliance_qa(self):
+        result = classify_text("add this to compliance")
+        self.assertNotEqual(result, "compliance_question")
+
+    # --- regression: compliance Q&A unaffected ---
+
+    def test_compliance_qa_still_works(self):
+        self.assertEqual(classify_text("does MARPOL apply to our vessel?"), "compliance_question")
+
+    def test_equipment_manual_intent_not_reclassify(self):
+        self.assertNotEqual(classify_text("show manuals"), "reclassify_as_compliance")
+
+
+class TestDocumentReclassification(unittest.TestCase):
+    """After a manual is imported, the user can reclassify it as compliance."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.manual_store as ms
+        importlib.reload(storage_paths)
+        importlib.reload(ms)
+        # Create a dummy PDF stand-in so file_path exists
+        self.pdf_path = os.path.join(self.tmpdir, "MLC_FAQs.pdf")
+        with open(self.pdf_path, "wb") as f:
+            f.write(b"%PDF-1.4 dummy")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.manual_store as ms
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(ms)
+
+    def _save_manual_entry(self, user_id=""):
+        import importlib
+        import domain.manual_store as ms
+        importlib.reload(ms)
+        ms.save_manual(user_id, {
+            "manufacturer": "ILO",
+            "product_name": "MLC FAQs",
+            "system": "OWS",
+        }, [], self.pdf_path)
+
+    @patch("whatsapp_app.ingest_compliance_pdf")
+    @patch("whatsapp_app._reset_compliance_retriever")
+    def test_reclassify_removes_manual_entry(self, mock_reset, mock_ingest):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        mock_ingest.return_value = 5
+        self._save_manual_entry()
+
+        from whatsapp_app import _handle_reclassify_as_compliance
+        state = {
+            "user_id": "",
+            "last_context": {
+                "type": "manual_imported",
+                "file_path": self.pdf_path,
+                "source_name": "MLC FAQs",
+            },
+        }
+        result, new_state = _handle_reclassify_as_compliance(state)
+
+        self.assertIn("DOCUMENT MOVED TO COMPLIANCE LIBRARY", result)
+        importlib.reload(ms)
+        remaining = ms.get_all_manuals("")
+        self.assertEqual(remaining, [])
+
+    @patch("whatsapp_app.ingest_compliance_pdf")
+    @patch("whatsapp_app._reset_compliance_retriever")
+    def test_reclassify_calls_ingest(self, mock_reset, mock_ingest):
+        mock_ingest.return_value = 5
+
+        from whatsapp_app import _handle_reclassify_as_compliance
+        state = {
+            "user_id": "",
+            "last_context": {
+                "type": "manual_imported",
+                "file_path": self.pdf_path,
+                "source_name": "MLC FAQs",
+            },
+        }
+        _handle_reclassify_as_compliance(state)
+        mock_ingest.assert_called_once_with(self.pdf_path, "MLC FAQs")
+
+    @patch("whatsapp_app.ingest_compliance_pdf")
+    @patch("whatsapp_app._reset_compliance_retriever")
+    def test_reclassify_updates_last_context(self, mock_reset, mock_ingest):
+        mock_ingest.return_value = 5
+
+        from whatsapp_app import _handle_reclassify_as_compliance
+        state = {
+            "user_id": "",
+            "last_context": {
+                "type": "manual_imported",
+                "file_path": self.pdf_path,
+                "source_name": "MLC FAQs",
+            },
+        }
+        _, new_state = _handle_reclassify_as_compliance(state)
+        self.assertEqual(new_state["last_context"]["type"], "compliance_doc_imported")
+
+    def test_reclassify_without_manual_context_returns_error(self):
+        from whatsapp_app import _handle_reclassify_as_compliance
+        state = {"user_id": "", "last_context": {"type": "market_check"}}
+        result, _ = _handle_reclassify_as_compliance(state)
+        self.assertIn("RECLASSIFICATION NOT POSSIBLE", result)
+
+    # --- regression: equipment manual still imports correctly ---
+
+    def test_equipment_manual_not_classified_as_regulatory_guidance(self):
+        from services.compliance_ingest import classify_compliance_doc
+        manual_text = (
+            "Owner's Manual for Newport 400 Watermaker. "
+            "Table of contents. Safety instructions. Troubleshooting. "
+            "Installation procedure. Warranty information."
+        )
+        result = classify_compliance_doc(manual_text, "newport400_manual.pdf")
+        self.assertNotEqual(result, "regulatory_guidance")
 
 
 if __name__ == "__main__":

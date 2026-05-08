@@ -309,6 +309,21 @@ _INVOICE_CLARIFICATION_SUBSTRINGS = [
     "what should i check",
 ]
 
+# Phrases requesting reclassification of the most recent upload to compliance.
+# Checked before compliance triggers so "add this to compliance" doesn't route
+# to the compliance Q&A engine.
+_RECLASSIFY_SUBSTRINGS = [
+    "add this to regulations",
+    "add this to compliance",
+    "save this as compliance",
+    "save this as regulation",
+    "move this to compliance",
+    "move this to regulations",
+    "this is not a manual",
+    "this is a compliance document",
+    "this is regulatory",
+]
+
 # Substring triggers for service report / handover retrieval.
 # "handover for OWS", "service reports for main engine", etc.
 _HANDOVER_SUBSTRINGS = [
@@ -938,6 +953,10 @@ def classify_text(text: str) -> str:
     for phrase in _INVOICE_CLARIFICATION_SUBSTRINGS:
         if phrase in t:
             return "invoice_clarification"
+
+    for phrase in _RECLASSIFY_SUBSTRINGS:
+        if phrase in t:
+            return "reclassify_as_compliance"
 
     for phrase in _HANDOVER_SUBSTRINGS:
         if phrase in t:

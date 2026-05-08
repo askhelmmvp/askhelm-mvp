@@ -87,6 +87,25 @@ def find_manuals_by_equipment(user_id: str, query: str) -> list:
     return results
 
 
+def delete_manual_by_source(user_id: str, source_file: str) -> bool:
+    """Remove all manual entries whose source_file matches. Returns True if any were removed."""
+    data = load_manuals(user_id)
+    before = len(data.get("manuals", []))
+    data["manuals"] = [
+        m for m in data.get("manuals", [])
+        if m.get("source_file") != source_file
+    ]
+    after = len(data["manuals"])
+    if after < before:
+        _write(user_id, data)
+        logger.info(
+            "manual_store: deleted %d manual(s) source_file=%r user=%s",
+            before - after, source_file, user_id,
+        )
+        return True
+    return False
+
+
 def search_manual_chunks(user_id: str, query: str, top_k: int = 4) -> list:
     """
     Keyword search across all manual chunks.
