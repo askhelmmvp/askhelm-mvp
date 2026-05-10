@@ -87,6 +87,43 @@ def find_manuals_by_equipment(user_id: str, query: str) -> list:
     return results
 
 
+# Strong textual indicators that a manual entry is regulatory/compliance guidance,
+# not an equipment manual. Checked against manufacturer, product_name, document_type.
+_MANUAL_COMPLIANCE_INDICATORS = frozenset([
+    "international labour organization",
+    "international labour organisation",
+    "maritime labour convention",
+    "mlc, 2006",
+    "mlc 2006",
+    "flag state",
+    "port state control",
+    "maritime labour certificate",
+    "declaration of maritime labour compliance",
+    "seafarer rights",
+])
+
+
+def is_compliance_record(manual: dict) -> bool:
+    """True when a manual entry contains strong indicators of regulatory/compliance guidance."""
+    text = " ".join(filter(None, [
+        (manual.get("manufacturer") or "").lower(),
+        (manual.get("product_name") or "").lower(),
+        (manual.get("document_type") or "").lower(),
+    ]))
+    return any(kw in text for kw in _MANUAL_COMPLIANCE_INDICATORS)
+
+
+def clear_all_manuals(user_id: str) -> int:
+    """Remove all manual entries. Returns the count of entries removed."""
+    data = load_manuals(user_id)
+    count = len(data.get("manuals", []))
+    if count:
+        data["manuals"] = []
+        _write(user_id, data)
+        logger.info("manual_store: cleared %d manual(s) user=%s", count, user_id)
+    return count
+
+
 def delete_manual_by_source(user_id: str, source_file: str) -> bool:
     """Remove all manual entries whose source_file matches. Returns True if any were removed."""
     data = load_manuals(user_id)

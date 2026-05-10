@@ -158,6 +158,13 @@ _FOLLOW_UPS = {
     "clear machinery": "reset_equipment",
     "reset equipment memory": "reset_equipment",
     "clear equipment memory": "reset_equipment",
+    # Manual library management — same guard: "reset manuals" starts with "reset".
+    "reset manuals": "reset_manuals",
+    "clear manuals": "reset_manuals",
+    "delete manuals": "reset_manuals",
+    "remove manual": "reclassify_as_compliance",
+    "remove this manual": "reclassify_as_compliance",
+    "reclassify manual as compliance": "reclassify_as_compliance",
     # Compliance knowledge base management
     "show compliance sources": "show_compliance_sources",
     "compliance sources": "show_compliance_sources",

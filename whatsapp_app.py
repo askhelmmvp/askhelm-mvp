@@ -107,6 +107,8 @@ from domain.manual_store import (
     find_manuals_by_equipment,
     search_manual_chunks,
     delete_manual_by_source,
+    clear_all_manuals,
+    is_compliance_record,
 )
 from domain.handover_store import (
     save_service_report,
@@ -3669,60 +3671,137 @@ def _handle_regulatory_guidance_doc(doc_record: dict, state: dict) -> Tuple[str,
     ), state
 
 
+def _handle_reset_manuals(state: dict) -> Tuple[str, dict]:
+    """Clear all entries from the manual library."""
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user
+    yacht_id = get_yacht_id_for_user(user_id)
+    count = clear_all_manuals(user_id)
+    if count == 0:
+        return _make_response(
+            decision="MANUAL LIBRARY ALREADY EMPTY",
+            why=f"No manuals were found in {yacht_id.upper()} manual library.",
+            actions=["Upload equipment manuals to add them to the library"],
+        ), state
+    return _make_response(
+        decision="MANUAL LIBRARY CLEARED",
+        why=f"Removed {count} manual(s) from {yacht_id.upper()} manual library.",
+        actions=[
+            "Upload equipment manuals again if required",
+            'Ask "show manuals" to confirm',
+        ],
+    ), state
+
+
 def _handle_reclassify_as_compliance(state: dict) -> Tuple[str, dict]:
-    """Move the most recently imported manual to the global compliance knowledge base."""
+    """
+    Move a misclassified manual to the global compliance knowledge base.
+
+    Path 1 — most recently uploaded manual (last_context has file_path).
+    Path 2 — scan the entire manual store for compliance indicator records
+              (handles existing persisted misclassifications after session restart).
+    """
     last_ctx = state.get("last_context") or {}
     user_id = state.get("user_id", "")
 
-    if last_ctx.get("type") != "manual_imported":
+    # Path 1: recent upload recorded in session context
+    if last_ctx.get("type") == "manual_imported":
+        file_path = last_ctx.get("file_path", "")
+        source_name = last_ctx.get("source_name", "") or (
+            os.path.splitext(os.path.basename(file_path))[0].replace("-", " ").replace("_", " ").strip()
+            if file_path else ""
+        )
+        if file_path:
+            delete_manual_by_source(user_id, file_path)
+            try:
+                total = ingest_compliance_pdf(file_path, source_name)
+                _reset_compliance_retriever()
+            except Exception as exc:
+                logger.exception("reclassify_as_compliance: ingest failed file=%s: %s", file_path, exc)
+                return _make_response(
+                    decision="RECLASSIFICATION FAILED",
+                    why=f"Could not ingest {source_name} into compliance library: {exc}",
+                    actions=["Check that the PDF contains selectable text"],
+                ), state
+            logger.info(
+                "whatsapp_app: reclassified manual→compliance (path1) name=%r chunks=%d user=%s",
+                source_name, total, user_id,
+            )
+            state["last_context"] = {
+                "type": "compliance_doc_imported",
+                "source_name": source_name,
+                "file_path": file_path,
+                "doc_type": "regulatory_guidance",
+            }
+            return _make_response(
+                decision="DOCUMENT MOVED TO COMPLIANCE LIBRARY",
+                why=f"{source_name} has been removed from the manual library and saved as compliance guidance.",
+                actions=[
+                    'Reply "show manuals" to confirm it has been removed from the manual library',
+                    'Reply "show compliance sources" to confirm it is listed as compliance',
+                    'Ask "search compliance for [topic]" to query this document',
+                ],
+            ), state
+
+    # Path 2: scan existing manual store for compliance indicator records.
+    # Catches persisted misclassifications from previous sessions.
+    all_manuals = get_all_manuals(user_id)
+    compliance_records = [m for m in all_manuals if is_compliance_record(m)]
+    if not compliance_records:
         return _make_response(
             decision="RECLASSIFICATION NOT POSSIBLE",
-            why="No recently imported manual found in this session.",
-            actions=["Upload the document again, then say 'add this to compliance'"],
+            why=(
+                "No recently imported manual found in this session, and no compliance indicator "
+                "records (ILO, MLC, flag state, etc.) found in the manual library."
+            ),
+            actions=[
+                "Upload the document first, then say 'add this to compliance'",
+                'Reply "show manuals" to see what is in the manual library',
+            ],
         ), state
 
-    file_path = last_ctx.get("file_path", "")
-    source_name = last_ctx.get("source_name", "") or (
-        os.path.splitext(os.path.basename(file_path))[0].replace("-", " ").replace("_", " ").strip()
-        if file_path else ""
-    )
-
-    if not file_path:
-        return _make_response(
-            decision="RECLASSIFICATION NOT POSSIBLE",
-            why="File path was not recorded for the last upload.",
-            actions=["Upload the document again, then say 'add this to compliance'"],
-        ), state
-
-    delete_manual_by_source(user_id, file_path)
-
-    try:
-        total = ingest_compliance_pdf(file_path, source_name)
-        _reset_compliance_retriever()
-    except Exception as exc:
-        logger.exception("reclassify_as_compliance: ingest failed file=%s: %s", file_path, exc)
-        return _make_response(
-            decision="RECLASSIFICATION FAILED",
-            why=f"Could not ingest {source_name} into compliance library: {exc}",
-            actions=["Check that the PDF contains selectable text"],
-        ), state
+    reclassified = []
+    for m in compliance_records:
+        source_file = m.get("source_file", "")
+        _mfr = m.get("manufacturer") or ""
+        _pname = m.get("product_name") or ""
+        source_name = " ".join(filter(None, [_mfr, _pname])) or (
+            os.path.splitext(os.path.basename(source_file))[0].replace("-", " ").replace("_", " ").strip()
+            if source_file else "Unknown"
+        )
+        delete_manual_by_source(user_id, source_file)
+        if source_file and os.path.exists(source_file):
+            try:
+                ingest_compliance_pdf(source_file, source_name)
+                _reset_compliance_retriever()
+            except Exception as exc:
+                logger.exception(
+                    "reclassify_existing: ingest failed source=%s: %s", source_file, exc
+                )
+        else:
+            logger.info(
+                "reclassify_existing: source_file missing, removed from manual store only name=%r",
+                source_name,
+            )
+        reclassified.append(source_name)
 
     logger.info(
-        "whatsapp_app: reclassified manual→compliance name=%r chunks=%d user=%s",
-        source_name, total, user_id,
+        "whatsapp_app: reclassified %d manual(s)→compliance (path2) user=%s names=%r",
+        len(reclassified), user_id, reclassified,
     )
     state["last_context"] = {
         "type": "compliance_doc_imported",
-        "source_name": source_name,
-        "file_path": file_path,
+        "source_name": reclassified[0] if reclassified else "",
         "doc_type": "regulatory_guidance",
     }
+    names = ", ".join(reclassified)
+    plural = "have" if len(reclassified) > 1 else "has"
     return _make_response(
         decision="DOCUMENT MOVED TO COMPLIANCE LIBRARY",
-        why=f"{source_name} has been removed from the manual library and saved as compliance guidance.",
+        why=f"{names} {plural} been removed from the manual library and saved as compliance guidance.",
         actions=[
-            'Reply "show manuals" to confirm it has been removed from the manual library',
-            'Reply "show compliance sources" to confirm it is listed as compliance',
+            'Reply "show manuals" to confirm removal from manual library',
+            'Reply "show compliance sources" to confirm compliance listing',
             'Ask "search compliance for [topic]" to query this document',
         ],
     ), state
@@ -4205,6 +4284,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "add_to_handover":
         return _handle_add_to_handover(state)
+
+    if intent == "reset_manuals":
+        return _handle_reset_manuals(state)
 
     if intent == "reclassify_as_compliance":
         return _handle_reclassify_as_compliance(state)
