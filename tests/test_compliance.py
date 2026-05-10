@@ -1106,5 +1106,230 @@ class TestDocumentReclassification(unittest.TestCase):
         self.assertNotEqual(result, "regulatory_guidance")
 
 
+class TestManualResetRouting(unittest.TestCase):
+    """reset manuals must not trigger comparison reset."""
+
+    def test_reset_manuals_routes_to_reset_manuals(self):
+        self.assertEqual(classify_text("reset manuals"), "reset_manuals")
+
+    def test_clear_manuals_routes_to_reset_manuals(self):
+        self.assertEqual(classify_text("clear manuals"), "reset_manuals")
+
+    def test_delete_manuals_routes_to_reset_manuals(self):
+        self.assertEqual(classify_text("delete manuals"), "reset_manuals")
+
+    def test_new_comparison_still_routes_to_new_session(self):
+        self.assertEqual(classify_text("new comparison"), "new_session")
+
+    def test_reset_equipment_still_routes_to_reset_equipment(self):
+        self.assertEqual(classify_text("reset equipment"), "reset_equipment")
+
+    def test_reset_manuals_not_new_session(self):
+        self.assertNotEqual(classify_text("reset manuals"), "new_session")
+
+    def test_remove_manual_routes_to_reclassify(self):
+        self.assertEqual(classify_text("remove this manual"), "reclassify_as_compliance")
+
+    def test_compliance_qa_unaffected(self):
+        self.assertEqual(classify_text("does MARPOL apply?"), "compliance_question")
+
+
+class TestManualComplianceIndicator(unittest.TestCase):
+    """is_compliance_record detects ILO/MLC records in the manual store."""
+
+    def _make_entry(self, manufacturer="", product_name="", document_type=""):
+        return {
+            "manufacturer": manufacturer,
+            "product_name": product_name,
+            "document_type": document_type,
+        }
+
+    def test_ilo_manufacturer_is_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = self._make_entry(manufacturer="International Labour Organization")
+        self.assertTrue(is_compliance_record(m))
+
+    def test_mlc_product_name_is_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = self._make_entry(product_name="Maritime Labour Convention, 2006 (MLC, 2006)")
+        self.assertTrue(is_compliance_record(m))
+
+    def test_flag_state_product_name_is_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = self._make_entry(product_name="Flag State Responsibilities Guide")
+        self.assertTrue(is_compliance_record(m))
+
+    def test_equipment_manual_not_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = self._make_entry(manufacturer="Spectra", product_name="Newport 400", document_type="Owner's Manual")
+        self.assertFalse(is_compliance_record(m))
+
+    def test_mtu_manual_not_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = self._make_entry(manufacturer="MTU", product_name="16V 2000 M86", document_type="Service Manual")
+        self.assertFalse(is_compliance_record(m))
+
+
+class TestManualReset(unittest.TestCase):
+    """clear_all_manuals removes all entries and _handle_reset_manuals responds correctly."""
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.manual_store as ms
+        importlib.reload(storage_paths)
+        importlib.reload(ms)
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.manual_store as ms
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(ms)
+
+    def _save(self, manufacturer="MTU", product="Engine Manual"):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        ms.save_manual("", {"manufacturer": manufacturer, "product_name": product}, [], "dummy.pdf")
+
+    def test_clear_all_manuals_removes_entries(self):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save()
+        self._save(manufacturer="Spectra", product="Watermaker Manual")
+        self.assertEqual(len(ms.get_all_manuals("")), 2)
+        ms.clear_all_manuals("")
+        self.assertEqual(ms.get_all_manuals(""), [])
+
+    def test_clear_all_returns_count(self):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save()
+        self._save()
+        count = ms.clear_all_manuals("")
+        self.assertEqual(count, 2)
+
+    def test_handle_reset_manuals_response(self):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save()
+        from whatsapp_app import _handle_reset_manuals
+        result, _ = _handle_reset_manuals({"user_id": ""})
+        self.assertIn("MANUAL LIBRARY CLEARED", result)
+
+    def test_handle_reset_manuals_empty_library(self):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        from whatsapp_app import _handle_reset_manuals
+        result, _ = _handle_reset_manuals({"user_id": ""})
+        self.assertIn("ALREADY EMPTY", result)
+
+    def test_handle_reset_manuals_clears_store(self):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save()
+        from whatsapp_app import _handle_reset_manuals
+        _handle_reset_manuals({"user_id": ""})
+        importlib.reload(ms)
+        self.assertEqual(ms.get_all_manuals(""), [])
+
+
+class TestReclassifyExistingManual(unittest.TestCase):
+    """Reclassification works for existing persisted manuals (Path 2)."""
+
+    _MLC_ENTRY = {
+        "manufacturer": "International Labour Organization",
+        "product_name": "Maritime Labour Convention, 2006 (MLC, 2006)",
+        "document_type": "Frequently Asked Questions (FAQ)",
+        "system": "OWS",
+    }
+    _EQUIPMENT_ENTRY = {
+        "manufacturer": "Spectra",
+        "product_name": "Newport 400",
+        "document_type": "Owner's Manual",
+        "system": "Watermaker",
+    }
+
+    def setUp(self):
+        import tempfile
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        self.mlc_pdf = os.path.join(self.tmpdir, "mlc_faqs.pdf")
+        self.equip_pdf = os.path.join(self.tmpdir, "newport400.pdf")
+        for p in (self.mlc_pdf, self.equip_pdf):
+            with open(p, "wb") as f:
+                f.write(b"%PDF-1.4 dummy")
+        import importlib, storage_paths, domain.manual_store as ms
+        importlib.reload(storage_paths)
+        importlib.reload(ms)
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.manual_store as ms
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(ms)
+
+    def _save_manual(self, entry, pdf_path=None):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        ms.save_manual("", entry, [], pdf_path or self.mlc_pdf)
+
+    def _reclassify(self, state=None):
+        from whatsapp_app import _handle_reclassify_as_compliance
+        if state is None:
+            state = {"user_id": "", "last_context": {"type": "market_check"}}
+        return _handle_reclassify_as_compliance(state)
+
+    @patch("whatsapp_app.ingest_compliance_pdf")
+    @patch("whatsapp_app._reset_compliance_retriever")
+    def test_path2_removes_compliance_record(self, mock_reset, mock_ingest):
+        mock_ingest.return_value = 3
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save_manual(self._MLC_ENTRY)
+        result, _ = self._reclassify()
+        self.assertIn("DOCUMENT MOVED TO COMPLIANCE LIBRARY", result)
+        importlib.reload(ms)
+        self.assertEqual(ms.get_all_manuals(""), [])
+
+    @patch("whatsapp_app.ingest_compliance_pdf")
+    @patch("whatsapp_app._reset_compliance_retriever")
+    def test_path2_calls_ingest(self, mock_reset, mock_ingest):
+        mock_ingest.return_value = 3
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save_manual(self._MLC_ENTRY)
+        self._reclassify()
+        mock_ingest.assert_called_once()
+
+    @patch("whatsapp_app.ingest_compliance_pdf")
+    @patch("whatsapp_app._reset_compliance_retriever")
+    def test_path2_preserves_equipment_manuals(self, mock_reset, mock_ingest):
+        """Real equipment manual is not reclassified."""
+        mock_ingest.return_value = 0
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save_manual(self._MLC_ENTRY, self.mlc_pdf)
+        self._save_manual(self._EQUIPMENT_ENTRY, self.equip_pdf)
+        self._reclassify()
+        importlib.reload(ms)
+        remaining = ms.get_all_manuals("")
+        self.assertEqual(len(remaining), 1)
+        self.assertEqual(remaining[0]["manufacturer"], "Spectra")
+
+    def test_path2_no_compliance_records_returns_error(self):
+        import importlib, domain.manual_store as ms
+        importlib.reload(ms)
+        self._save_manual(self._EQUIPMENT_ENTRY)
+        result, _ = self._reclassify()
+        self.assertIn("RECLASSIFICATION NOT POSSIBLE", result)
+
+    def test_no_manuals_at_all_returns_error(self):
+        result, _ = self._reclassify()
+        self.assertIn("RECLASSIFICATION NOT POSSIBLE", result)
+
+
 if __name__ == "__main__":
     unittest.main()
