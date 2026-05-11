@@ -996,6 +996,24 @@ class TestDocumentClassification(unittest.TestCase):
     def test_equipment_manual_intent_not_reclassify(self):
         self.assertNotEqual(classify_text("show manuals"), "reclassify_as_compliance")
 
+    # --- "how many" compliance override (ASK-11 follow-up) ---
+
+    def test_fire_door_battery_power_routes_to_compliance(self):
+        result = classify_text("How many times do fire doors need to operate on battery power?")
+        self.assertEqual(result, "compliance_question")
+
+    def test_fire_door_query_not_stock(self):
+        result = classify_text("How many times do fire doors need to operate on battery power?")
+        self.assertNotEqual(result, "stock_query")
+
+    def test_how_many_solas_routes_to_compliance(self):
+        result = classify_text("how many times does solas require this test?")
+        self.assertEqual(result, "compliance_question")
+
+    def test_stock_pn_query_unaffected_by_guard(self):
+        result = classify_text("how many 03GCPMS005 do we have on board?")
+        self.assertEqual(result, "stock_query")
+
 
 class TestDocumentReclassification(unittest.TestCase):
     """After a manual is imported, the user can reclassify it as compliance."""

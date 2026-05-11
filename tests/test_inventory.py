@@ -528,6 +528,31 @@ class TestStockQueryRouting(unittest.TestCase):
     def test_equipment_query_how_many_stabilisers(self):
         self.assertEqual(self._cls("how many stabilisers do we have?"), "equipment_query")
 
+    # --- compliance override for broad "how many" trigger ---
+
+    def test_fire_door_solas_routes_to_compliance_not_stock(self):
+        result = self._cls("How many times do fire doors need to operate on battery power?")
+        self.assertNotEqual(result, "stock_query")
+        self.assertEqual(result, "compliance_question")
+
+    def test_how_many_times_routes_to_compliance(self):
+        result = self._cls("how many times must the fire pump be tested?")
+        self.assertNotEqual(result, "stock_query")
+
+    # --- stock routing regressions ---
+
+    def test_part_number_how_many_still_stock(self):
+        self.assertEqual(self._cls("how many 03GCPMS005 do we have on board?"), "stock_query")
+
+    def test_alphanumeric_pn_how_many_still_stock(self):
+        self.assertEqual(self._cls("how many XP52718300060 on board?"), "stock_query")
+
+    def test_liners_for_main_engine_still_stock(self):
+        self.assertEqual(self._cls("how many liners for main engine?"), "stock_query")
+
+    def test_list_mtu_spares_still_spares(self):
+        self.assertEqual(self._cls("list MTU spares"), "spares_query")
+
 
 class TestStockSearchTermExtraction(unittest.TestCase):
     """_extract_stock_search_term must return the part number, not noise words."""
