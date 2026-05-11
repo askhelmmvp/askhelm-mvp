@@ -380,8 +380,22 @@ _STOCK_QUERY_SUBSTRINGS = [
     "which equipment does this belong to",
     # Broad quantity query — placed after equipment-noun checks so
     # equipment_query wins for "how many stabilisers do we have?"
+    # NOTE: the bare "how many " match is guarded in classify_text by
+    # _HOW_MANY_COMPLIANCE_RE to prevent compliance questions routing to stock.
     "how many ",
 ]
+
+# When "how many " is the only stock trigger in a query, check for these
+# frequency/regulatory indicators before routing to stock. If any match,
+# the query is asking about frequency or a requirement, not a stock count.
+# Example: "how many times do fire doors need to operate on battery power?"
+#          → "times" matches → routes to compliance, not stock.
+_HOW_MANY_COMPLIANCE_RE = re.compile(
+    r'\b(?:times|solas|marpol|ism\s+code|'
+    r'battery\s+power|emergency\s+power|central\s+power|'
+    r'fire\s+doors?|control\s+system|test\s+frequency)\b',
+    re.IGNORECASE,
+)
 
 _SPARES_QUERY_SUBSTRINGS = [
     "show spares for ",
@@ -991,8 +1005,15 @@ def classify_text(text: str) -> str:
     if _is_equipment_memory_query(t):
         return "equipment_query"
 
+    # Pre-compute whether "how many " would be the sole stock trigger and the query
+    # has compliance/frequency context that should override it.
+    _how_many_is_compliance = (
+        "how many " in t and bool(_HOW_MANY_COMPLIANCE_RE.search(t))
+    )
     for phrase in _STOCK_QUERY_SUBSTRINGS:
         if phrase in t:
+            if phrase == "how many " and _how_many_is_compliance:
+                continue  # let compliance routing handle this
             return "stock_query"
 
     for trigger in _QUOTE_COMPARE_SUBSTRINGS:
