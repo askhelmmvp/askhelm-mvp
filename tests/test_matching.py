@@ -433,8 +433,8 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         response = build_comparison_response(quote, invoice, comparison)
         self.assertIn("Confirm whether the quote was ex works", response)
 
-    def test_non_freight_addition_uses_standard_response(self):
-        """Invoice adds a spare part (not ancillary) → standard cost-increase response."""
+    def test_non_freight_addition_uses_additional_cost_response(self):
+        """Invoice adds a spare part (not ancillary) → INVOICE HAS ADDITIONAL COST response."""
         from whatsapp_app import build_comparison_response
         quote = _quote_doc()
         invoice = _invoice_doc(items=[
@@ -447,9 +447,10 @@ class TestBuildComparisonResponseFreight(unittest.TestCase):
         response = build_comparison_response(quote, invoice, comparison)
         # Not the ancillary-uplift path (freight-specific actions absent)
         self.assertNotIn("Confirm if freight was agreed", response)
-        # But still a clear decision
+        # Should flag the additional cost clearly
         self.assertIn("DECISION", response)
-        self.assertIn("MATCH CONFIRMED", response)
+        self.assertIn("INVOICE HAS ADDITIONAL COST", response)
+        self.assertIn("Spare gasket kit", response)
 
     def test_delivery_item_also_triggers_freight_response(self):
         from whatsapp_app import build_comparison_response
@@ -575,6 +576,219 @@ class TestSupplierScore(unittest.TestCase):
             score, AUTO_MATCH_THRESHOLD,
             f"Expected ≥{AUTO_MATCH_THRESHOLD}, got {score}. Reasons: {reasons}",
         )
+
+
+# ---------------------------------------------------------------------------
+# Heinen & Hopman HVAC filter invoice — ASK-29
+# ---------------------------------------------------------------------------
+
+def _hh_quote():
+    return {
+        "doc_type": "quote",
+        "supplier_name": "Heinen & Hopman",
+        "document_number": "26102437",
+        "currency": "EUR",
+        "total": 1536.33,
+        "subtotal": 1269.69,
+        "tax": 266.64,
+        "line_items": [
+            {"description": "FILTER PANEL - 490x892x100MM", "quantity": 4, "unit_rate": 178.26, "line_total": 570.43},
+            {"description": "FILTER PANEL - 490x592x100MM", "quantity": 4, "unit_rate": 157.02, "line_total": 502.46},
+            {"description": "FILTER PANEL - 287x592x100MM", "quantity": 2, "unit_rate": 123.00, "line_total": 196.80},
+        ],
+    }
+
+
+def _hh_invoice():
+    return {
+        "doc_type": "invoice",
+        "supplier_name": "Heinen & Hopman Engineering BV",
+        "document_number": "2602684",
+        "reference_number": "26102437",
+        "currency": "EUR",
+        "total": 1536.32,
+        "subtotal": 1269.69,
+        "tax": 266.63,
+        "line_items": [
+            {"description": "FILTER PANEL - 490x892x100MM", "quantity": 4, "unit_rate": 178.26, "line_total": 570.43},
+            {"description": "FILTER PANEL - 490x592x100MM", "quantity": 4, "unit_rate": 157.02, "line_total": 502.46},
+            {"description": "FILTER PANEL - 287x592x100MM", "quantity": 2, "unit_rate": 123.00, "line_total": 196.80},
+            # Logistics note — no price
+            {"description": "1 Pallet 120x80x76cms = 42kgs"},
+        ],
+    }
+
+
+class TestHeinenHopmanMatch(unittest.TestCase):
+    """ASK-29: line-item invoice-vs-quote comparison for the H&H HVAC filter case."""
+
+    def _compare(self):
+        quote = _hh_quote()
+        invoice = _hh_invoice()
+        comparison = compare_documents(quote, invoice)
+        return quote, invoice, comparison
+
+    # ----- compare_documents field tests -----
+
+    def test_all_three_items_match(self):
+        _, _, comp = self._compare()
+        self.assertEqual(len(comp["line_check"]), 3)
+        statuses = {e["status"] for e in comp["line_check"]}
+        self.assertEqual(statuses, {"match"})
+
+    def test_no_missing_items(self):
+        _, _, comp = self._compare()
+        self.assertEqual(comp["missing_items"], [])
+
+    def test_pallet_is_logistics_note(self):
+        _, _, comp = self._compare()
+        self.assertEqual(len(comp["logistics_notes"]), 1)
+        self.assertIn("Pallet", comp["logistics_notes"][0]["description"])
+
+    def test_pallet_not_in_priced_non_ancillary(self):
+        _, _, comp = self._compare()
+        self.assertEqual(comp["priced_non_ancillary_added_items"], [])
+
+    def test_lines_all_match_true(self):
+        _, _, comp = self._compare()
+        self.assertTrue(comp["lines_all_match"])
+
+    def test_no_quantity_mismatches(self):
+        _, _, comp = self._compare()
+        self.assertEqual(comp["quantity_mismatches"], [])
+
+    # ----- build_comparison_response tests -----
+
+    def test_decision_is_ok_to_approve(self):
+        from whatsapp_app import build_comparison_response
+        q, i, comp = self._compare()
+        response = build_comparison_response(q, i, comp)
+        self.assertIn("MATCH CONFIRMED — OK TO APPROVE", response)
+
+    def test_response_includes_line_check(self):
+        from whatsapp_app import build_comparison_response
+        q, i, comp = self._compare()
+        response = build_comparison_response(q, i, comp)
+        self.assertIn("LINE CHECK", response)
+
+    def test_response_includes_match_marks(self):
+        from whatsapp_app import build_comparison_response
+        q, i, comp = self._compare()
+        response = build_comparison_response(q, i, comp)
+        self.assertIn("✓", response)
+
+    def test_response_notes_logistics_not_charged(self):
+        from whatsapp_app import build_comparison_response
+        q, i, comp = self._compare()
+        response = build_comparison_response(q, i, comp)
+        self.assertIn("NOTE", response)
+        self.assertIn("no extra charge", response)
+
+    def test_response_mentions_rounding(self):
+        from whatsapp_app import build_comparison_response
+        q, i, comp = self._compare()
+        response = build_comparison_response(q, i, comp)
+        self.assertIn("rounding", response.lower())
+
+    def test_response_does_not_call_it_cost_reduction(self):
+        from whatsapp_app import build_comparison_response
+        q, i, comp = self._compare()
+        response = build_comparison_response(q, i, comp)
+        self.assertNotIn("COST REDUCTION", response)
+
+    def test_response_has_approve_action(self):
+        from whatsapp_app import build_comparison_response
+        q, i, comp = self._compare()
+        response = build_comparison_response(q, i, comp)
+        self.assertIn("approve", response.lower())
+
+
+# ---------------------------------------------------------------------------
+# Line-level mismatch regression tests
+# ---------------------------------------------------------------------------
+
+class TestInvoiceLineMismatches(unittest.TestCase):
+    """Regression tests for missing items, qty mismatches, added priced lines."""
+
+    def test_missing_item_decision(self):
+        from whatsapp_app import build_comparison_response
+        quote = _quote_doc()  # 3 items
+        invoice = _invoice_doc(items=[
+            {"description": "Impeller replacement", "quantity": 1, "unit_rate": 400.0, "line_total": 400.0},
+            {"description": "Labour - engine service", "quantity": 4, "unit_rate": 100.0, "line_total": 400.0},
+            # Oil filter set deliberately absent
+        ], total=800.0)
+        comparison = compare_documents(quote, invoice)
+        response = build_comparison_response(quote, invoice, comparison)
+        self.assertIn("INVOICE DOES NOT FULLY MATCH QUOTE", response)
+        self.assertIn("Oil filter set", response)
+
+    def test_missing_item_identified_in_line_check(self):
+        quote = _quote_doc()
+        invoice = _invoice_doc(items=[
+            {"description": "Impeller replacement", "quantity": 1, "unit_rate": 400.0, "line_total": 400.0},
+            {"description": "Labour - engine service", "quantity": 4, "unit_rate": 100.0, "line_total": 400.0},
+        ], total=800.0)
+        comparison = compare_documents(quote, invoice)
+        missing = [e for e in comparison["line_check"] if e["status"] == "missing"]
+        self.assertEqual(len(missing), 1)
+        self.assertIn("Oil filter", missing[0]["description"])
+
+    def test_quantity_mismatch_decision(self):
+        from whatsapp_app import build_comparison_response
+        quote = _quote_doc(items=[
+            {"description": "Impeller replacement", "quantity": 4, "unit_rate": 400.0, "line_total": 1600.0},
+        ])
+        invoice = _invoice_doc(items=[
+            {"description": "Impeller replacement", "quantity": 3, "unit_rate": 400.0, "line_total": 1200.0},
+        ], total=1200.0)
+        comparison = compare_documents(quote, invoice)
+        response = build_comparison_response(quote, invoice, comparison)
+        self.assertIn("INVOICE QUANTITY MISMATCH", response)
+
+    def test_quantity_mismatch_flagged_in_compare(self):
+        quote = _quote_doc(items=[
+            {"description": "Impeller replacement", "quantity": 4, "unit_rate": 400.0, "line_total": 1600.0},
+        ])
+        invoice = _invoice_doc(items=[
+            {"description": "Impeller replacement", "quantity": 3, "unit_rate": 400.0, "line_total": 1200.0},
+        ], total=1200.0)
+        comparison = compare_documents(quote, invoice)
+        self.assertEqual(len(comparison["quantity_mismatches"]), 1)
+        mismatch = comparison["quantity_mismatches"][0]
+        self.assertEqual(mismatch["quote_qty"], 4)
+        self.assertEqual(mismatch["invoice_qty"], 3)
+
+    def test_added_priced_line_decision(self):
+        from whatsapp_app import build_comparison_response
+        quote = _quote_doc()
+        invoice = _invoice_doc(items=[
+            {"description": "Impeller replacement", "quantity": 1, "unit_rate": 400.0, "line_total": 400.0},
+            {"description": "Labour - engine service", "quantity": 4, "unit_rate": 100.0, "line_total": 400.0},
+            {"description": "Oil filter set", "quantity": 1, "unit_rate": 200.0, "line_total": 200.0},
+            {"description": "Administration fee", "quantity": 1, "unit_rate": 75.0, "line_total": 75.0},
+        ], total=1075.0)
+        comparison = compare_documents(quote, invoice)
+        response = build_comparison_response(quote, invoice, comparison)
+        self.assertIn("INVOICE HAS ADDITIONAL COST", response)
+        self.assertIn("Administration fee", response)
+
+    def test_logistics_note_without_price_not_additional_cost(self):
+        from whatsapp_app import build_comparison_response
+        quote = _quote_doc()
+        # All core items match; only addition is an unpriced pallet note
+        invoice = _invoice_doc(items=[
+            {"description": "Impeller replacement", "quantity": 1, "unit_rate": 400.0, "line_total": 400.0},
+            {"description": "Labour - engine service", "quantity": 4, "unit_rate": 100.0, "line_total": 400.0},
+            {"description": "Oil filter set", "quantity": 1, "unit_rate": 200.0, "line_total": 200.0},
+            {"description": "1 Pallet 120x80x76cms = 42kgs"},  # no price
+        ], total=1000.0)
+        comparison = compare_documents(quote, invoice)
+        response = build_comparison_response(quote, invoice, comparison)
+        # Pallet note must NOT trigger additional cost
+        self.assertNotIn("INVOICE HAS ADDITIONAL COST", response)
+        # Should route to OK TO APPROVE since items match and total unchanged
+        self.assertIn("MATCH CONFIRMED", response)
 
 
 if __name__ == "__main__":
