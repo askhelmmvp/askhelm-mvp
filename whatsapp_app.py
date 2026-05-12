@@ -435,6 +435,40 @@ def _get_item_names(items, limit=2):
     return names
 
 
+def _format_line_check(line_check: list, max_items: int = 8) -> str:
+    """Compact LINE CHECK block for WhatsApp responses."""
+    if not line_check:
+        return ""
+    rows = []
+    for entry in line_check[:max_items]:
+        desc = (entry.get("description") or "").strip()
+        if len(desc) > 32:
+            desc = desc[:30] + ".."
+        qty = entry.get("quote_qty")
+        try:
+            qty_str = f"{int(float(qty))}× " if qty is not None else ""
+        except (TypeError, ValueError):
+            qty_str = f"{qty}× " if qty else ""
+        status = entry.get("status", "")
+        if status == "match":
+            mark = "✓"
+        elif status == "missing":
+            mark = "MISSING"
+        else:
+            parts = []
+            if not entry.get("qty_ok", True):
+                parts.append(f"qty {entry.get('quote_qty')}→{entry.get('invoice_qty')}")
+            if not entry.get("total_ok", True):
+                qt, it = entry.get("quote_total"), entry.get("invoice_total")
+                if qt is not None and it is not None:
+                    parts.append(f"total {qt}→{it}")
+            mark = "MISMATCH" + (f" ({', '.join(parts)})" if parts else "")
+        rows.append(f"• {qty_str}{desc} — {mark}")
+    if len(line_check) > max_items:
+        rows.append(f"• +{len(line_check) - max_items} more")
+    return "LINE CHECK:\n" + "\n".join(rows)
+
+
 def _build_decision_and_why(
     doc_type_a, doc_type_b,
     supplier_a, supplier_b,
@@ -650,15 +684,25 @@ def _classify_comparison(
     both_quotes = doc_type_a == "quote" and doc_type_b == "quote"
 
     if quote_to_invoice:
-        if delta is None or delta == 0:
+        _qty_mismatches = comparison.get("quantity_mismatches") or []
+        _priced_non_anc = comparison.get("priced_non_ancillary_added_items") or []
+        _lines_all_match = comparison.get("lines_all_match")
+
+        if _qty_mismatches:
+            decision = "INVOICE QUANTITY MISMATCH"
+        elif missing_items:
+            decision = "INVOICE DOES NOT FULLY MATCH QUOTE"
+        elif _priced_non_anc:
+            decision = "INVOICE HAS ADDITIONAL COST"
+        elif delta is None or delta == 0:
             decision = "MATCH CONFIRMED — NO CHANGE"
         elif delta > 0:
-            if missing_items:
-                decision = "MATCH CONFIRMED — SCOPE DIFFERENCE"
-            elif ancillary_only and ancillary_items:
+            if ancillary_only and ancillary_items:
                 decision = "MATCH CONFIRMED — FREIGHT ADDED"
             else:
                 decision = "MATCH CONFIRMED — COST INCREASE"
+        elif _lines_all_match and abs(delta) <= 0.02:
+            decision = "MATCH CONFIRMED — OK TO APPROVE"
         else:
             decision = "MATCH CONFIRMED — COST REDUCTION"
     elif quote_to_proforma:
@@ -676,6 +720,9 @@ def _classify_comparison(
     # NO CHANGE decision means totals are confirmed identical — always HIGH
     if decision == "MATCH CONFIRMED — NO CHANGE":
         confidence = "HIGH"
+    # Full line-item match + rounding-only difference → HIGH confidence
+    if decision == "MATCH CONFIRMED — OK TO APPROVE":
+        confidence = "\U0001f7e2 HIGH"
 
     return {
         "comparison_type": (
@@ -821,6 +868,105 @@ def build_comparison_response(doc_a, doc_b, comparison, match_score: int = 0):
             supplier_b, ancillary_items, delta, delta_percent, currency_b,
             confidence_label=confidence_label,
         )
+
+    # Line-level invoice-vs-quote decisions
+    if quote_to_invoice:
+        _outcome_decision = outcome["decision"]
+        _line_check = comparison.get("line_check") or []
+        _logistics_notes = comparison.get("logistics_notes") or []
+        _qty_mismatches = comparison.get("quantity_mismatches") or []
+        _priced_non_anc = comparison.get("priced_non_ancillary_added_items") or []
+        cur = currency_b or currency_a or BASE_CURRENCY
+
+        if _outcome_decision == "MATCH CONFIRMED — OK TO APPROVE":
+            why = "The invoice matches the quoted line items, quantities and line totals."
+            if total_a is not None and total_b is not None:
+                why = f"{why} Quote: {cur} {total_a:,.2f}. Invoice: {cur} {total_b:,.2f}."
+            if delta is not None and delta != 0:
+                why = f"{why} Difference: {cur} {abs(delta):.2f} — VAT rounding only."
+            if confidence_label:
+                why = f"{why} Confidence: {confidence_label}."
+            lc = _format_line_check(_line_check)
+            if _logistics_notes:
+                lc_descs = "; ".join(
+                    (it.get("description") or "").strip()[:40]
+                    for it in _logistics_notes[:2]
+                )
+                lc_suffix = f"\n\nNOTE: Invoice includes logistics info ({lc_descs}) — no extra charge."
+                lc = (lc or "") + lc_suffix
+            ref_num = (doc_b.get("document_number") or doc_b.get("reference_number") or "").strip()
+            actions = ["OK to approve if goods were received", "No price query required"]
+            if ref_num:
+                actions.append(f"File against order/quote {ref_num}")
+            parts = [f"DECISION:\n{_outcome_decision}", f"WHY:\n{why}"]
+            if lc:
+                parts.append(lc)
+            parts.append("ACTIONS:\n• " + "\n• ".join(actions))
+            return "\n\n".join(parts)
+
+        if _outcome_decision == "INVOICE QUANTITY MISMATCH":
+            details = []
+            for m in _qty_mismatches[:3]:
+                desc = (m.get("description") or "")[:40]
+                details.append(f"• {desc}: quoted {m.get('quote_qty')}, invoiced {m.get('invoice_qty')}")
+            why = "Quantity differs from quote:\n" + "\n".join(details)
+            if confidence_label:
+                why = f"{why}\nConfidence: {confidence_label}."
+            lc = _format_line_check(_line_check)
+            if lc:
+                why = f"{why}\n\n{lc}"
+            return _make_response(
+                decision="INVOICE QUANTITY MISMATCH",
+                why=why,
+                actions=[
+                    "Do not approve until quantities are confirmed",
+                    f"Query {supplier_b} on the quantity discrepancy",
+                ],
+            )
+
+        if _outcome_decision == "INVOICE DOES NOT FULLY MATCH QUOTE":
+            missing_full = [
+                (m.get("description") or "Unnamed item")[:40] for m in missing_items[:3]
+            ]
+            why = f"Items on the quote are missing from the invoice: {', '.join(missing_full)}."
+            if confidence_label:
+                why = f"{why} Confidence: {confidence_label}."
+            lc = _format_line_check(_line_check)
+            if lc:
+                why = f"{why}\n\n{lc}"
+            return _make_response(
+                decision="INVOICE DOES NOT FULLY MATCH QUOTE",
+                why=why,
+                actions=[
+                    "Do not approve until all quoted items are confirmed delivered",
+                    f"Query {supplier_b} on missing items",
+                ],
+            )
+
+        if _outcome_decision == "INVOICE HAS ADDITIONAL COST":
+            added_descs = [
+                (it.get("description") or "Item")[:40] for it in _priced_non_anc[:3]
+            ]
+            why = (
+                f"Invoice includes additional priced item(s) not on the quote: "
+                f"{', '.join(added_descs)}."
+            )
+            if delta is not None:
+                direction = "higher" if delta > 0 else "lower"
+                why = f"{why} Invoice total is {cur} {abs(delta):,.2f} {direction}."
+            if confidence_label:
+                why = f"{why} Confidence: {confidence_label}."
+            lc = _format_line_check(_line_check)
+            if lc:
+                why = f"{why}\n\n{lc}"
+            return _make_response(
+                decision="INVOICE HAS ADDITIONAL COST",
+                why=why,
+                actions=[
+                    f"Challenge {supplier_b} on the added item(s)",
+                    "Do not approve without confirming additions were agreed",
+                ],
+            )
 
     if (
         currency_a and currency_b

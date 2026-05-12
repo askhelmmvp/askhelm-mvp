@@ -60,6 +60,39 @@ def _is_ancillary_item(desc: str) -> bool:
 _is_freight_item = _is_ancillary_item  # backward compatibility alias
 
 
+def _is_logistics_note(item: dict) -> bool:
+    """True when an item carries no monetary value — a logistics note, not a charge."""
+    total = item.get("line_total")
+    rate = item.get("unit_rate")
+    try:
+        has_price = (total is not None and float(total) != 0) or (
+            rate is not None and float(rate) != 0
+        )
+    except (TypeError, ValueError):
+        has_price = bool(total or rate)
+    return not has_price
+
+
+def _qty_matches(a, b) -> bool:
+    """True when two quantity values are equal within a small tolerance, or one is absent."""
+    if a is None or b is None:
+        return True
+    try:
+        return abs(float(a) - float(b)) <= 0.001
+    except (TypeError, ValueError):
+        return str(a).strip() == str(b).strip()
+
+
+def _amount_matches(a, b) -> bool:
+    """True when two monetary amounts match within EUR 0.01 tolerance, or either is absent."""
+    if a is None or b is None:
+        return True
+    try:
+        return abs(float(a) - float(b)) <= 0.005
+    except (TypeError, ValueError):
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Quote category detection
 # ---------------------------------------------------------------------------
@@ -249,6 +282,76 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         if not _is_ancillary_item(item.get("description", ""))
     ]
 
+    # Line-level detail: bijective (1-to-1) greedy best-similarity matching.
+    # Build scores for all (quote_idx, invoice_idx) candidate pairs.
+    _pairs: list = []
+    for _qi, _qte in enumerate(items_a):
+        _qd = (_qte.get("description") or "").strip()
+        if not _qd:
+            continue
+        _na = _normalize_desc(_qd)
+        _wa = _sig_words(_na)
+        for _ii, _inv in enumerate(items_b):
+            _id = (_inv.get("description") or "").strip()
+            if not _id:
+                continue
+            _nb = _normalize_desc(_id)
+            if _na == _nb:
+                _sc = 1.0
+            else:
+                _wb = _sig_words(_nb)
+                _sc = len(_wa & _wb) / len(_wa | _wb) if (_wa and _wb) else 0.0
+            if _sc >= 0.5:
+                _pairs.append((_sc, _qi, _ii))
+    _pairs.sort(reverse=True)
+    _used_q: set = set()
+    _used_i: set = set()
+    _lc_map: dict = {}   # quote_idx → invoice_idx
+    for _sc, _qi, _ii in _pairs:
+        if _qi not in _used_q and _ii not in _used_i:
+            _lc_map[_qi] = _ii
+            _used_q.add(_qi)
+            _used_i.add(_ii)
+
+    line_check = []
+    quantity_mismatches = []
+    price_mismatches = []
+    for _qi, qte in enumerate(items_a):
+        qte_desc = (qte.get("description") or "").strip()
+        if not qte_desc:
+            continue
+        if _qi not in _lc_map:
+            line_check.append({"description": qte_desc, "status": "missing"})
+            continue
+        inv_match = items_b[_lc_map[_qi]]
+        qty_ok = _qty_matches(qte.get("quantity"), inv_match.get("quantity"))
+        rate_ok = _amount_matches(qte.get("unit_rate"), inv_match.get("unit_rate"))
+        total_ok = _amount_matches(qte.get("line_total"), inv_match.get("line_total"))
+        status = "match" if (qty_ok and rate_ok and total_ok) else "mismatch"
+        entry = {
+            "description": qte_desc,
+            "status": status,
+            "qty_ok": qty_ok,
+            "rate_ok": rate_ok,
+            "total_ok": total_ok,
+            "quote_qty": qte.get("quantity"),
+            "invoice_qty": inv_match.get("quantity"),
+            "quote_total": qte.get("line_total"),
+            "invoice_total": inv_match.get("line_total"),
+        }
+        line_check.append(entry)
+        if not qty_ok:
+            quantity_mismatches.append(entry)
+        if not rate_ok or not total_ok:
+            price_mismatches.append(entry)
+
+    # Items with no monetary value are logistics notes (e.g. pallet dimensions), not charges.
+    logistics_notes = [item for item in added_items if _is_logistics_note(item)]
+    priced_non_ancillary = [item for item in non_ancillary_added if not _is_logistics_note(item)]
+    lines_all_match = (
+        all(e["status"] == "match" for e in line_check) if line_check else None
+    )
+
     return {
         "total_a": total_a,
         "total_b": total_b,
@@ -261,4 +364,11 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         "non_ancillary_added_items": non_ancillary_added,
         # True when invoice adds items but ALL of them are ancillary charges
         "all_added_are_ancillary": bool(added_items) and not non_ancillary_added,
+        # line-level analysis
+        "line_check": line_check,
+        "quantity_mismatches": quantity_mismatches,
+        "price_mismatches": price_mismatches,
+        "logistics_notes": logistics_notes,
+        "priced_non_ancillary_added_items": priced_non_ancillary,
+        "lines_all_match": lines_all_match,
     }
