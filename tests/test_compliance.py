@@ -1349,5 +1349,76 @@ class TestReclassifyExistingManual(unittest.TestCase):
         self.assertIn("RECLASSIFICATION NOT POSSIBLE", result)
 
 
+class TestSolasClassification(unittest.TestCase):
+    """SOLAS and IMO convention documents must route to compliance, not manuals."""
+
+    def test_solas_filename_classified_as_regulatory_guidance(self):
+        from services.compliance_ingest import classify_compliance_doc
+        result = classify_compliance_doc("", "SOLAS-Consolidated-Edition-2018.docx.pdf")
+        self.assertEqual(result, "regulatory_guidance")
+
+    def test_marpol_filename_classified_as_regulatory_guidance(self):
+        from services.compliance_ingest import classify_compliance_doc
+        result = classify_compliance_doc("", "MARPOL-2019-Consolidated.pdf")
+        self.assertEqual(result, "regulatory_guidance")
+
+    def test_stcw_filename_classified_as_regulatory_guidance(self):
+        from services.compliance_ingest import classify_compliance_doc
+        result = classify_compliance_doc("", "STCW-Code-2011.pdf")
+        self.assertEqual(result, "regulatory_guidance")
+
+    def test_solas_text_phrase_classified_as_regulatory_guidance(self):
+        from services.compliance_ingest import classify_compliance_doc
+        text = "International Convention for the Safety of Life at Sea, 1974, as amended."
+        result = classify_compliance_doc(text, "doc.pdf")
+        self.assertEqual(result, "regulatory_guidance")
+
+    def test_contracting_governments_phrase_classified_as_regulatory_guidance(self):
+        from services.compliance_ingest import classify_compliance_doc
+        text = "Contracting Governments shall ensure that all ships are surveyed."
+        result = classify_compliance_doc(text, "doc.pdf")
+        self.assertEqual(result, "regulatory_guidance")
+
+    def test_real_manual_text_not_classified_as_regulatory(self):
+        from services.compliance_ingest import classify_compliance_doc
+        text = (
+            "MTU Series 4000 Marine Diesel Engine. "
+            "This manual covers installation, operation and service of the engine. "
+            "Serial number plate is located on the engine block. "
+            "Torque specifications are listed in Appendix A."
+        )
+        result = classify_compliance_doc(text, "mtu_4000_manual.pdf")
+        self.assertIsNone(result)
+
+
+class TestSolasManualComplianceIndicator(unittest.TestCase):
+    """is_compliance_record must detect SOLAS/IMO entries persisted in manual library."""
+
+    def test_solas_product_name_is_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = {"product_name": "SOLAS 2018 Consolidated Edition", "document_type": "Regulatory Convention"}
+        self.assertTrue(is_compliance_record(m))
+
+    def test_marpol_product_name_is_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = {"manufacturer": "IMO", "product_name": "MARPOL Consolidated 2019"}
+        self.assertTrue(is_compliance_record(m))
+
+    def test_regulatory_convention_doc_type_is_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = {"product_name": "Safety at Sea", "document_type": "Regulatory Convention"}
+        self.assertTrue(is_compliance_record(m))
+
+    def test_international_convention_doc_type_is_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = {"product_name": "STCW Code 2011", "document_type": "International Convention"}
+        self.assertTrue(is_compliance_record(m))
+
+    def test_equipment_manual_not_compliance(self):
+        from domain.manual_store import is_compliance_record
+        m = {"manufacturer": "Grundfos", "product_name": "CM Pump Series", "document_type": "Technical Manual"}
+        self.assertFalse(is_compliance_record(m))
+
+
 if __name__ == "__main__":
     unittest.main()

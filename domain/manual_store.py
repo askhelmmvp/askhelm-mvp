@@ -90,6 +90,7 @@ def find_manuals_by_equipment(user_id: str, query: str) -> list:
 # Strong textual indicators that a manual entry is regulatory/compliance guidance,
 # not an equipment manual. Checked against manufacturer, product_name, document_type.
 _MANUAL_COMPLIANCE_INDICATORS = frozenset([
+    # MLC / ILO
     "international labour organization",
     "international labour organisation",
     "maritime labour convention",
@@ -100,6 +101,12 @@ _MANUAL_COMPLIANCE_INDICATORS = frozenset([
     "maritime labour certificate",
     "declaration of maritime labour compliance",
     "seafarer rights",
+    # IMO conventions
+    "solas",
+    "marpol",
+    "stcw",
+    "regulatory convention",
+    "international convention",
 ])
 
 

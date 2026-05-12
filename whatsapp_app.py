@@ -3920,6 +3920,19 @@ def _extract_pdf_to_doc_record(file_path: str) -> dict:
         if is_technical_manual_text(text):
             logger.info("PDF: technical manual detected in raw text, routing to manual extraction")
             manual = extract_manual_metadata_from_text(text, filename)
+            # Post-extraction safety net: if the LLM correctly identified this as a
+            # regulatory/convention document, reroute to compliance instead of manuals.
+            _dtype = (manual.get("document_type") or "").lower()
+            if any(kw in _dtype for kw in ("convention", "regulatory", "regulation")):
+                logger.info(
+                    "PDF: post-extraction regulatory redirect doc_type=%r, routing to compliance",
+                    manual.get("document_type"),
+                )
+                _src_name = (
+                    manual.get("product_name")
+                    or os.path.splitext(filename)[0].replace("-", " ").replace("_", " ").strip()
+                )
+                return make_compliance_doc_record("regulatory_guidance", _src_name, file_path)
             chunks = chunk_manual_text(text)
             return make_manual_doc_record(manual, file_path, chunks)
 

@@ -924,6 +924,7 @@ _PROCEDURE_KEYWORDS = frozenset([
 # Multi-word phrases that unambiguously identify regulatory/compliance guidance
 # from external bodies (ILO, IMO, flag states, port state control, etc.).
 _REGULATORY_STRONG_PHRASES = frozenset([
+    # MLC / ILO
     "maritime labour convention",
     "mlc, 2006",
     "mlc 2006",
@@ -935,15 +936,31 @@ _REGULATORY_STRONG_PHRASES = frozenset([
     "declaration of maritime labour compliance",
     "seafarer rights",
     "certification and compliance",
+    # IMO conventions
+    "international convention for the safety of life at sea",
+    "international convention for the prevention of pollution from ships",
+    "international convention on standards of training, certification and watchkeeping",
+    "safety of life at sea",
+    # Convention language specific to IMO instruments
+    "contracting government",
+    "contracting governments",
 ])
 
 # Filename fragments that signal a regulatory guidance document.
 _REGULATORY_GUIDANCE_FILENAME_KW = frozenset([
+    # MLC / ILO
     "mlc",
     "maritime labour",
     "ilo ",
     "flag state",
     "port state",
+    # IMO conventions
+    "solas",
+    "marpol",
+    "stcw",
+    "colregs",
+    "modu code",
+    "isg code",
 ])
 
 
