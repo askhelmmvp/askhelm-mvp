@@ -1489,5 +1489,71 @@ class TestNormaliseComplianceSourceName(unittest.TestCase):
         self.assertIn("ISM Code", names)
 
 
+class TestShowRegulationsResponseBuilder(unittest.TestCase):
+    """
+    The _handle_show_compliance_sources response builder must normalise
+    upload-ID source names at the display point, regardless of what
+    list_compliance_sources returns.
+    """
+
+    _SOLAS_CONTENT = (
+        "International Convention for the Safety of Life at Sea, 1974, as amended. "
+        "Contracting Governments shall ensure compliance with the provisions."
+    )
+
+    def _call_handler(self, mock_sources):
+        from unittest.mock import patch
+        from whatsapp_app import _handle_show_compliance_sources
+        state = {"user_id": "test_user"}
+        with patch("whatsapp_app.list_compliance_sources", return_value=mock_sources):
+            response, _ = _handle_show_compliance_sources(state)
+        return response
+
+    def test_upload_id_with_solas_content_sample_displays_as_solas(self):
+        sources = [
+            {
+                "source": "upload 8880396640424531070",
+                "chunks": 50,
+                "content_sample": self._SOLAS_CONTENT,
+            }
+        ]
+        response = self._call_handler(sources)
+        self.assertIn("SOLAS Consolidated Edition 2018", response)
+        self.assertNotIn("upload 8880396640424531070", response)
+
+    def test_normal_source_names_pass_through_unchanged(self):
+        sources = [
+            {"source": "ISM Code", "chunks": 10, "content_sample": ""},
+            {"source": "MARPOL Annex I", "chunks": 8, "content_sample": ""},
+        ]
+        response = self._call_handler(sources)
+        self.assertIn("ISM Code", response)
+        self.assertIn("MARPOL Annex I", response)
+
+    def test_mixed_sources_normalises_only_upload_ids(self):
+        sources = [
+            {"source": "ISM Code", "chunks": 10, "content_sample": ""},
+            {
+                "source": "upload 8880396640424531070",
+                "chunks": 50,
+                "content_sample": self._SOLAS_CONTENT,
+            },
+            {"source": "MARPOL Annex V", "chunks": 6, "content_sample": ""},
+        ]
+        response = self._call_handler(sources)
+        self.assertIn("SOLAS Consolidated Edition 2018", response)
+        self.assertNotIn("upload 8880396640424531070", response)
+        self.assertIn("ISM Code", response)
+        self.assertIn("MARPOL Annex V", response)
+
+    def test_response_contains_regulations_found_decision(self):
+        sources = [
+            {"source": "ISM Code", "chunks": 10, "content_sample": ""},
+        ]
+        response = self._call_handler(sources)
+        self.assertIn("REGULATIONS FOUND", response)
+        self.assertIn("REGULATIONS:", response)
+
+
 if __name__ == "__main__":
     unittest.main()

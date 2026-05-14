@@ -151,24 +151,36 @@ def normalise_compliance_source_name(name: str, sample_content: str = "") -> str
 
 
 def list_sources() -> List[Dict]:
-    """Return unique source documents with chunk counts."""
+    """Return unique source documents with chunk counts and a content sample for display normalisation."""
     chunks = load_chunks()
-    # Gather one content sample per raw source name for upload-ID normalisation.
-    _sample: dict = {}
+    # Accumulate content + source_references from ALL chunks per raw source name.
+    # Using all chunks (not just the first) ensures SOLAS signals are found even when
+    # the front-matter chunk is not stored first.
+    _sample: dict = {}  # raw_src → accumulated text (capped at 5 000 chars)
     for c in chunks:
         raw = c.get("source") or c.get("document") or "Unknown"
         raw = re.sub(r"\.pdf$", "", raw, flags=re.I).strip()
         if raw not in _sample:
-            _sample[raw] = c.get("content", "")
+            _sample[raw] = ""
+        if len(_sample[raw]) < 5000:
+            _sample[raw] += " " + (c.get("content") or "")
+            _sample[raw] += " " + (c.get("source_reference") or "")
 
     counts: Counter = Counter()
+    norm_sample: dict = {}  # normalised_src → content sample (for the handler to use)
     for c in chunks:
         src = c.get("source") or c.get("document") or "Unknown"
-        # Strip file extension and path noise
         src = re.sub(r"\.pdf$", "", src, flags=re.I).strip()
-        src = normalise_compliance_source_name(src, _sample.get(src, ""))
-        counts[src] += 1
-    return [{"source": s, "chunks": n} for s, n in sorted(counts.items())]
+        sample = _sample.get(src, "")
+        src_norm = normalise_compliance_source_name(src, sample)
+        counts[src_norm] += 1
+        if src_norm not in norm_sample:
+            norm_sample[src_norm] = sample
+
+    return [
+        {"source": s, "chunks": n, "content_sample": norm_sample.get(s, "")}
+        for s, n in sorted(counts.items())
+    ]
 
 
 # ---------------------------------------------------------------------------

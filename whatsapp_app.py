@@ -51,6 +51,7 @@ from services.compliance_ingest import (
     classify_compliance_doc,
     make_compliance_doc_record,
     list_global_regulations,
+    normalise_compliance_source_name,
 )
 from services.compliance_profile import (
     load_profile as load_compliance_profile,
@@ -3543,7 +3544,10 @@ def _handle_show_compliance_sources(state: dict) -> Tuple[str, dict]:
             ],
         ), state
 
-    reg_lines = "\n".join(f"• {s['source']}" for s in sources)
+    reg_lines = "\n".join(
+        f"• {normalise_compliance_source_name(s['source'], s.get('content_sample', ''))}"
+        for s in sources
+    )
     total_chunks = sum(s["chunks"] for s in sources)
     response = (
         f"DECISION:\nREGULATIONS FOUND\n\n"
