@@ -117,14 +117,56 @@ def rebuild_index() -> int:
 # Source management
 # ---------------------------------------------------------------------------
 
+# Upload-ID pattern: "upload <digits>" or bare "<digits>" used as a temp filename.
+_UPLOAD_ID_RE = re.compile(r'^upload[\s_\-]*\d+$', re.IGNORECASE)
+
+_SOLAS_CONTENT_SIGNALS = (
+    "international convention for the safety of life at sea",
+    "safety of life at sea",
+    "contracting governments",
+    "solas chapter",
+    "solas regulation",
+)
+
+
+def normalise_compliance_source_name(name: str, sample_content: str = "") -> str:
+    """
+    Return a human-readable display name for a compliance source.
+
+    If the stored name looks like a temporary upload ID (e.g. "upload 8880396640424531070"),
+    inspect a sample of the chunk content to identify the document and return a proper title.
+    Non-upload names are returned unchanged.
+    """
+    if not name:
+        return name
+    stripped = name.strip()
+    if not _UPLOAD_ID_RE.match(stripped):
+        return stripped  # already a meaningful name
+    # It is an upload ID — try to identify from chunk content
+    content_lower = sample_content.lower()
+    if any(sig in content_lower for sig in _SOLAS_CONTENT_SIGNALS):
+        return "SOLAS Consolidated Edition 2018"
+    # Unrecognised upload — return as-is so nothing is silently lost
+    return stripped
+
+
 def list_sources() -> List[Dict]:
     """Return unique source documents with chunk counts."""
     chunks = load_chunks()
+    # Gather one content sample per raw source name for upload-ID normalisation.
+    _sample: dict = {}
+    for c in chunks:
+        raw = c.get("source") or c.get("document") or "Unknown"
+        raw = re.sub(r"\.pdf$", "", raw, flags=re.I).strip()
+        if raw not in _sample:
+            _sample[raw] = c.get("content", "")
+
     counts: Counter = Counter()
     for c in chunks:
         src = c.get("source") or c.get("document") or "Unknown"
         # Strip file extension and path noise
         src = re.sub(r"\.pdf$", "", src, flags=re.I).strip()
+        src = normalise_compliance_source_name(src, _sample.get(src, ""))
         counts[src] += 1
     return [{"source": s, "chunks": n} for s, n in sorted(counts.items())]
 

@@ -1420,5 +1420,74 @@ class TestSolasManualComplianceIndicator(unittest.TestCase):
         self.assertFalse(is_compliance_record(m))
 
 
+class TestNormaliseComplianceSourceName(unittest.TestCase):
+    """normalise_compliance_source_name must map upload IDs to human-readable titles."""
+
+    def _normalise(self, name, content=""):
+        from services.compliance_ingest import normalise_compliance_source_name
+        return normalise_compliance_source_name(name, content)
+
+    def test_upload_id_with_solas_content_returns_solas_title(self):
+        content = (
+            "International Convention for the Safety of Life at Sea, 1974, as amended. "
+            "Contracting Governments shall ensure compliance."
+        )
+        result = self._normalise("upload 8880396640424531070", content)
+        self.assertEqual(result, "SOLAS Consolidated Edition 2018")
+
+    def test_known_upload_id_with_solas_signal(self):
+        result = self._normalise(
+            "upload 8880396640424531070",
+            "SOLAS Chapter II-1 — Construction",
+        )
+        self.assertEqual(result, "SOLAS Consolidated Edition 2018")
+
+    def test_upload_id_without_known_content_returned_unchanged(self):
+        result = self._normalise("upload 1234567890", "Some unknown regulatory text.")
+        self.assertEqual(result, "upload 1234567890")
+
+    def test_non_upload_name_returned_unchanged(self):
+        result = self._normalise("ISM Code", "anything")
+        self.assertEqual(result, "ISM Code")
+
+    def test_marpol_name_returned_unchanged(self):
+        result = self._normalise("MARPOL Annex I", "marpol content")
+        self.assertEqual(result, "MARPOL Annex I")
+
+    def test_empty_name_returned_unchanged(self):
+        result = self._normalise("", "content")
+        self.assertEqual(result, "")
+
+    def test_list_sources_shows_solas_not_upload_id(self):
+        """list_sources must normalise upload-ID source names in the returned list."""
+        from services.compliance_ingest import list_sources
+        from unittest.mock import patch
+
+        fake_chunks = [
+            {
+                "source": "upload 8880396640424531070",
+                "document": "upload 8880396640424531070.pdf",
+                "content": (
+                    "International Convention for the Safety of Life at Sea, "
+                    "contracting governments shall ensure all ships are surveyed."
+                ),
+                "source_reference": "SOLAS — test",
+            },
+            {
+                "source": "ISM Code",
+                "document": "ism_code.pdf",
+                "content": "ISM Code Chapter 1",
+                "source_reference": "ISM — test",
+            },
+        ]
+        with patch("services.compliance_ingest.load_chunks", return_value=fake_chunks):
+            sources = list_sources()
+
+        names = [s["source"] for s in sources]
+        self.assertIn("SOLAS Consolidated Edition 2018", names)
+        self.assertNotIn("upload 8880396640424531070", names)
+        self.assertIn("ISM Code", names)
+
+
 if __name__ == "__main__":
     unittest.main()
