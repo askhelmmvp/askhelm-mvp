@@ -1280,6 +1280,8 @@ def _handle_invoice_clarification(message: str, state: dict) -> str:
                 ctx_parts.append(f"  - {desc}")
 
     invoice_ctx = "\n".join(ctx_parts)
+    if doc_record and _is_utility_invoice(doc_record):
+        invoice_ctx += "\nNOTE: This appears to be a utility or yard consumable invoice (shore power, metered services, etc.)."
     logger.info(
         "invoice_clarification: supplier=%r total=%r message=%r",
         (doc_record or {}).get("supplier_name", ""),
@@ -1287,6 +1289,47 @@ def _handle_invoice_clarification(message: str, state: dict) -> str:
         message[:80],
     )
     return invoice_approval_checks(invoice_ctx, message)
+
+
+_INVOICE_SELF_ASSESSMENT_SUBSTRINGS = [
+    "is this fair",
+    "is this a fair cost",
+    "is this a fair price",
+    "is this reasonable",
+    "is this expensive",
+    "is this good value",
+    "is this value for money",
+    "is this competitive",
+    "assess this",
+    "assess the invoice",
+    "summarise and assess",
+    "summarize and assess",
+]
+
+_UTILITY_INVOICE_KEYWORDS = frozenset({
+    "shore power", "kwh", "kw/h", "kilowatt", "docking period",
+    "ev charging", "fuel bunkering", "bunkering", "waste removal",
+    "water provision", "electricity", "metered", "meter reading",
+    "connection fee", "power connection",
+})
+
+
+def _is_invoice_self_assessment(text: str) -> bool:
+    """True when the query asks to assess 'this' (the active invoice), not a named item."""
+    lower = text.lower()
+    return any(sub in lower for sub in _INVOICE_SELF_ASSESSMENT_SUBSTRINGS)
+
+
+def _is_utility_invoice(doc: dict) -> bool:
+    """True when invoice appears to be for utility or yard consumable services."""
+    if not doc:
+        return False
+    text = " ".join(
+        (item.get("description") or "").lower()
+        for item in (doc.get("line_items") or [])
+    )
+    text += " " + (doc.get("supplier_name") or "").lower()
+    return any(kw in text for kw in _UTILITY_INVOICE_KEYWORDS)
 
 
 _VAGUE_DOC_REF_WORDS = frozenset({"this", "these", "it", "them"})
@@ -2302,7 +2345,11 @@ def _invoice_pending_fallback(user_id: str, phone: str, fingerprint: str) -> Non
             f"Invoice from {supplier} for {total} {currency}. "
             "No matching quote found — upload the quote to run a comparison."
         ),
-        actions=["Upload the matching quote", "Or say 'new comparison' to reset"],
+        actions=[
+            "Upload the matching quote if one exists",
+            "Or say 'no quote' to assess against contract and risk",
+            "Or ask 'is this a fair cost?' to benchmark the main rates",
+        ],
     )
     _send_whatsapp_message(phone, f"⚓ AskHelm \n\n{msg}")
 
@@ -4513,6 +4560,10 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         return _handle_equipment_query(incoming, state)
 
     if intent == "market_check":
+        # When a pending invoice exists and the query is self-referential ("is this fair?",
+        # "assess this"), route to invoice assessment rather than a generic price lookup.
+        if state.get("pending_invoice") and _is_invoice_self_assessment(incoming):
+            return _handle_invoice_clarification(incoming, state), state
         # If we have document or component context, use the dedicated enriched handler
         # which guards against empty responses and logs diagnostic fields.
         doc_ctx = _build_document_context(state)
@@ -4619,7 +4670,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
                 (d.get("doc_type") or "") in ("invoice", "proforma")
                 for d in (state.get("documents") or [])
             )
-        if _has_inv and len(incoming.split()) >= 3:
+        if _has_inv and (
+            _is_invoice_self_assessment(incoming) or len(incoming.split()) >= 3
+        ):
             return _handle_invoice_clarification(incoming, state), state
 
     return _make_response(

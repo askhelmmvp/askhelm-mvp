@@ -859,6 +859,9 @@ durations, agreed methods.
 4. Keep WHY to 2-3 lines maximum.
 5. Maximum 5 ACTIONS bullets. Be specific to the invoice content.
 6. Tone: Chief Engineer / owner's representative, direct and practical.
+7. If the context note says this is a utility or yard consumable invoice (shore power, metered \
+services, etc.), check: arithmetic (kWh × rate × days), unit rate vs expected market, connection \
+fee legitimacy, correct VAT treatment, and whether the total matches the contract or berth agreement.
 
 Respond in this exact format — nothing before, nothing after:
 DECISION:
