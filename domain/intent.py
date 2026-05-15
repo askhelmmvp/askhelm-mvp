@@ -253,6 +253,38 @@ _MARKET_CHECK_FOLLOWUP_SUBSTRINGS = [
     "give me a rough",
 ]
 
+# ---------------------------------------------------------------------------
+# Commercial approval intent
+# ---------------------------------------------------------------------------
+
+# Substring triggers for payment/approval decisions after a commercial comparison.
+# Checked before _COMMERCIAL_FOLLOWUP_SUBSTRINGS so they get dedicated approval routing.
+# Guarded against compliance context via _COMPLIANCE_SUBSTRINGS in classify_text.
+_APPROVAL_TRIGGER_SUBSTRINGS = [
+    "can i approve this",
+    "can we approve this",
+    "ok to pay",
+    "okay to pay",
+    "should i approve",
+    "should we approve",
+    "can we pay it",
+    "can we pay this",
+    "is this safe to approve",
+    "can this be approved",
+    "which should i approve",
+    "which quote should i approve",
+    "ok for payment",
+    "okay for payment",
+]
+
+# Short approval phrases matched exactly (after stripping trailing punctuation).
+_APPROVAL_TRIGGER_EXACT = frozenset({
+    "approve",
+    "approved",
+    "go ahead",
+    "pay this",
+})
+
 # Phrases that are commercial procurement follow-ups (ordering, proceeding).
 # Routing in _handle_text_message checks last_context to provide relevant commercial advice.
 _COMMERCIAL_FOLLOWUP_SUBSTRINGS = [
@@ -963,6 +995,16 @@ def classify_text(text: str) -> str:
     for phrase in _MARKET_CHECK_FOLLOWUP_SUBSTRINGS:
         if phrase in t:
             return "market_check_followup"
+
+    # Commercial approval — before commercial_followup so specific approval phrases get
+    # dedicated routing. Blocked by compliance substrings to avoid stealing regulatory
+    # questions that contain "approved" or "approval".
+    if not any(c in t for c in _COMPLIANCE_SUBSTRINGS):
+        for trigger in _APPROVAL_TRIGGER_SUBSTRINGS:
+            if trigger in t:
+                return "approval"
+        if t_core in _APPROVAL_TRIGGER_EXACT:
+            return "approval"
 
     for phrase in _COMMERCIAL_FOLLOWUP_SUBSTRINGS:
         if phrase in t:
