@@ -184,5 +184,205 @@ class TestPromptCaching(unittest.TestCase):
         self.assertTrue(self._system_is_cached(kwargs), "invoice approval must use cache_control")
 
 
+class TestInvoiceSelfAssessmentDetection(unittest.TestCase):
+    """_is_invoice_self_assessment identifies queries about the active invoice."""
+
+    def _check(self, text):
+        from whatsapp_app import _is_invoice_self_assessment
+        return _is_invoice_self_assessment(text)
+
+    def test_is_this_fair(self):
+        self.assertTrue(self._check("is this fair?"))
+
+    def test_is_this_a_fair_cost(self):
+        self.assertTrue(self._check("Is this a fair cost?"))
+
+    def test_is_this_reasonable(self):
+        self.assertTrue(self._check("Is this reasonable for a refit?"))
+
+    def test_assess_this(self):
+        self.assertTrue(self._check("assess this invoice"))
+
+    def test_summarise_and_assess(self):
+        self.assertTrue(self._check("summarise and assess risk"))
+
+    def test_named_part_not_self_assessment(self):
+        self.assertFalse(self._check("what should a Volvo IPS 600 service cost?"))
+
+    def test_market_price_for_item_not_self_assessment(self):
+        self.assertFalse(self._check("market price for hydraulic pump seal kit"))
+
+
+class TestUtilityInvoiceDetection(unittest.TestCase):
+    """_is_utility_invoice detects shore power / metered service invoices."""
+
+    def _check(self, doc):
+        from whatsapp_app import _is_utility_invoice
+        return _is_utility_invoice(doc)
+
+    def _doc(self, *descs):
+        return {"line_items": [{"description": d} for d in descs]}
+
+    def test_kwh_line_item_detected(self):
+        self.assertTrue(self._check(self._doc("Shore power — 1,240 kWh @ EUR 0.35")))
+
+    def test_shore_power_detected(self):
+        self.assertTrue(self._check(self._doc("Shore power connection fee")))
+
+    def test_docking_period_detected(self):
+        self.assertTrue(self._check(self._doc("Docking period berth charge")))
+
+    def test_ev_charging_detected(self):
+        self.assertTrue(self._check(self._doc("EV charging station usage")))
+
+    def test_regular_engineering_invoice_not_detected(self):
+        self.assertFalse(self._check(self._doc("Pump seal kit", "Labour 4 hours")))
+
+    def test_empty_doc_not_detected(self):
+        self.assertFalse(self._check({}))
+
+
+class TestMarketCheckInvoiceIntercept(unittest.TestCase):
+    """When pending invoice exists, self-referential market_check routes to invoice assessment."""
+
+    _APPROVAL_RESPONSE = (
+        "DECISION:\nVALIDATE AGAINST AGREEMENT\n\n"
+        "WHY:\nThis is an agreement-based invoice.\n\n"
+        "ACTIONS:\n• Verify rates"
+    )
+
+    def _state_with_pending(self):
+        return {
+            "user_id": "",
+            "documents": [],
+            "pending_invoice": {"doc_record": _INVOICE_DOC},
+            "last_context": {},
+        }
+
+    def test_is_this_fair_with_pending_invoice_routes_to_clarification(self):
+        with patch("whatsapp_app.invoice_approval_checks",
+                   return_value=self._APPROVAL_RESPONSE):
+            from whatsapp_app import _handle_text_message
+            state = self._state_with_pending()
+            result, _ = _handle_text_message(
+                "is this a fair cost?",
+                state,
+                "whatsapp:+44123456789",
+            )
+        self.assertIn("VALIDATE AGAINST AGREEMENT", result)
+        self.assertNotIn("INSUFFICIENT DATA", result)
+
+    def test_assess_this_with_pending_invoice_routes_to_clarification(self):
+        with patch("whatsapp_app.invoice_approval_checks",
+                   return_value=self._APPROVAL_RESPONSE):
+            from whatsapp_app import _handle_text_message
+            state = self._state_with_pending()
+            result, _ = _handle_text_message(
+                "assess this",
+                state,
+                "whatsapp:+44123456789",
+            )
+        self.assertIn("VALIDATE AGAINST AGREEMENT", result)
+
+    def test_named_part_market_check_not_intercepted(self):
+        with patch("whatsapp_app.check_market_price",
+                   return_value="DECISION:\nACCEPTABLE\n\nWHY:\nFair.\n\nRECOMMENDED ACTIONS:\n• Proceed"):
+            from whatsapp_app import _handle_text_message
+            state = self._state_with_pending()
+            result, _ = _handle_text_message(
+                "what should a hydraulic pump seal cost?",
+                state,
+                "whatsapp:+44123456789",
+            )
+        self.assertNotIn("VALIDATE AGAINST AGREEMENT", result)
+
+
+class TestUtilityInvoiceContextHint(unittest.TestCase):
+    """_handle_invoice_clarification adds utility note when invoice is metered."""
+
+    _UTILITY_INVOICE = {
+        "doc_type": "invoice",
+        "supplier_name": "Marina Barceloneta",
+        "total": 434.00,
+        "currency": "EUR",
+        "line_items": [
+            {"description": "Shore power — 1,240 kWh @ EUR 0.35", "line_total": 434.00},
+        ],
+    }
+
+    def test_utility_hint_added_to_context(self):
+        captured = {}
+
+        def capture_approval(ctx, msg):
+            captured["ctx"] = ctx
+            return "DECISION:\nVALIDATE\n\nWHY:\nMetered.\n\nACTIONS:\n• Check kWh"
+
+        with patch("whatsapp_app.invoice_approval_checks", side_effect=capture_approval):
+            from whatsapp_app import _handle_invoice_clarification
+            state = {
+                "user_id": "",
+                "documents": [self._UTILITY_INVOICE],
+                "pending_invoice": None,
+            }
+            _handle_invoice_clarification("no quote", state)
+        self.assertIn("utility", captured["ctx"].lower())
+
+    def test_non_utility_invoice_has_no_hint(self):
+        captured = {}
+
+        def capture_approval(ctx, msg):
+            captured["ctx"] = ctx
+            return "DECISION:\nVALIDATE\n\nWHY:\nInstalment.\n\nACTIONS:\n• Check"
+
+        labour_only_doc = {
+            "doc_type": "invoice",
+            "supplier_name": "Palma Rigging Co.",
+            "total": 3600.0,
+            "currency": "EUR",
+            "line_items": [
+                {"description": "Labour — 80 hours rigging maintenance", "line_total": 3600.0},
+            ],
+        }
+        with patch("whatsapp_app.invoice_approval_checks", side_effect=capture_approval):
+            from whatsapp_app import _handle_invoice_clarification
+            state = {
+                "user_id": "",
+                "documents": [labour_only_doc],
+                "pending_invoice": None,
+            }
+            _handle_invoice_clarification("no quote", state)
+        self.assertNotIn("utility", captured.get("ctx", "").lower())
+
+
+class TestInvoiceReceivedActions(unittest.TestCase):
+    """_invoice_pending_fallback sends updated action suggestions."""
+
+    def test_fallback_message_includes_no_quote_option(self):
+        import threading
+        from unittest.mock import patch, MagicMock
+        state = {
+            "user_id": "u1",
+            "pending_invoice": {
+                "doc_record": {
+                    "fingerprint": "fp1",
+                    "supplier_name": "Test Yard",
+                    "total": 5000,
+                    "currency": "EUR",
+                }
+            },
+        }
+        sent_messages = []
+        with patch("whatsapp_app.load_user_state", return_value=state), \
+             patch("whatsapp_app._send_whatsapp_message",
+                   side_effect=lambda ph, msg: sent_messages.append(msg)), \
+             patch("whatsapp_app.time.sleep"):
+            from whatsapp_app import _invoice_pending_fallback
+            _invoice_pending_fallback("u1", "+44123456789", "fp1")
+        self.assertTrue(sent_messages, "fallback must send a message")
+        body = sent_messages[0]
+        self.assertIn("no quote", body.lower())
+        self.assertIn("fair cost", body.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
