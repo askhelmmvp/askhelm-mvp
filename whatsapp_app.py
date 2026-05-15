@@ -347,6 +347,236 @@ def _no_comparison_response() -> str:
     )
 
 
+def _make_approval_response(*, decision: str, why: str, risk: str, actions: list) -> str:
+    parts = [
+        f"DECISION:\n{decision}",
+        f"WHY:\n{why}",
+        f"RISK:\n{risk}",
+        "ACTIONS:\n• " + "\n• ".join(actions),
+    ]
+    return "\n\n".join(parts)
+
+
+def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
+    """Deterministic approval decision for quote-vs-invoice or quote-vs-proforma."""
+    decision_code = outcome["decision"]
+    supplier_b = outcome["supplier_b"]
+    delta = outcome["delta"]
+    delta_percent = outcome["delta_percent"]
+    ancillary_items = outcome["ancillary_items"]
+    missing_items = outcome["missing_items"]
+    currency = outcome["currency_b"] or outcome["currency_a"] or BASE_CURRENCY
+
+    _APPROVE_CODES = frozenset({
+        "MATCH CONFIRMED — OK TO APPROVE",
+        "MATCH CONFIRMED — NO CHANGE",
+        "MATCH CONFIRMED — PROFORMA ALIGNED",
+    })
+    _QUERY_CODES = frozenset({
+        "MATCH CONFIRMED — FREIGHT ADDED",
+        "INVOICE HAS ADDITIONAL COST",
+        "MATCH CONFIRMED — COST REDUCTION",
+    })
+    _HOLD_CODES = frozenset({
+        "INVOICE QUANTITY MISMATCH",
+        "INVOICE DOES NOT FULLY MATCH QUOTE",
+        "MATCH CONFIRMED — COST INCREASE",
+    })
+
+    if decision_code in _APPROVE_CODES:
+        why = (
+            f"The invoice from {supplier_b} matches the quoted supplier, scope, "
+            "quantities and total within acceptable tolerance."
+        )
+        if delta and abs(delta) > 0:
+            why += f" Difference of {currency} {abs(delta):.2f} is within rounding tolerance."
+        return _make_approval_response(
+            decision="APPROVE",
+            why=why,
+            risk="Low",
+            actions=[
+                "Approve for payment",
+                "File the quote and invoice together",
+                "Record the approval against the supplier invoice",
+            ],
+        )
+
+    if decision_code in _QUERY_CODES:
+        if decision_code == "MATCH CONFIRMED — FREIGHT ADDED":
+            anc_names = _get_item_names(ancillary_items)
+            why = (
+                f"The supplier and main scope match, but the invoice includes added "
+                f"{anc_names} not present in the quote."
+            )
+            actions = [
+                "Ask the supplier to confirm freight was agreed",
+                "If freight is accepted, approve payment",
+                "If not agreed, request a revised invoice",
+            ]
+        elif decision_code == "INVOICE HAS ADDITIONAL COST":
+            why = "The invoice includes additional costs not in the quote. These items need to be confirmed as agreed additions."
+            actions = [
+                "Ask the supplier to confirm the added charges were agreed",
+                "If confirmed, approve payment",
+                "If not agreed, request a revised invoice",
+            ]
+        else:  # COST REDUCTION
+            pct = abs(delta_percent or 0)
+            why = f"The invoice is {pct:.1f}% below the quoted price. Confirm nothing has been omitted before approving."
+            actions = [
+                "Confirm with the supplier that all quoted scope is included",
+                "If scope is complete, approve payment",
+                "If items are missing, request a revised invoice",
+            ]
+        return _make_approval_response(decision="QUERY", why=why, risk="Medium", actions=actions)
+
+    if decision_code in _HOLD_CODES:
+        if decision_code == "INVOICE QUANTITY MISMATCH":
+            why = "Quantities on the invoice differ from the quote. Do not approve until corrected."
+            actions = [
+                "Do not approve payment",
+                "Ask the supplier for a corrected invoice matching quoted quantities",
+                "Hold payment until the quantity discrepancy is resolved",
+            ]
+        elif decision_code == "INVOICE DOES NOT FULLY MATCH QUOTE":
+            n = len(missing_items)
+            why = f"The invoice is missing {n} quoted item(s). Do not approve until the scope discrepancy is resolved."
+            actions = [
+                "Do not approve payment",
+                "Ask the supplier to account for all quoted items",
+                "Request a revised invoice or written confirmation of omissions",
+            ]
+        else:  # COST INCREASE
+            pct = abs(delta_percent or 0)
+            why = f"The invoice is {pct:.1f}% above the quoted total without an agreed explanation."
+            actions = [
+                "Do not approve payment yet",
+                "Ask the supplier for an itemised explanation of the increase",
+                "Request a revised invoice or written approval for the uplift",
+            ]
+        return _make_approval_response(decision="HOLD", why=why, risk="High", actions=actions)
+
+    # Unknown decision code — fall back to QUERY
+    return _make_approval_response(
+        decision="QUERY",
+        why="The comparison result needs manual review before approval can be confirmed.",
+        risk="Medium",
+        actions=[
+            "Review the full comparison result",
+            "Clarify outstanding items with the supplier",
+            "Approve only once all discrepancies are resolved",
+        ],
+    )
+
+
+def _build_quote_approval_response(outcome: dict, comparison: dict) -> str:
+    """Approval recommendation for quote-vs-quote comparison."""
+    supplier_a = outcome["supplier_a"]
+    supplier_b = outcome["supplier_b"]
+    delta = outcome["delta"]
+    delta_percent = outcome["delta_percent"]
+    missing_items = outcome["missing_items"]
+    added_items = outcome["added_items"]
+
+    has_scope_diff = bool(missing_items) or bool(added_items)
+
+    if delta is None:
+        return _make_approval_response(
+            decision="QUERY",
+            why="The quotes could not be directly compared on price. Scope or currency differences need resolution first.",
+            risk="Medium",
+            actions=[
+                "Confirm scope is like-for-like before deciding",
+                "Clarify currency or totals with both suppliers",
+                "Approve only once a direct comparison is possible",
+            ],
+        )
+
+    if has_scope_diff:
+        return _make_approval_response(
+            decision="QUERY",
+            why="The cheaper quote may not cover the same scope as the alternative. Approval should wait until the scope difference is clarified.",
+            risk="Medium",
+            actions=[
+                "Ask the cheaper supplier to confirm scope equivalence",
+                "Confirm any missing or substituted items",
+                "Approve only once the comparison is like-for-like",
+            ],
+        )
+
+    if delta == 0:
+        return _make_approval_response(
+            decision="QUERY",
+            why=f"Both quotes are the same price. Choose {supplier_a} or {supplier_b} based on delivery confidence and track record.",
+            risk="Low",
+            actions=[
+                "Confirm final delivery terms and lead time with each supplier",
+                "Choose based on track record and reliability",
+            ],
+        )
+
+    # delta = total_b - total_a; positive means b is more expensive, a is cheaper
+    cheaper = supplier_a if delta > 0 else supplier_b
+    pct = abs(delta_percent or 0)
+    why = (
+        f"{cheaper} is {pct:.1f}% cheaper and no material scope difference has been "
+        "identified on the current comparison."
+    )
+    return _make_approval_response(
+        decision=f"APPROVE {cheaper.upper()}",
+        why=why,
+        risk="Low",
+        actions=[
+            "Confirm final delivery terms and lead time",
+            "Confirm scope is still like-for-like before committing",
+            "Proceed with the selected supplier if confirmed",
+        ],
+    )
+
+
+def _handle_approval(state: dict, comparison_data) -> str:
+    """
+    Return APPROVE / HOLD / QUERY / NO ACTIVE COMPARISON.
+    Deterministic from _classify_comparison outcome — no LLM call.
+    """
+    if not comparison_data:
+        if state.get("pending_invoice"):
+            return _make_approval_response(
+                decision="QUERY",
+                why=(
+                    "An invoice is active but no quote comparison has been run. "
+                    "Approval without a quote comparison requires manual verification "
+                    "against the agreed contract or schedule."
+                ),
+                risk="Medium",
+                actions=[
+                    "Verify rates and quantities against the refit agreement",
+                    "Obtain authorisation from the owner's representative",
+                    "File the invoice with the approval note",
+                ],
+            )
+        return _make_approval_response(
+            decision="NO ACTIVE COMPARISON",
+            why="There is no completed commercial comparison to base an approval on.",
+            risk="Medium",
+            actions=[
+                "Upload a quote and matching invoice",
+                "Or upload multiple quotes and say 'compare quotes'",
+                "Or say 'no quote' after an invoice to run invoice-only risk assessment",
+            ],
+        )
+
+    doc_a = comparison_data["doc_a"]
+    doc_b = comparison_data["doc_b"]
+    comparison = comparison_data["comparison"]
+    outcome = _classify_comparison(doc_a, doc_b, comparison)
+    comp_type = outcome["comparison_type"]
+
+    if comp_type in ("quote_vs_invoice", "quote_vs_proforma"):
+        return _build_invoice_approval_response(outcome, comparison)
+    return _build_quote_approval_response(outcome, comparison)
+
+
 _DOCUMENT_RECEIVED_ACK = (
     "\u2693 AskHelm\n\n"
     "Processing document\u2026\n"
@@ -4421,6 +4651,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     # Commercial context computed early — needed for follow-up routing decisions.
     active = get_active_session(state)
     comparison_data = active.get("last_comparison") if active else None
+
+    if intent == "approval":
+        return _handle_approval(state, comparison_data), state
 
     # Context-aware follow-up routing:
     if intent in ("what_to_do", "compliance_followup", "commercial_followup"):
