@@ -913,5 +913,195 @@ class TestItemSystemStockQuery(unittest.TestCase):
         self.assertIn("Generator filter cartridge", r)
 
 
+# ---------------------------------------------------------------------------
+# Quote vs inventory classification: supplier quotations must not be imported
+# as stock even when they contain item tables with quantity/part-number columns.
+# ---------------------------------------------------------------------------
+
+# Representative text from the SYS Barnacle Buster quote (SuperYacht Spares B.V.)
+_SYS_QUOTE_TEXT = """
+SuperYacht Spares B.V.
+QUOTATION
+Quote No.: Q103130
+Date: 2024-01-15
+Validity: 30 days
+Payment: 30 days net
+Delivery time: 7–10 working days
+
+To: M/Y H3
+
+Description: Barnacle Buster
+
+Qty  Part No.      Description                                         Unit Price    Total
+2    1206-MP       Trac - Barnacle Buster Concentrate, 5 Gallon       EUR 408.41    EUR 816.82
+
+Total price parts / equipment:  EUR 816.82
+Inbound freight:                EUR  20.00
+Packing & Handling:             EUR  30.00
+Total ex warehouse:             EUR 866.82
+VAT 21%:                        EUR 182.03
+Total including VAT:            EUR 1,048.85
+"""
+
+# Representative text from a real stock list (should still be classified as inventory)
+_REAL_STOCK_TEXT = """
+H3 Spare Parts Inventory
+Stock List — Engine Room
+
+Part Number  Description             Qty  Storage Location  System
+MAN-123      Oil Filter              5    ER Store          Main Engine
+GATES-V45    V-Belt 45               3    Store Room 2      Generator
+JAB-IMP-001  Impeller Kit            2    ER Store          Bilge Pump
+"""
+
+# Text where "spare" only appears as part of a supplier name in a valid quote
+_SUPPLIER_SPARE_IN_NAME_TEXT = """
+SuperYacht Spares B.V.
+QUOTATION
+Quote No.: Q99001
+Validity: 30 days
+Payment: 30 days net
+
+Description         Qty   Unit Price    Total
+Sea strainer gasket  1   EUR 45.00     EUR 45.00
+
+Total including VAT: EUR 54.45
+"""
+
+
+class TestQuoteNotMisclassifiedAsInventory(unittest.TestCase):
+    """classify_inventory_text must return None for supplier quotations."""
+
+    def _classify(self, text):
+        from services.inventory_service import classify_inventory_text
+        return classify_inventory_text(text)
+
+    def test_sys_quote_with_quotation_header_not_classified_as_stock(self):
+        """SYS Barnacle Buster quote must not be classified as inventory."""
+        self.assertIsNone(self._classify(_SYS_QUOTE_TEXT))
+
+    def test_quotation_keyword_alone_blocks_inventory_classification(self):
+        """'QUOTATION' in heading is a strong enough indicator to skip inventory."""
+        text = "SuperYacht Spares B.V.\nQUOTATION\nQuantity  Part Number  Unit Price\n2  1206-MP  EUR 408.41"
+        self.assertIsNone(self._classify(text))
+
+    def test_quote_no_keyword_blocks_inventory_classification(self):
+        """'Quote No.' field blocks inventory classification."""
+        text = "Supplier: Acme Marine\nQuote No.: Q-1234\nQuantity  Spare part  Unit Price\n1  pump seal  EUR 150"
+        self.assertIsNone(self._classify(text))
+
+    def test_total_including_vat_blocks_inventory_classification(self):
+        """'Total including VAT' blocks inventory classification."""
+        text = "Description  Qty  Part Number  Unit Price\nFilter  2  MAN-123  EUR 25.00\nTotal including VAT: EUR 60.50"
+        self.assertIsNone(self._classify(text))
+
+    def test_supplier_with_spare_in_name_and_quote_indicators_not_classified_as_stock(self):
+        """'spare' in supplier name must not trigger stock classification when quote indicators present."""
+        self.assertIsNone(self._classify(_SUPPLIER_SPARE_IN_NAME_TEXT))
+
+    def test_real_stock_list_still_classified_as_inventory(self):
+        """Genuine stock lists must still be classified as inventory."""
+        result = self._classify(_REAL_STOCK_TEXT)
+        self.assertIsNotNone(result)
+        self.assertIn(result, ("stock_inventory", "spare_parts_inventory", "equipment_list"))
+
+    def test_stock_list_heading_still_triggers_even_with_quantities(self):
+        """'stock list' heading overrides everything — still classified as stock."""
+        text = "Stock List\nQuantity  Description\n3  Oil Filter\n5  V-Belt"
+        self.assertIsNotNone(self._classify(text))
+
+    def test_inventory_heading_still_triggers(self):
+        """'spare parts inventory' heading still routes to inventory."""
+        text = "Spare Parts Inventory\nPart Number  Description  Qty\nMAN-123  Oil Filter  5"
+        self.assertIsNotNone(self._classify(text))
+
+    def test_plain_item_table_without_quote_indicators_still_classifiable(self):
+        """Without any quote indicators, a part-number/quantity table routes to stock."""
+        text = "Part Number  Description  Qty  Storage Location\nMAN-123  Oil Filter  5  ER Store\nGAT-V45  V-Belt  3  Store Room 2"
+        result = self._classify(text)
+        self.assertIsNotNone(result)
+
+
+class TestBarnacleQuoteComparison(unittest.TestCase):
+    """IYS and SYS Barnacle Buster quotes must compare correctly on part/quantity/freight."""
+
+    _IYS_QUOTE = {
+        "doc_type": "quote",
+        "supplier_name": "International Yacht Services B.V.",
+        "currency": "EUR",
+        "total": 1038.18,
+        "line_items": [
+            {
+                "description": "Trac Barnacle Buster Concentrate, 5-gallon pail",
+                "quantity": 2,
+                "unit_rate": 519.09,
+                "line_total": 1038.18,
+                "part_number": "1206-MP",
+            }
+        ],
+    }
+
+    _SYS_QUOTE = {
+        "doc_type": "quote",
+        "supplier_name": "SuperYacht Spares B.V.",
+        "currency": "EUR",
+        "total": 1048.85,
+        "line_items": [
+            {
+                "description": "Trac - Barnacle Buster Concentrate, 5 Gallon",
+                "quantity": 2,
+                "unit_rate": 408.41,
+                "line_total": 816.82,
+            },
+            {
+                "description": "Inbound freight",
+                "unit_rate": 20.00,
+                "line_total": 20.00,
+            },
+            {
+                "description": "Packing & Handling",
+                "unit_rate": 30.00,
+                "line_total": 30.00,
+            },
+        ],
+    }
+
+    def test_same_part_description_matches(self):
+        """IYS and SYS Barnacle Buster descriptions should match (same product)."""
+        from domain.compare import _desc_matches
+        iys_desc = "Trac Barnacle Buster Concentrate, 5-gallon pail"
+        sys_desc = "Trac - Barnacle Buster Concentrate, 5 Gallon"
+        self.assertTrue(_desc_matches(iys_desc, sys_desc))
+
+    def test_comparison_identifies_iys_as_cheaper(self):
+        """IYS total (1038.18) is less than SYS total (1048.85)."""
+        from domain.compare import compare_documents
+        result = compare_documents(self._IYS_QUOTE, self._SYS_QUOTE)
+        delta = result.get("delta")
+        self.assertIsNotNone(delta)
+        self.assertGreater(delta, 0)  # SYS is more expensive (total_b > total_a)
+
+    def test_comparison_identifies_freight_as_ancillary(self):
+        """SYS inbound freight and packing/handling are ancillary items."""
+        from domain.compare import compare_documents
+        result = compare_documents(self._IYS_QUOTE, self._SYS_QUOTE)
+        ancillary = result.get("ancillary_items") or result.get("freight_items") or []
+        ancillary_descs = [a.get("description", "").lower() for a in ancillary]
+        has_freight = any("freight" in d or "packing" in d or "handling" in d for d in ancillary_descs)
+        self.assertTrue(has_freight, f"Expected freight/packing in ancillary items, got: {ancillary_descs}")
+
+    def test_comparison_same_quantity(self):
+        """Both quotes specify quantity 2 for the main product."""
+        from domain.compare import compare_documents
+        result = compare_documents(self._IYS_QUOTE, self._SYS_QUOTE)
+        qty_mismatches = result.get("quantity_mismatches") or []
+        # Filter to non-ancillary mismatches on the main product line
+        product_mismatches = [
+            m for m in qty_mismatches
+            if "barnacle" in (m.get("description") or "").lower()
+        ]
+        self.assertEqual(product_mismatches, [], f"Unexpected quantity mismatch: {product_mismatches}")
+
+
 if __name__ == "__main__":
     unittest.main()
