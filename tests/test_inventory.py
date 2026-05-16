@@ -277,7 +277,7 @@ class TestStockQuery(unittest.TestCase):
     def test_stock_found_for_known_item(self):
         from whatsapp_app import _handle_stock_query
         result, _ = _handle_stock_query("do we have Shell Corena onboard?", {"user_id": ""})
-        self.assertIn("STOCK FOUND", result)
+        self.assertIn("DECISION:", result)
         self.assertIn("Shell Corena", result)
 
     def test_no_stock_found_for_unknown_item(self):
@@ -621,7 +621,7 @@ class TestStockQueryLookup(unittest.TestCase):
         result, _ = _handle_stock_query(
             "how many 03GCPMS005 do we have on board?", {"user_id": ""}
         )
-        self.assertIn("STOCK FOUND", result)
+        self.assertIn("ONBOARD", result)
         self.assertIn("Mechanical seal", result)
 
     def test_part_number_query_shows_location(self):
@@ -636,7 +636,7 @@ class TestStockQueryLookup(unittest.TestCase):
         result, _ = _handle_stock_query(
             "where can I find this? X59407700014", {"user_id": ""}
         )
-        self.assertIn("STOCK FOUND", result)
+        self.assertIn("ONBOARD", result)
         self.assertIn("Engine Room Store", result)
 
     def test_manufacturer_spares_query_returns_results(self):
@@ -722,8 +722,8 @@ class TestStockResponseFormat(unittest.TestCase):
 
     def test_quantity_query_leads_with_answer(self):
         r = self._stock("how many XP52718300060 on board?")
-        self.assertIn("ANSWER:", r)
-        self.assertIn("You have 28 × XP52718300060 onboard.", r)
+        self.assertIn("WHY:", r)
+        self.assertIn("28 × XP52718300060", r)
 
     def test_quantity_query_integer_not_float(self):
         r = self._stock("how many XP52718300060 on board?")
@@ -738,7 +738,7 @@ class TestStockResponseFormat(unittest.TestCase):
 
     def test_location_query_leads_with_location(self):
         r = self._stock("where can I find this? XP52718300060")
-        self.assertIn("ANSWER:", r)
+        self.assertIn("LOCATION:", r)
         self.assertIn("LD / Generator Room / Filter Cabinet", r)
 
     def test_location_query_includes_item_name(self):
@@ -772,7 +772,7 @@ class TestStockResponseFormat(unittest.TestCase):
 
     def test_equipment_query_shows_manufacturer(self):
         r = self._stock("which equipment does this belong to? XP52718300060")
-        self.assertIn("ANSWER:", r)
+        self.assertIn("WHY:", r)
         self.assertIn("MTU", r)
 
     # --- Manufacturer list still returns multiple records ---
@@ -786,7 +786,7 @@ class TestStockResponseFormat(unittest.TestCase):
 
     def test_broad_description_query_returns_match(self):
         r = self._stock("do we have a mechanical seal onboard?")
-        self.assertIn("STOCK FOUND", r)
+        self.assertIn("ONBOARD", r)
         self.assertIn("Mechanical seal", r)
 
     def test_broad_query_shows_integer_qty(self):
@@ -900,7 +900,7 @@ class TestItemSystemStockQuery(unittest.TestCase):
 
     def test_liner_for_main_engine_returns_stock(self):
         r = self._stock("how many liners for main engine?")
-        self.assertIn("STOCK FOUND", r)
+        self.assertIn("ONBOARD", r)
         self.assertIn("Cylinder liner", r)
 
     def test_liner_for_main_engine_not_no_stock(self):
@@ -909,7 +909,7 @@ class TestItemSystemStockQuery(unittest.TestCase):
 
     def test_filter_for_generator_returns_stock(self):
         r = self._stock("how many filters for the generator?")
-        self.assertIn("STOCK FOUND", r)
+        self.assertIn("ONBOARD", r)
         self.assertIn("Generator filter cartridge", r)
 
 
@@ -1101,6 +1101,288 @@ class TestBarnacleQuoteComparison(unittest.TestCase):
             if "barnacle" in (m.get("description") or "").lower()
         ]
         self.assertEqual(product_mismatches, [], f"Unexpected quantity mismatch: {product_mismatches}")
+
+
+class TestNormaliseSystemAlias(unittest.TestCase):
+    """normalise_system_alias expands abbreviations to canonical search terms."""
+
+    def _alias(self, q):
+        from domain.inventory_store import normalise_system_alias
+        return normalise_system_alias(q)
+
+    def test_mtu_expands_to_main_engine(self):
+        terms = self._alias("MTU")
+        self.assertIn("mtu", terms)
+        self.assertIn("main engine", terms)
+
+    def test_me_expands_to_main_engine(self):
+        terms = self._alias("me")
+        self.assertIn("me", terms)
+        self.assertIn("main engine", terms)
+
+    def test_dg_expands_to_generator(self):
+        terms = self._alias("DG")
+        self.assertIn("dg", terms)
+        self.assertIn("generator", terms)
+
+    def test_genset_expands_to_generator(self):
+        terms = self._alias("genset")
+        self.assertIn("genset", terms)
+        self.assertIn("generator", terms)
+
+    def test_ro_expands_to_reverse_osmosis(self):
+        terms = self._alias("RO")
+        self.assertIn("ro", terms)
+        self.assertIn("reverse osmosis", terms)
+
+    def test_stp_expands_to_sewage_treatment(self):
+        terms = self._alias("STP")
+        self.assertIn("stp", terms)
+        self.assertIn("sewage treatment", terms)
+
+    def test_ows_expands_to_oily_water_separator(self):
+        terms = self._alias("OWS")
+        self.assertIn("ows", terms)
+        self.assertIn("oily water separator", terms)
+
+    def test_ocm_expands_to_oil_content_monitor(self):
+        terms = self._alias("OCM")
+        self.assertIn("ocm", terms)
+        self.assertIn("oil content monitor", terms)
+
+    def test_omd_expands_to_oil_content_monitor(self):
+        terms = self._alias("OMD")
+        self.assertIn("omd", terms)
+        self.assertIn("oil content monitor", terms)
+
+    def test_unknown_returns_query_unchanged(self):
+        terms = self._alias("bearing")
+        self.assertEqual(terms, ["bearing"])
+
+    def test_case_insensitive(self):
+        self.assertEqual(self._alias("MTU"), self._alias("mtu"))
+
+
+class TestInferStockEquipmentLink(unittest.TestCase):
+    """infer_stock_equipment_link returns correct confidence and label."""
+
+    _EQUIPMENT = [
+        {
+            "equipment_name": "MTU 16V4000 M73L",
+            "make": "MTU",
+            "model": "16V4000 M73L",
+            "system": "Main Engine",
+            "location": "Engine Room",
+        },
+        {
+            "equipment_name": "Caterpillar C18 Generator",
+            "make": "Caterpillar",
+            "model": "C18",
+            "system": "Generator",
+            "location": "Generator Room",
+        },
+    ]
+
+    def _infer(self, stock_item):
+        from domain.inventory_store import infer_stock_equipment_link
+        return infer_stock_equipment_link(stock_item, self._EQUIPMENT)
+
+    def test_no_equipment_returns_none(self):
+        from domain.inventory_store import infer_stock_equipment_link
+        result = infer_stock_equipment_link({"make": "MTU"}, [])
+        self.assertEqual(result["confidence"], "none")
+
+    def test_exact_via_linked_equipment_field(self):
+        result = self._infer({
+            "description": "Oil Filter",
+            "linked_equipment": "main engine",
+        })
+        self.assertEqual(result["confidence"], "exact")
+        self.assertIn("MTU 16V4000", result["label"])
+
+    def test_exact_label_starts_with_linked_to(self):
+        result = self._infer({
+            "description": "Oil Filter",
+            "linked_equipment": "main engine",
+        })
+        self.assertTrue(result["label"].startswith("Linked to"))
+
+    def test_likely_via_make_match(self):
+        result = self._infer({
+            "description": "Air Filter",
+            "make": "MTU",
+        })
+        self.assertEqual(result["confidence"], "likely")
+        self.assertIn("MTU", result["label"])
+
+    def test_likely_label_starts_with_likely_linked(self):
+        result = self._infer({"description": "Air Filter", "make": "MTU"})
+        self.assertTrue(result["label"].startswith("Likely linked to"))
+
+    def test_likely_via_system_keyword_in_description(self):
+        result = self._infer({
+            "description": "Generator fuel filter",
+            "make": "",
+        })
+        self.assertEqual(result["confidence"], "likely")
+        self.assertIn("Generator", result["label"])
+
+    def test_no_match_returns_none_confidence(self):
+        result = self._infer({
+            "description": "Generic rope",
+            "make": "",
+            "linked_equipment": "",
+        })
+        self.assertEqual(result["confidence"], "none")
+        self.assertEqual(result["label"], "")
+
+    def test_existing_equipment_link_returned_as_exact(self):
+        result = self._infer({
+            "description": "Oil Filter",
+            "equipment_link": {"equipment_name": "MTU 16V4000 M73L", "confidence": 0.85},
+        })
+        self.assertEqual(result["confidence"], "exact")
+        self.assertIn("MTU 16V4000 M73L", result["label"])
+
+
+class TestStockQueryNewFormat(unittest.TestCase):
+    """_handle_stock_query uses new DECISION/WHY/EQUIPMENT/LOCATION format."""
+
+    _EQUIPMENT = [
+        {
+            "equipment_name": "MTU 16V4000 M73L",
+            "make": "MTU",
+            "system": "Main Engine",
+            "location": "Engine Room",
+        },
+    ]
+
+    _ITEMS = [
+        {
+            "description": "Oil filter paper inserts",
+            "part_number": "XP52718300060",
+            "quantity_onboard": 28.0,
+            "storage_location": "LD / Generator Room / Filter Cabinet",
+            "make": "MTU",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+        inv_store.merge_equipment("", self._EQUIPMENT, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _stock(self, query):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(query, {"user_id": ""})
+        return result
+
+    def test_decision_shows_quantity_onboard(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertIn("28 ONBOARD", r)
+
+    def test_why_section_present(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertIn("WHY:", r)
+
+    def test_location_section_present(self):
+        r = self._stock("where can I find this? XP52718300060")
+        self.assertIn("LOCATION:", r)
+        self.assertIn("LD / Generator Room / Filter Cabinet", r)
+
+    def test_equipment_section_shows_linked_equipment(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertIn("EQUIPMENT:", r)
+        self.assertIn("MTU", r)
+
+    def test_equipment_label_starts_with_likely_linked(self):
+        r = self._stock("how many XP52718300060 on board?")
+        self.assertIn("Likely linked to", r)
+
+    def test_no_equipment_section_when_no_match(self):
+        import importlib, domain.inventory_store as inv_store
+        inv_store.merge_stock("", [
+            {"description": "Generic rope", "quantity_onboard": 1.0,
+             "storage_location": "Deck Store", "confidence": 0.9}
+        ], "test2.csv")
+        from whatsapp_app import _handle_stock_query
+        r, _ = _handle_stock_query("do we have rope onboard?", {"user_id": ""})
+        self.assertNotIn("Likely linked to", r)
+
+
+class TestSpareQueryAliasExpansion(unittest.TestCase):
+    """_handle_spares_query expands system aliases before searching."""
+
+    _ITEMS = [
+        {
+            "description": "MTU fuel filter",
+            "part_number": "MTU-FF-001",
+            "quantity_onboard": 4.0,
+            "storage_location": "Engine Room",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        {
+            "description": "Caterpillar air filter",
+            "part_number": "CAT-AF-001",
+            "quantity_onboard": 2.0,
+            "storage_location": "Generator Room",
+            "linked_equipment": "Generator",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _spares(self, query):
+        from whatsapp_app import _handle_spares_query
+        result, _ = _handle_spares_query(query, {"user_id": ""})
+        return result
+
+    def test_me_alias_finds_main_engine_spares(self):
+        r = self._spares("show spares for ME")
+        self.assertIn("MTU fuel filter", r)
+
+    def test_dg_alias_finds_generator_spares(self):
+        r = self._spares("show spares for DG")
+        self.assertIn("Caterpillar air filter", r)
+
+    def test_dg_does_not_return_main_engine_items(self):
+        r = self._spares("show spares for DG")
+        self.assertNotIn("MTU fuel filter", r)
+
+    def test_me_does_not_return_generator_items(self):
+        r = self._spares("show spares for ME")
+        self.assertNotIn("Caterpillar air filter", r)
+
+    def test_unaliased_query_still_works(self):
+        r = self._spares("show spares for Main Engine")
+        self.assertIn("MTU fuel filter", r)
 
 
 if __name__ == "__main__":

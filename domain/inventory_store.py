@@ -458,6 +458,129 @@ _ALIAS_SUBS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# System alias normalisation for spares/stock queries
+# ---------------------------------------------------------------------------
+
+_SYSTEM_ALIAS_MAP: dict = {
+    "mtu":    ["mtu", "main engine"],
+    "me":     ["me", "main engine"],
+    "dg":     ["dg", "generator", "diesel generator"],
+    "genset": ["genset", "generator"],
+    "ro":     ["ro", "reverse osmosis"],
+    "stp":    ["stp", "sewage treatment"],
+    "ows":    ["ows", "oily water separator", "oily bilge separator"],
+    "ocm":    ["ocm", "oil content monitor"],
+    "omd":    ["omd", "oil content monitor"],
+    "cat":    ["cat", "caterpillar"],
+}
+
+
+def normalise_system_alias(query: str) -> list:
+    """Return search terms for a system query, expanding known abbreviations.
+
+    normalise_system_alias("MTU")    → ["mtu", "main engine"]
+    normalise_system_alias("filter") → ["filter"]
+    """
+    q = query.lower().strip()
+    return list(_SYSTEM_ALIAS_MAP.get(q, [q]))
+
+
+# ---------------------------------------------------------------------------
+# Stock-to-equipment link inference
+# ---------------------------------------------------------------------------
+
+def infer_stock_equipment_link(stock_item: dict, equipment_records: list) -> dict:
+    """Infer which equipment record a stock item most likely belongs to.
+
+    Returns:
+        confidence  "exact" | "likely" | "none"
+        equipment   list of matched equipment record dicts
+        label       human-readable string, e.g. "Likely linked to MTU 16V4000"
+
+    Priority:
+    1. Existing equipment_link field → exact
+    2. linked_equipment substring-matches equipment_name/system → exact
+    3. Stock make matches equipment make → likely
+    4. System keyword in description/linked_equipment matches equipment system → likely
+    """
+    _none: dict = {"confidence": "none", "equipment": [], "label": ""}
+    if not equipment_records:
+        return _none
+
+    def _eq_display(eq: dict) -> str:
+        name = eq.get("equipment_name") or eq.get("system") or ""
+        make = eq.get("make") or ""
+        model = eq.get("model") or ""
+        parts = [p for p in [name, make, model] if p]
+        return " — ".join(parts[:2]) if len(parts) > 1 else (parts[0] if parts else "")
+
+    # Phase 0 – already linked by link_stock_to_equipment()
+    if stock_item.get("equipment_link"):
+        existing = stock_item["equipment_link"]
+        name = existing.get("equipment_name") or ""
+        return {
+            "confidence": "exact",
+            "equipment": [existing],
+            "label": f"Linked to {name}" if name else "",
+        }
+
+    item_make = (stock_item.get("make") or "").lower().strip()
+    item_linked = (stock_item.get("linked_equipment") or "").lower().strip()
+    item_desc = (stock_item.get("description") or "").lower()
+
+    # Phase 1 – linked_equipment field matches equipment_name OR system
+    if item_linked:
+        for eq in equipment_records:
+            candidates = filter(None, [
+                (eq.get("equipment_name") or "").lower().strip(),
+                (eq.get("system") or "").lower().strip(),
+            ])
+            for eq_name in candidates:
+                if eq_name and (
+                    item_linked == eq_name
+                    or item_linked in eq_name
+                    or eq_name in item_linked
+                ):
+                    label = _eq_display(eq)
+                    return {
+                        "confidence": "exact",
+                        "equipment": [eq],
+                        "label": f"Linked to {label}" if label else "",
+                    }
+
+    # Phase 2 – manufacturer (make) match
+    if item_make and len(item_make) > 2:
+        matched = [
+            eq for eq in equipment_records
+            if item_make in (eq.get("make") or "").lower()
+            or (eq.get("make") or "").lower() in item_make
+        ]
+        if matched:
+            label = _eq_display(matched[0])
+            return {
+                "confidence": "likely",
+                "equipment": matched[:3],
+                "label": f"Likely linked to {label}" if label else "Likely linked to equipment",
+            }
+
+    # Phase 3 – system keyword in description/linked_equipment matches equipment system/name
+    search_text = f"{item_desc} {item_linked}".strip()
+    if search_text:
+        for eq in equipment_records:
+            for field in ("system", "equipment_name"):
+                candidate = (eq.get(field) or "").lower().strip()
+                if candidate and len(candidate) > 3 and candidate in search_text:
+                    label = _eq_display(eq)
+                    return {
+                        "confidence": "likely",
+                        "equipment": [eq],
+                        "label": f"Likely linked to {label}" if label else "",
+                    }
+
+    return _none
+
+
 def _normalise(s: str) -> str:
     """Lower-case and apply alias/spelling normalisations."""
     s = s.lower()
