@@ -557,5 +557,177 @@ class TestRoleRegressions(unittest.TestCase):
         self.assertEqual(updated.get("role"), "captain")
 
 
+# ---------------------------------------------------------------------------
+# Chef role
+# ---------------------------------------------------------------------------
+
+class TestChefRole(unittest.TestCase):
+    """Tests for Chef as a supported role (ASK-14 extension)."""
+
+    _APPROVE_RESPONSE = (
+        "DECISION:\nAPPROVE\n\n"
+        "WHY:\nThe supplier, quantities and delivery terms match the requirement.\n\n"
+        "RISK:\nLow\n\n"
+        "ACTIONS:\n• Approve payment\n• Keep records"
+    )
+
+    _QUERY_RESPONSE = (
+        "DECISION:\nQUERY\n\n"
+        "WHY:\nSeveral items differ in product form.\n\n"
+        "RISK:\nMedium\n\n"
+        "ACTIONS:\n• Clarify items\n• Hold until resolved"
+    )
+
+    # --- role detection ---
+
+    def test_extract_role_chef(self):
+        from domain.user_role import extract_role_from_message
+        self.assertEqual(extract_role_from_message("set my role to chef"), "chef")
+
+    def test_extract_role_i_am_the_chef(self):
+        from domain.user_role import extract_role_from_message
+        self.assertEqual(extract_role_from_message("I am the chef"), "chef")
+
+    def test_extract_role_im_the_chef(self):
+        from domain.user_role import extract_role_from_message
+        self.assertEqual(extract_role_from_message("i'm the chef"), "chef")
+
+    def test_chef_in_valid_roles(self):
+        from domain.user_role import VALID_ROLES
+        self.assertIn("chef", VALID_ROLES)
+
+    def test_chef_in_role_display(self):
+        from domain.user_role import ROLE_DISPLAY
+        self.assertEqual(ROLE_DISPLAY["chef"], "Chef")
+
+    # --- intent classification ---
+
+    def test_set_role_chef_intent(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("set my role to chef"), "set_role")
+
+    def test_i_am_the_chef_intent(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("I am the chef"), "set_role")
+
+    def test_im_the_chef_intent(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("i'm the chef"), "set_role")
+
+    # --- set / show role handlers ---
+
+    def test_set_role_chef_stores_role(self):
+        from whatsapp_app import _handle_text_message
+        _, updated = _handle_text_message(
+            "set my role to chef",
+            _state(),
+            "whatsapp:+44123456789",
+        )
+        self.assertEqual(updated.get("role"), "chef")
+
+    def test_set_role_chef_returns_role_updated(self):
+        from whatsapp_app import _handle_text_message
+        result, _ = _handle_text_message(
+            "set my role to chef",
+            _state(),
+            "whatsapp:+44123456789",
+        )
+        self.assertIn("ROLE UPDATED", result)
+        self.assertIn("Chef", result)
+
+    def test_show_role_returns_chef(self):
+        from whatsapp_app import _handle_text_message
+        result, _ = _handle_text_message(
+            "show my role",
+            _state(role="chef"),
+            "whatsapp:+44123456789",
+        )
+        self.assertIn("Chef", result)
+
+    # --- adapt_response_for_role ---
+
+    def test_chef_approve_decision_preserved(self):
+        from whatsapp_app import adapt_response_for_role
+        result = adapt_response_for_role(self._APPROVE_RESPONSE, "chef")
+        self.assertIn("DECISION:\nAPPROVE", result)
+
+    def test_chef_approve_actions_mention_delivery_or_form(self):
+        from whatsapp_app import adapt_response_for_role
+        result = adapt_response_for_role(self._APPROVE_RESPONSE, "chef")
+        lower = result.lower()
+        self.assertTrue(
+            "delivery" in lower or "form" in lower or "substitut" in lower or "freshness" in lower,
+            f"Expected galley-relevant mention in: {result}",
+        )
+
+    def test_chef_query_decision_preserved(self):
+        from whatsapp_app import adapt_response_for_role
+        result = adapt_response_for_role(self._QUERY_RESPONSE, "chef")
+        self.assertIn("DECISION:\nQUERY", result)
+
+    def test_chef_query_actions_mention_product_spec(self):
+        from whatsapp_app import adapt_response_for_role
+        result = adapt_response_for_role(self._QUERY_RESPONSE, "chef")
+        lower = result.lower()
+        self.assertTrue(
+            "form" in lower or "grade" in lower or "frozen" in lower or "fresh" in lower or "cut" in lower,
+            f"Expected product-spec mention in: {result}",
+        )
+
+    # --- market check hint ---
+
+    def test_chef_role_hint_in_market_check_query(self):
+        captured = {}
+
+        def mock_check(query, **kwargs):
+            captured["query"] = query
+            return "DECISION:\nACCEPTABLE PRICE\n\nWHY:\nFair.\n\nRECOMMENDED ACTIONS:\n• Proceed"
+
+        with patch("whatsapp_app.check_market_price", side_effect=mock_check):
+            from whatsapp_app import _handle_text_message
+            _handle_text_message(
+                "is the salmon price fair?",
+                _state(role="chef"),
+                "whatsapp:+44123456789",
+            )
+        q = captured.get("query", "")
+        self.assertIn("Chef", q)
+        self.assertTrue(
+            "form" in q.lower() or "grade" in q.lower() or "fillet" in q.lower() or "kg" in q.lower(),
+            f"Expected product-spec hint in: {q[:300]}",
+        )
+
+    # --- regression: other roles still work ---
+
+    def test_engineer_role_unaffected(self):
+        from whatsapp_app import _handle_text_message
+        result, updated = _handle_text_message(
+            "set my role to engineer",
+            _state(),
+            "whatsapp:+44123456789",
+        )
+        self.assertEqual(updated.get("role"), "engineer")
+        self.assertIn("Engineer", result)
+
+    def test_purser_role_unaffected(self):
+        from whatsapp_app import _handle_text_message
+        result, updated = _handle_text_message(
+            "set my role to purser",
+            _state(),
+            "whatsapp:+44123456789",
+        )
+        self.assertEqual(updated.get("role"), "purser")
+
+    def test_approval_decision_consistent_across_chef_and_purser(self):
+        """APPROVE decision must be identical regardless of role."""
+        from whatsapp_app import adapt_response_for_role
+        chef_result = adapt_response_for_role(self._APPROVE_RESPONSE, "chef")
+        purser_result = adapt_response_for_role(self._APPROVE_RESPONSE, "purser")
+        self.assertIn("DECISION:\nAPPROVE", chef_result)
+        self.assertIn("DECISION:\nAPPROVE", purser_result)
+        # Actions must differ between the two roles
+        self.assertNotEqual(chef_result, purser_result)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -2,13 +2,14 @@
 import re
 from typing import Optional
 
-VALID_ROLES = frozenset({"engineer", "deck_officer", "captain", "purser"})
+VALID_ROLES = frozenset({"engineer", "deck_officer", "captain", "purser", "chef"})
 
 ROLE_DISPLAY = {
     "engineer": "Engineer",
     "deck_officer": "Deck Officer",
     "captain": "Captain",
     "purser": "Purser",
+    "chef": "Chef",
 }
 
 # Ordered from most-specific to least-specific to avoid "deck" matching before "deck officer"
@@ -20,6 +21,7 @@ _ROLE_PATTERNS = [
     (re.compile(r'\bcaptain\b', re.I), "captain"),
     (re.compile(r'\bmaster\b', re.I), "captain"),
     (re.compile(r'\bpurser\b', re.I), "purser"),
+    (re.compile(r'\bchef\b', re.I), "chef"),
 ]
 
 
