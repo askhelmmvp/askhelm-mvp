@@ -384,5 +384,224 @@ class TestInvoiceReceivedActions(unittest.TestCase):
         self.assertIn("fair cost", body.lower())
 
 
+_IYS_QUOTE_DOC = {
+    "doc_type": "quote",
+    "supplier_name": "International Yacht Services B.V.",
+    "total": 1038.18,
+    "currency": "EUR",
+    "subtotal": 858.0,
+    "tax": 180.18,
+    "line_items": [
+        {
+            "description": "Trac Barnacle Buster Concentrate, biodegradable marine growth remover, 5-gallon pail",
+            "unit_rate": 429.00,
+            "quantity": 2.0,
+            "line_total": 858.00,
+        }
+    ],
+}
+
+_IYS_SINGLE_UNIT_DOC = {
+    "doc_type": "quote",
+    "supplier_name": "International Yacht Services B.V.",
+    "total": 519.09,
+    "currency": "EUR",
+    "subtotal": 429.0,
+    "tax": 90.09,
+    "line_items": [
+        {
+            "description": "Trac Barnacle Buster Concentrate, biodegradable marine growth remover, 5-gallon pail",
+            "unit_rate": 429.00,
+            "quantity": 1.0,
+            "line_total": 429.00,
+        }
+    ],
+}
+
+
+def _state_with_quote(doc=None):
+    return {
+        "user_id": "",
+        "documents": [doc or _IYS_QUOTE_DOC],
+        "pending_invoice": None,
+        "last_context": {},
+        "sessions": [],
+        "active_session_id": None,
+    }
+
+
+class TestDocumentContextUnitPrice(unittest.TestCase):
+    """_build_document_context must show unit price × qty for multi-unit items."""
+
+    def test_multi_unit_shows_qty_and_unit_price(self):
+        from whatsapp_app import _build_document_context
+        ctx = _build_document_context(_state_with_quote())
+        self.assertIn("qty 2", ctx)
+        self.assertIn("429.00", ctx)
+        self.assertIn("858.00", ctx)
+
+    def test_multi_unit_does_not_show_line_total_as_bare_rate(self):
+        # Old format was "(858.0 EUR)" — that must not appear
+        from whatsapp_app import _build_document_context
+        ctx = _build_document_context(_state_with_quote())
+        self.assertNotIn("(858", ctx)
+
+    def test_single_unit_shows_rate_without_qty_label(self):
+        from whatsapp_app import _build_document_context
+        ctx = _build_document_context(_state_with_quote(_IYS_SINGLE_UNIT_DOC))
+        self.assertIn("429", ctx)
+        self.assertNotIn("qty", ctx.lower())
+
+    def test_item_without_quantity_shows_rate_directly(self):
+        doc = {
+            **_IYS_QUOTE_DOC,
+            "line_items": [{"description": "Shipping", "line_total": 45.00}],
+        }
+        from whatsapp_app import _build_document_context
+        ctx = _build_document_context(_state_with_quote(doc))
+        self.assertIn("45", ctx)
+        self.assertNotIn("qty", ctx.lower())
+
+
+class TestUnitPriceNoteInjection(unittest.TestCase):
+    """_enrich_query_with_calculations emits UNIT PRICE NOTE for qty × unit_price context."""
+
+    _MULTI_UNIT_QUERY = (
+        "Uploaded document: quote from International Yacht Services B.V.\n"
+        "Items: Trac Barnacle Buster Concentrate, 5-gallon pail "
+        "(qty 2 × 429.00 EUR = 858.00 EUR)\n"
+        "Subtotal: 858.00 EUR\nTax: 180.18 EUR\nTotal: 1038.18 EUR\n\n"
+        "User question: is this a fair price?"
+    )
+
+    def test_unit_price_note_appears(self):
+        from services.market_price_service import _enrich_query_with_calculations
+        enriched = _enrich_query_with_calculations(self._MULTI_UNIT_QUERY)
+        self.assertIn("UNIT PRICE NOTE", enriched)
+
+    def test_unit_price_note_names_correct_unit_price(self):
+        from services.market_price_service import _enrich_query_with_calculations
+        enriched = _enrich_query_with_calculations(self._MULTI_UNIT_QUERY)
+        self.assertIn("429.00 per unit", enriched)
+
+    def test_unit_price_note_warns_against_line_total(self):
+        from services.market_price_service import _enrich_query_with_calculations
+        enriched = _enrich_query_with_calculations(self._MULTI_UNIT_QUERY)
+        self.assertIn("do NOT treat the line total as the per-unit price", enriched)
+
+    def test_single_unit_no_note(self):
+        from services.market_price_service import _enrich_query_with_calculations
+        query = (
+            "Uploaded document: quote\n"
+            "Items: Antifouling paint (429.00 EUR)\n"
+            "Total: 519.09 EUR\n\nUser question: is this fair?"
+        )
+        enriched = _enrich_query_with_calculations(query)
+        self.assertNotIn("UNIT PRICE NOTE", enriched)
+
+
+class TestFairPriceMultiUnitIntegration(unittest.TestCase):
+    """End-to-end: 'is this a fair price?' with a multi-unit quote uses unit price."""
+
+    _ACCEPTABLE = (
+        "DECISION:\nACCEPTABLE PRICE\n\n"
+        "WHY:\nEUR 429.00 per 5-gallon pail is within the marine supply range.\n\n"
+        "RECOMMENDED ACTIONS:\n• Approve the unit price"
+    )
+
+    def test_fair_price_returns_acceptable_price(self):
+        with patch("whatsapp_app.check_market_price", return_value=self._ACCEPTABLE):
+            from whatsapp_app import _handle_text_message
+            result, _ = _handle_text_message(
+                "is this a fair price?",
+                _state_with_quote(),
+                "whatsapp:+44123456789",
+            )
+        self.assertIn("ACCEPTABLE PRICE", result)
+
+    def test_market_check_receives_unit_price_in_context(self):
+        captured = {}
+
+        def capture(query, **kwargs):
+            captured["query"] = query
+            return self._ACCEPTABLE
+
+        with patch("whatsapp_app.check_market_price", side_effect=capture):
+            from whatsapp_app import _handle_text_message
+            _handle_text_message(
+                "is this a fair price?",
+                _state_with_quote(),
+                "whatsapp:+44123456789",
+            )
+        q = captured.get("query", "")
+        self.assertIn("429", q)
+        self.assertIn("qty 2", q)
+
+    def test_clarification_2_pcs_reassesses_as_unit_price(self):
+        state = _state_with_quote()
+        state["last_context"] = {
+            "type": "market_check",
+            "topic": "is this a fair price?",
+            "result": "DECISION:\nHIGH PRICE — QUERY\n\nWHY:\nEUR 858 looks high.\n\nRECOMMENDED ACTIONS:\n• Clarify",
+        }
+        with patch("whatsapp_app.check_market_price", return_value=self._ACCEPTABLE):
+            from whatsapp_app import _handle_text_message
+            result, _ = _handle_text_message(
+                "2 pcs",
+                state,
+                "whatsapp:+44123456789",
+            )
+        self.assertIn("ACCEPTABLE PRICE", result)
+
+    def test_clarification_it_is_for_2_pails_reassesses(self):
+        state = _state_with_quote()
+        state["last_context"] = {
+            "type": "market_check",
+            "topic": "is this a fair price?",
+            "result": "DECISION:\nHIGH PRICE — QUERY\n\nWHY:\nEUR 858 looks high.\n\nRECOMMENDED ACTIONS:\n• Clarify",
+        }
+        with patch("whatsapp_app.check_market_price", return_value=self._ACCEPTABLE):
+            from whatsapp_app import _handle_text_message
+            result, _ = _handle_text_message(
+                "it is for 2 pails",
+                state,
+                "whatsapp:+44123456789",
+            )
+        self.assertIn("ACCEPTABLE PRICE", result)
+
+    def test_matched_quote_invoice_does_not_use_invoice_assessment(self):
+        """When comparison_data is active, market_check must not route to invoice_approval_checks."""
+        state = _state_with_quote()
+        with patch("whatsapp_app.check_market_price", return_value=self._ACCEPTABLE) as mock_market, \
+             patch("whatsapp_app.invoice_approval_checks") as mock_inv:
+            from whatsapp_app import _handle_text_message
+            _handle_text_message(
+                "is this a fair price?",
+                state,
+                "whatsapp:+44123456789",
+            )
+        mock_market.assert_called_once()
+        mock_inv.assert_not_called()
+
+    def test_single_unit_context_no_unit_price_note_in_query(self):
+        """Single-unit item: no 'qty' in document context, no UNIT PRICE NOTE injected."""
+        captured = {}
+
+        def capture(query, **kwargs):
+            captured["query"] = query
+            return self._ACCEPTABLE
+
+        with patch("whatsapp_app.check_market_price", side_effect=capture):
+            from whatsapp_app import _handle_text_message
+            _handle_text_message(
+                "is this a fair price?",
+                _state_with_quote(_IYS_SINGLE_UNIT_DOC),
+                "whatsapp:+44123456789",
+            )
+        q = captured.get("query", "")
+        self.assertNotIn("qty", q.lower())
+        self.assertNotIn("UNIT PRICE NOTE", q)
+
+
 if __name__ == "__main__":
     unittest.main()
