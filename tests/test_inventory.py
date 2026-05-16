@@ -1385,5 +1385,310 @@ class TestSpareQueryAliasExpansion(unittest.TestCase):
         self.assertIn("MTU fuel filter", r)
 
 
+class TestEquipmentLinkRouting(unittest.TestCase):
+    """ASK-32 follow-up: equipment-link queries must not route to market price."""
+
+    def _intent(self, q):
+        from domain.intent import classify_text
+        return classify_text(q)
+
+    # Test 1 — routing
+    def test_which_equipment_does_pn_belong_to_routes_to_stock(self):
+        result = self._intent("which equipment does XP52718300060 belong to?")
+        self.assertEqual(result, "stock_query")
+
+    def test_what_equipment_does_pn_belong_to_routes_to_stock(self):
+        result = self._intent("what equipment does XP52718300060 belong to?")
+        self.assertEqual(result, "stock_query")
+
+    def test_which_equipment_is_for_routes_to_stock(self):
+        result = self._intent("which equipment is XP52718300060 for?")
+        self.assertEqual(result, "stock_query")
+
+    def test_which_system_does_pn_belong_to_routes_to_stock(self):
+        result = self._intent("which system does XP52718300060 belong to?")
+        self.assertEqual(result, "stock_query")
+
+    def test_equipment_link_not_market_price(self):
+        result = self._intent("which equipment does XP52718300060 belong to?")
+        self.assertNotEqual(result, "market_check")
+
+    def test_fair_price_still_routes_to_market(self):
+        result = self._intent("is this a fair price for a new pump?")
+        self.assertEqual(result, "market_check")
+
+    def test_part_number_price_query_still_market(self):
+        result = self._intent("is 450 EUR fair for XP52718300060?")
+        self.assertEqual(result, "market_check")
+
+
+class TestEquipmentLinkResponse(unittest.TestCase):
+    """ASK-32 follow-up: equipment-link response format for 'which equipment does X belong to?'"""
+
+    _ITEMS = [
+        {
+            "description": "Oil filter Paper inserts",
+            "part_number": "XP52718300060",
+            "quantity_onboard": 28.0,
+            "storage_location": "LD / Generator Room / Filter Cabinet",
+            "make": "MTU",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+    ]
+
+    _EQUIPMENT = [
+        {
+            "equipment_name": "Main Engine PS",
+            "make": "MTU",
+            "model": "16V4000M73L",
+            "system": "Main Engine",
+            "location": "Engine Room",
+        },
+        {
+            "equipment_name": "Main Engine SB",
+            "make": "MTU",
+            "model": "16V4000M73L",
+            "system": "Main Engine",
+            "location": "Engine Room",
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+        inv.merge_stock("", self._ITEMS, "test.csv")
+        inv.merge_equipment("", self._EQUIPMENT, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+
+    def _stock(self, q):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(q, {"user_id": ""})
+        return result
+
+    # Test 2 — equipment-link response content
+    def test_equipment_link_contains_part_number(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("XP52718300060", r)
+
+    def test_equipment_link_contains_description(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("Oil filter Paper inserts", r)
+
+    def test_equipment_link_contains_quantity(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("28", r)
+
+    def test_equipment_link_contains_location(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("LD / Generator Room / Filter Cabinet", r)
+
+    def test_equipment_link_shows_mtu_equipment(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("MTU", r)
+
+    def test_equipment_link_not_fair_price_response(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertNotIn("INSUFFICIENT DATA", r)
+        self.assertNotIn("Pricing varies", r)
+
+    def test_equipment_link_has_stock_section(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("STOCK:", r)
+
+    def test_equipment_link_has_equipment_section(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("EQUIPMENT:", r)
+
+    def test_equipment_link_decision_mentions_main_engine(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("MAIN ENGINE", r)
+
+
+class TestOilFilterItemSystemQuery(unittest.TestCase):
+    """ASK-32 follow-up: 'oil filters for main engine' uses compound item matching."""
+
+    _EQUIPMENT = [
+        {
+            "equipment_name": "Main Engine PS",
+            "make": "MTU",
+            "model": "16V4000M73L",
+            "system": "Main Engine",
+        },
+    ]
+
+    _ITEMS = [
+        # Exact oil filter matches
+        {
+            "description": "Oil filter Paper inserts",
+            "part_number": "XP52718300060",
+            "quantity_onboard": 28.0,
+            "storage_location": "LD / Generator Room / Filter Cabinet",
+            "make": "MTU",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Likely: generic filter name, but stored in Main Engine Box
+        {
+            "description": "Filter With O-ring",
+            "part_number": "XP54715200159",
+            "quantity_onboard": 4.0,
+            "storage_location": "LD / ER Exhaust Duct / Shelf 11B / Main Engine Box 2",
+            "make": "MTU",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — air filter
+        {
+            "description": "Air filter",
+            "part_number": "AF-001",
+            "quantity_onboard": 2.0,
+            "storage_location": "Engine Room",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — fuel filter
+        {
+            "description": "Fuel Filter Spin on",
+            "part_number": "FF-001",
+            "quantity_onboard": 3.0,
+            "storage_location": "Engine Room",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — Racor pre-filter
+        {
+            "description": "Fuel Racor Pre Filter",
+            "part_number": "RCR-001",
+            "quantity_onboard": 1.0,
+            "storage_location": "Engine Room",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — removal tool
+        {
+            "description": "Automatic oil filter removal tool",
+            "part_number": "TOOL-001",
+            "quantity_onboard": 1.0,
+            "storage_location": "Tool Box",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — valve
+        {
+            "description": "Primary filter unit valve",
+            "part_number": "VLV-001",
+            "quantity_onboard": 1.0,
+            "storage_location": "Engine Room",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+        inv.merge_stock("", self._ITEMS, "test.csv")
+        inv.merge_equipment("", self._EQUIPMENT, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+
+    def _stock(self, q):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(q, {"user_id": ""})
+        return result
+
+    def _spares(self, q):
+        from whatsapp_app import _handle_spares_query
+        result, _ = _handle_spares_query(q, {"user_id": ""})
+        return result
+
+    # Test 3 — compound item+system parse
+    def test_parse_oil_filters_main_engines(self):
+        from whatsapp_app import _parse_item_system_query
+        terms, system = _parse_item_system_query("how many oil filters do we have for the main engines?")
+        self.assertIn("oil filter", terms)
+        self.assertIn("main engines", system)
+
+    # Test 3 — oil filter query returns exact match
+    def test_oil_filter_query_returns_exact_match(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertIn("Oil filter Paper inserts", r)
+
+    # Test 4 — likely match included
+    def test_oil_filter_query_includes_likely_match(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertIn("Filter With O-ring", r)
+
+    def test_oil_filter_likely_match_is_labelled(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertIn("likely related", r)
+
+    # Test 5 — negative filtering
+    def test_oil_filter_excludes_air_filter(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("Air filter", r)
+
+    def test_oil_filter_excludes_fuel_filter(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("Fuel Filter Spin on", r)
+
+    def test_oil_filter_excludes_racor(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("Racor", r)
+
+    def test_oil_filter_excludes_removal_tool(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("removal tool", r)
+
+    def test_oil_filter_excludes_valve(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("Primary filter unit valve", r)
+
+    # Test 6 — broad filter regression: "show main engine filters" allows all
+    def test_broad_filter_query_returns_all_filter_types(self):
+        r = self._spares("show main engine filters")
+        # Broad query should include various filter types
+        self.assertIn("Oil filter Paper inserts", r)
+
+    # Test 7 — show main engine spares regression
+    def test_show_main_engine_spares_still_works(self):
+        r = self._spares("show main engine spares")
+        self.assertIn("Oil filter Paper inserts", r)
+
+    # Test 8 — list MTU spares regression
+    def test_list_mtu_spares_still_works(self):
+        r = self._spares("list MTU spares")
+        self.assertIn("Oil filter Paper inserts", r)
+
+    # Test 9 — location query regression
+    def test_where_can_i_find_pn_returns_location(self):
+        r = self._stock("where can I find XP52718300060?")
+        self.assertIn("LD / Generator Room / Filter Cabinet", r)
+
+    # Test 10 — fair-price regression
+    def test_fair_price_still_routes_to_market(self):
+        from domain.intent import classify_text
+        result = classify_text("is 45 EUR a fair price for an oil filter?")
+        self.assertEqual(result, "market_check")
+
+
 if __name__ == "__main__":
     unittest.main()

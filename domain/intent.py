@@ -424,6 +424,14 @@ _MANUAL_SEARCH_SUBSTRINGS = [
 
 # Inventory query substrings — matched after handover/open-action checks.
 _STOCK_QUERY_SUBSTRINGS = [
+    # Equipment-link queries — must come before market_check routing, because a
+    # part-number in an open question otherwise triggers _is_marine_pricing_question.
+    "which equipment does",
+    "what equipment does",
+    "which equipment is",
+    "what equipment is",
+    "which system does",
+    "what system does",
     "do we have ",
     "do we stock ",
     "have we got ",
