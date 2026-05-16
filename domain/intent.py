@@ -982,6 +982,40 @@ _REMINDER_PREFIXES = (
     "set a reminder",
 )
 
+_SET_ROLE_SUBSTRINGS = [
+    "set my role to",
+    "set my role ",
+    "set role to",
+    "set role ",
+    "change my role to",
+    "change role to",
+    "i am the engineer",
+    "i am the captain",
+    "i am the purser",
+    "i am the deck officer",
+    "i am engineer",
+    "i am captain",
+    "i am purser",
+    "i am deck officer",
+    "i'm the engineer",
+    "i'm the captain",
+    "i'm the purser",
+    "i'm the deck officer",
+    "i'm engineer",
+    "i'm captain",
+    "i'm purser",
+    "my role is",
+]
+
+_SHOW_ROLE_SUBSTRINGS = [
+    "show my role",
+    "show role",
+    "what is my role",
+    "what's my role",
+    "what role am i",
+    "my current role",
+]
+
 
 def classify_text(text: str) -> str:
     """
@@ -1001,6 +1035,14 @@ def classify_text(text: str) -> str:
     for prefix in _REMINDER_PREFIXES:
         if t.startswith(prefix):
             return "reminder"
+
+    # Role management — checked early so "set role" never falls through to other intents.
+    for phrase in _SHOW_ROLE_SUBSTRINGS:
+        if phrase in t:
+            return "show_role"
+    for phrase in _SET_ROLE_SUBSTRINGS:
+        if phrase in t:
+            return "set_role"
 
     if t in _NEW_SESSION_EXACT:
         return "new_session"
