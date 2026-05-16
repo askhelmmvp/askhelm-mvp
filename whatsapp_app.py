@@ -1723,11 +1723,27 @@ def _build_document_context(state: dict) -> str:
     item_strs = []
     for item in line_items[:6]:
         desc = (item.get("description") or "").strip()
-        rate = item.get("line_total") if item.get("line_total") is not None else item.get("unit_rate")
-        if desc and rate is not None:
-            item_strs.append(f"{desc} ({rate} {currency})".strip())
-        elif desc:
-            item_strs.append(desc)
+        qty = item.get("quantity")
+        line_total = item.get("line_total")
+        unit_rate_raw = item.get("unit_rate")
+        try:
+            qty_float = float(qty) if qty is not None else 0.0
+        except (TypeError, ValueError):
+            qty_float = 0.0
+        if qty_float > 1 and line_total is not None and desc:
+            unit_price = _compute_unit_price(item)
+            if unit_price is not None:
+                item_strs.append(
+                    f"{desc} (qty {_fmt_qty(qty)} × {unit_price:.2f} {currency} = {line_total:.2f} {currency})".strip()
+                )
+            else:
+                item_strs.append(f"{desc} ({line_total:.2f} {currency})".strip())
+        else:
+            rate = line_total if line_total is not None else unit_rate_raw
+            if desc and rate is not None:
+                item_strs.append(f"{desc} ({rate} {currency})".strip())
+            elif desc:
+                item_strs.append(desc)
     if item_strs:
         parts.append("Items: " + "; ".join(item_strs))
 

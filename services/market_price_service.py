@@ -312,6 +312,12 @@ _MULTI_UNIT_DETAIL_RE = re.compile(
     re.IGNORECASE,
 )
 
+# "qty 2 × 429.00 EUR = 858.00 EUR" emitted by _build_document_context for multi-unit lines
+_DOC_MULTI_UNIT_RE = re.compile(
+    r'qty\s+(\d+(?:\.\d+)?)\s*[×x]\s*([\d,]+\.?\d*)\s*\w{0,3}\s*=\s*([\d,]+\.?\d*)',
+    re.IGNORECASE,
+)
+
 
 def _parse_amount(s):
     try:
@@ -409,6 +415,22 @@ def _enrich_query_with_calculations(query: str) -> str:
                 notes.append(
                     f"PRICE PER LITRE: {unit_price:.2f} / {unit_size:.0f}L = {ppl:.2f}/L. "
                     "Use this rate for the price judgement."
+                )
+
+    # Multi-unit line from structured document context: "qty 2 × 429.00 EUR = 858.00 EUR"
+    # Prevents comparing a multi-unit line total against a single-unit market range.
+    if not multi:
+        doc_multi = _DOC_MULTI_UNIT_RE.search(query)
+        if doc_multi:
+            doc_qty = float(doc_multi.group(1))
+            doc_up = _parse_amount(doc_multi.group(2))
+            doc_lt = _parse_amount(doc_multi.group(3))
+            if doc_qty > 1 and doc_up and doc_lt:
+                q_label = str(int(doc_qty)) if doc_qty == int(doc_qty) else str(doc_qty)
+                notes.append(
+                    f"UNIT PRICE NOTE: This is a {q_label}-unit order. "
+                    f"Unit price: {doc_up:.2f} per unit. Line total: {doc_lt:.2f}. "
+                    "Assess the unit price against the market range — do NOT treat the line total as the per-unit price."
                 )
 
     if not notes:
