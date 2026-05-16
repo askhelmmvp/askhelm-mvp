@@ -37,6 +37,7 @@ from domain.session_manager import (
     MAX_QUOTES_PER_SESSION,
 )
 from domain.intent import classify_text
+from domain.user_role import get_user_role, set_user_role, extract_role_from_message, ROLE_DISPLAY, VALID_ROLES
 from domain.compliance_engine import (
     answer_compliance_query,
     answer_compliance_followup,
@@ -355,6 +356,133 @@ def _make_approval_response(*, decision: str, why: str, risk: str, actions: list
         "ACTIONS:\n• " + "\n• ".join(actions),
     ]
     return "\n\n".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Role-based response adaptation
+# ---------------------------------------------------------------------------
+
+_ROLE_APPROVAL_ACTIONS: dict = {
+    "engineer": {
+        "APPROVE": [
+            "Confirm goods received match the part numbers and quantities",
+            "File the quote and invoice against the equipment record",
+            "Update stock if parts are received onboard",
+        ],
+        "HOLD": [
+            "Do not proceed — resolve the technical scope discrepancy first",
+            "Request a corrected invoice or revised quote from the supplier",
+            "Check whether the discrepancy affects the maintenance schedule or equipment record",
+        ],
+        "QUERY": [
+            "Clarify the outstanding item before approving",
+            "Check whether the additional charge affects your maintenance budget",
+            "Confirm with the supplier before releasing payment",
+        ],
+    },
+    "captain": {
+        "APPROVE": [
+            "Approve payment — no material commercial or operational risk identified",
+            "Keep quote and invoice together for the audit trail",
+            "Escalate only if delivery, scope or guest experience is disputed",
+        ],
+        "HOLD": [
+            "Do not approve — a material discrepancy requires resolution",
+            "Brief the owner's representative if the amount is above authorisation threshold",
+            "Request a revised invoice from the supplier before releasing payment",
+        ],
+        "QUERY": [
+            "Do not approve until the open item is resolved",
+            "Decide whether to accept or reject the additional charge",
+            "Proceed only once all parties confirm the revised scope",
+        ],
+    },
+    "purser": {
+        "APPROVE": [
+            "Process payment once VAT, billing address and payment terms are confirmed",
+            "File the quote and invoice together in the payment documentation file",
+            "Retain for audit — no invoice discrepancy found",
+        ],
+        "HOLD": [
+            "Do not release payment — the invoice does not match the approved quote",
+            "Contact the supplier to request a corrected invoice",
+            "Note the discrepancy in the payment tracking file",
+        ],
+        "QUERY": [
+            "Hold payment until the outstanding charge is agreed",
+            "Confirm the additional item with the supplier in writing",
+            "Update the budget tracking file once resolved",
+        ],
+    },
+    "deck_officer": {
+        "APPROVE": [
+            "Confirm delivery does not affect deck operations or readiness",
+            "Record receipt in the deck log if the item is safety or deck-related equipment",
+            "File documents for the audit trail",
+        ],
+        "HOLD": [
+            "Do not accept delivery — log the hold in the deck records",
+            "Confirm whether the delay affects any upcoming safety drills or operations",
+            "Notify the captain if the item affects operational readiness",
+        ],
+        "QUERY": [
+            "Do not sign off receipt until the open item is agreed",
+            "Note the query in the deck log",
+            "Confirm operational readiness is not affected by the delay",
+        ],
+    },
+}
+
+# Brief role emphasis notes prepended to LLM queries for compliance and market-check.
+_ROLE_COMPLIANCE_HINT = {
+    "engineer": "USER ROLE: Engineer. Emphasise technical implementation, system requirements, maintenance schedules and equipment checks.",
+    "captain": "USER ROLE: Captain. Emphasise risk, compliance exposure, decision confidence and whether to proceed or escalate.",
+    "purser": "USER ROLE: Purser. Emphasise documentation requirements, cost implications and record-keeping obligations.",
+    "deck_officer": "USER ROLE: Deck Officer. Emphasise safety requirements, watchkeeping obligations, deck logs and operational checklists.",
+}
+
+_ROLE_MARKET_HINT = {
+    "engineer": "USER ROLE: Engineer. Emphasise part specification, compatibility, stock implications and whether the part number is correct.",
+    "captain": "USER ROLE: Captain. Emphasise overall risk, approval confidence and whether to proceed with the order.",
+    "purser": "USER ROLE: Purser. Emphasise total cost, VAT treatment, payment terms and whether the price falls within budget.",
+    "deck_officer": "USER ROLE: Deck Officer. Emphasise operational impact, delivery timeline and whether the item affects deck readiness.",
+}
+
+
+def adapt_response_for_role(response: str, role: Optional[str]) -> str:
+    """
+    Replace ACTIONS / RECOMMENDED ACTIONS with role-specific bullets for
+    APPROVE, HOLD and QUERY decisions.  Other decisions are returned unchanged.
+    """
+    if not role or role not in _ROLE_APPROVAL_ACTIONS:
+        return response
+
+    decision_m = re.search(r"DECISION:\n(.+?)(?:\n|$)", response)
+    if not decision_m:
+        return response
+    decision_text = decision_m.group(1).strip()
+
+    if decision_text.startswith("APPROVE"):
+        key = "APPROVE"
+    elif decision_text.startswith("HOLD"):
+        key = "HOLD"
+    elif decision_text.startswith("QUERY"):
+        key = "QUERY"
+    else:
+        return response
+
+    role_actions = _ROLE_APPROVAL_ACTIONS[role].get(key)
+    if not role_actions:
+        return response
+
+    bullets = "• " + "\n• ".join(role_actions)
+    adapted = re.sub(
+        r"(?:RECOMMENDED )?ACTIONS:\n.*$",
+        f"ACTIONS:\n{bullets}",
+        response,
+        flags=re.DOTALL,
+    )
+    return adapted
 
 
 def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
@@ -1807,11 +1935,14 @@ def _handle_document_market_check(
         has_last_document, has_component_memory,
     )
     ctx_parts = []
+    _role = get_user_role(state)
+    if _role and _role in _ROLE_MARKET_HINT:
+        ctx_parts.append(_ROLE_MARKET_HINT[_role])
     if comp_ctx:
         ctx_parts.append(comp_ctx)
     if doc_ctx:
         ctx_parts.append(doc_ctx)
-    reused_quote_context = bool(ctx_parts)
+    reused_quote_context = bool(comp_ctx or doc_ctx)
     ctx_parts.append(f"User question: {query}")
     enriched = "\n\n".join(ctx_parts)
     logger.info(
@@ -4742,6 +4873,50 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if intent == "greeting":
         return "Ready.\n\nSend your question or upload a document.", state
 
+    if intent == "set_role":
+        _role = extract_role_from_message(incoming)
+        if _role:
+            state = set_user_role(state, _role)
+            _display = ROLE_DISPLAY[_role]
+            return _make_response(
+                decision="ROLE UPDATED",
+                why=f"Your AskHelm role is now set to {_display}.",
+                actions=[
+                    f"Future answers will reflect the {_display} perspective",
+                    'Say "show my role" to confirm',
+                    'Say "set my role to [role]" to change it',
+                ],
+            ), state
+        return _make_response(
+            decision="ROLE NOT RECOGNISED",
+            why="I could not identify a valid role in that message.",
+            actions=[
+                "Supported roles: Engineer, Deck Officer, Captain, Purser",
+                "Example: set my role to captain",
+            ],
+        ), state
+
+    if intent == "show_role":
+        _role = get_user_role(state)
+        if _role:
+            _display = ROLE_DISPLAY.get(_role, _role.replace("_", " ").title())
+            return _make_response(
+                decision=f"YOUR ROLE: {_display.upper()}",
+                why=f"AskHelm is configured to respond as {_display}.",
+                actions=[
+                    'Say "set my role to [role]" to change it',
+                    "Supported roles: Engineer, Deck Officer, Captain, Purser",
+                ],
+            ), state
+        return _make_response(
+            decision="NO ROLE SET",
+            why="No role has been configured for your account.",
+            actions=[
+                "Example: set my role to captain",
+                "Supported roles: Engineer, Deck Officer, Captain, Purser",
+            ],
+        ), state
+
     if intent == "new_session":
         logger.info(
             "session_reset: reset_trigger_source=user_command incoming=%r",
@@ -4772,10 +4947,12 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     comparison_data = active.get("last_comparison") if active else None
 
     if intent == "approval":
-        return _handle_approval(state, comparison_data), state
+        _resp = _handle_approval(state, comparison_data)
+        return adapt_response_for_role(_resp, get_user_role(state)), state
 
     if intent == "approval_clarification":
-        return _handle_approval_clarification(incoming, state), state
+        _resp = _handle_approval_clarification(incoming, state)
+        return adapt_response_for_role(_resp, get_user_role(state)), state
 
     # Context-aware follow-up routing:
     if intent in ("what_to_do", "compliance_followup", "commercial_followup"):
@@ -4824,7 +5001,11 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
     if intent == "compliance_question":
         from storage_paths import get_yacht_id_for_user
         _yid = get_yacht_id_for_user(state.get("user_id", ""))
-        answer = answer_compliance_query(incoming, yacht_id=_yid)
+        _role = get_user_role(state)
+        _compliance_q = incoming
+        if _role and _role in _ROLE_COMPLIANCE_HINT:
+            _compliance_q = f"{_ROLE_COMPLIANCE_HINT[_role]}\n\n{incoming}"
+        answer = answer_compliance_query(_compliance_q, yacht_id=_yid)
         state["last_context"] = {"type": "compliance", "topic": incoming}
         return answer, state
 
