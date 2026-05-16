@@ -534,10 +534,100 @@ def _build_quote_approval_response(outcome: dict, comparison: dict) -> str:
     )
 
 
+_APPROVAL_REJECT_SUBSTRINGS_HANDLER = [
+    "freight not accepted",
+    "not accepted",
+    "not agreed",
+    "query freight",
+    "reject freight",
+    "ask them to remove freight",
+    "freight rejected",
+    "remove freight",
+    "remove the freight",
+]
+
+_APPROVAL_ACCEPT_SUBSTRINGS_HANDLER = [
+    "freight accepted",
+    "freight is accepted",
+    "freight agreed",
+    "freight confirmed",
+    "ok with freight",
+    "freight ok",
+    "approve with freight",
+]
+
+_APPROVAL_CLARIFICATION_EXACT_HANDLER = frozenset({"accepted", "agreed"})
+
+
+def _handle_approval_clarification(message: str, state: dict) -> str:
+    """
+    Resolve an open approval QUERY with a positive or negative clarification.
+    Called when intent == 'approval_clarification'.
+    """
+    last_ctx = state.get("last_context") or {}
+    if last_ctx.get("type") != "approval_query":
+        return _make_approval_response(
+            decision="NO ACTIVE APPROVAL QUERY",
+            why="There is no open approval query to resolve.",
+            risk="Low",
+            actions=[
+                "Upload or compare a quote/invoice first",
+                "Ask 'can I approve this?' after a comparison",
+            ],
+        )
+
+    open_issue = last_ctx.get("open_issue", "freight charge")
+    t = message.lower().strip()
+    t_core = re.sub(r"[?!.,;:]+$", "", t).strip()
+
+    # Check negative first to avoid "freight not accepted" matching "accepted"
+    if any(neg in t for neg in _APPROVAL_REJECT_SUBSTRINGS_HANDLER):
+        state.pop("last_context", None)
+        return _make_approval_response(
+            decision="HOLD",
+            why=f"The {open_issue} has not been accepted, so the invoice should not be approved as-is.",
+            risk="Medium",
+            actions=[
+                f"Ask the supplier to remove or justify the {open_issue}",
+                f"Request a revised invoice if the {open_issue} was not agreed",
+                f"Approve only once the {open_issue} issue is resolved",
+            ],
+        )
+
+    if any(pos in t for pos in _APPROVAL_ACCEPT_SUBSTRINGS_HANDLER) or t_core in _APPROVAL_CLARIFICATION_EXACT_HANDLER:
+        state.pop("last_context", None)
+        return _make_approval_response(
+            decision="APPROVE",
+            why=(
+                f"The only open query was the {open_issue}. You have confirmed it is "
+                "accepted, and the quoted material lines otherwise match the invoice."
+            ),
+            risk="Low",
+            actions=[
+                "Approve for payment",
+                "File the quote and invoice together",
+                f"Note that the {open_issue} was accepted after invoice review",
+            ],
+        )
+
+    # Ambiguous reply — keep context open and re-prompt
+    return _make_approval_response(
+        decision="QUERY",
+        why=f"Still waiting to confirm the {open_issue}. Please clarify.",
+        risk="Medium",
+        actions=[
+            f"Reply 'freight accepted' if the {open_issue} is agreed",
+            f"Reply 'freight not accepted' to reject it and request a revised invoice",
+        ],
+    )
+
+
 def _handle_approval(state: dict, comparison_data) -> str:
     """
     Return APPROVE / HOLD / QUERY / NO ACTIVE COMPARISON.
     Deterministic from _classify_comparison outcome — no LLM call.
+    Sets state['last_context'] to approval_query when returning QUERY so
+    follow-up replies ("freight accepted") can resolve the open issue.
     """
     if not comparison_data:
         if state.get("pending_invoice"):
@@ -573,8 +663,21 @@ def _handle_approval(state: dict, comparison_data) -> str:
     comp_type = outcome["comparison_type"]
 
     if comp_type in ("quote_vs_invoice", "quote_vs_proforma"):
-        return _build_invoice_approval_response(outcome, comparison)
-    return _build_quote_approval_response(outcome, comparison)
+        response = _build_invoice_approval_response(outcome, comparison)
+        # Store approval query context so clarification follow-ups can resolve it
+        _dc = outcome.get("decision", "")
+        if _dc == "MATCH CONFIRMED — FREIGHT ADDED":
+            state["last_context"] = {"type": "approval_query", "open_issue": "freight charge"}
+        elif _dc in ("INVOICE HAS ADDITIONAL COST", "MATCH CONFIRMED — COST REDUCTION"):
+            state["last_context"] = {"type": "approval_query", "open_issue": "added cost"}
+        elif "DECISION:\nQUERY" in response:
+            state["last_context"] = {"type": "approval_query", "open_issue": "open item"}
+        return response
+
+    response = _build_quote_approval_response(outcome, comparison)
+    if "DECISION:\nQUERY" in response:
+        state["last_context"] = {"type": "approval_query", "open_issue": "scope difference"}
+    return response
 
 
 _DOCUMENT_RECEIVED_ACK = (
@@ -4654,6 +4757,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "approval":
         return _handle_approval(state, comparison_data), state
+
+    if intent == "approval_clarification":
+        return _handle_approval_clarification(incoming, state), state
 
     # Context-aware follow-up routing:
     if intent in ("what_to_do", "compliance_followup", "commercial_followup"):

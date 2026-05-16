@@ -285,6 +285,36 @@ _APPROVAL_TRIGGER_EXACT = frozenset({
     "pay this",
 })
 
+# Positive clarification replies after a QUERY approval decision.
+_APPROVAL_ACCEPT_SUBSTRINGS = [
+    "freight accepted",
+    "freight is accepted",
+    "freight agreed",
+    "freight confirmed",
+    "ok with freight",
+    "freight ok",
+    "approve with freight",
+]
+
+# Negative clarification replies after a QUERY approval decision.
+_APPROVAL_REJECT_SUBSTRINGS = [
+    "freight not accepted",
+    "not accepted",
+    "not agreed",
+    "query freight",
+    "reject freight",
+    "ask them to remove freight",
+    "freight rejected",
+    "remove freight",
+    "remove the freight",
+]
+
+# Short clarification words matched exactly (after stripping trailing punctuation).
+_APPROVAL_CLARIFICATION_EXACT = frozenset({
+    "accepted",
+    "agreed",
+})
+
 # Phrases that are commercial procurement follow-ups (ordering, proceeding).
 # Routing in _handle_text_message checks last_context to provide relevant commercial advice.
 _COMMERCIAL_FOLLOWUP_SUBSTRINGS = [
@@ -1005,6 +1035,15 @@ def classify_text(text: str) -> str:
                 return "approval"
         if t_core in _APPROVAL_TRIGGER_EXACT:
             return "approval"
+
+    # Approval clarification — resolves open QUERY decisions ("freight accepted",
+    # "not agreed"). Checked after approval triggers, guarded against compliance context.
+    if not any(c in t for c in _COMPLIANCE_SUBSTRINGS):
+        for trigger in _APPROVAL_ACCEPT_SUBSTRINGS + _APPROVAL_REJECT_SUBSTRINGS:
+            if trigger in t:
+                return "approval_clarification"
+        if t_core in _APPROVAL_CLARIFICATION_EXACT:
+            return "approval_clarification"
 
     for phrase in _COMMERCIAL_FOLLOWUP_SUBSTRINGS:
         if phrase in t:

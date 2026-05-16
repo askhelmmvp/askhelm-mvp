@@ -527,5 +527,228 @@ class TestApprovalRegressions(unittest.TestCase):
         self.assertIn("OK TO APPROVE", response)
 
 
+# ---------------------------------------------------------------------------
+# Approval clarification intent classification
+# ---------------------------------------------------------------------------
+
+class TestApprovalClarificationIntent(unittest.TestCase):
+    """classify_text must return 'approval_clarification' for clarification phrases."""
+
+    def _intent(self, text):
+        from domain.intent import classify_text
+        return classify_text(text)
+
+    def test_freight_accepted_positive(self):
+        self.assertEqual(self._intent("freight accepted"), "approval_clarification")
+
+    def test_freight_agreed_positive(self):
+        self.assertEqual(self._intent("freight agreed"), "approval_clarification")
+
+    def test_freight_confirmed_positive(self):
+        self.assertEqual(self._intent("freight confirmed"), "approval_clarification")
+
+    def test_ok_with_freight_positive(self):
+        self.assertEqual(self._intent("ok with freight"), "approval_clarification")
+
+    def test_accepted_exact_positive(self):
+        self.assertEqual(self._intent("accepted"), "approval_clarification")
+
+    def test_agreed_exact_positive(self):
+        self.assertEqual(self._intent("agreed"), "approval_clarification")
+
+    def test_freight_not_accepted_negative(self):
+        self.assertEqual(self._intent("freight not accepted"), "approval_clarification")
+
+    def test_not_accepted_negative(self):
+        self.assertEqual(self._intent("not accepted"), "approval_clarification")
+
+    def test_not_agreed_negative(self):
+        self.assertEqual(self._intent("not agreed"), "approval_clarification")
+
+    def test_reject_freight_negative(self):
+        self.assertEqual(self._intent("reject freight"), "approval_clarification")
+
+    def test_remove_freight_negative(self):
+        self.assertEqual(self._intent("remove freight"), "approval_clarification")
+
+    def test_compliance_question_not_stolen(self):
+        """'approved by MARPOL' must NOT route to approval_clarification."""
+        result = self._intent("is this approved by MARPOL?")
+        self.assertNotEqual(result, "approval_clarification")
+
+    def test_can_i_approve_still_routes_to_approval(self):
+        """The original approval trigger must still work (not intercepted by clarification)."""
+        self.assertEqual(self._intent("can I approve this?"), "approval")
+
+
+# ---------------------------------------------------------------------------
+# Approval clarification handler
+# ---------------------------------------------------------------------------
+
+class TestApprovalClarificationHandler(unittest.TestCase):
+    """_handle_approval_clarification must resolve open freight queries."""
+
+    def _state_with_freight_query(self):
+        """State as if 'can I approve this?' returned QUERY for added freight."""
+        return {
+            "user_id": "",
+            "sessions": [],
+            "documents": [],
+            "active_session_id": None,
+            "pending_invoice": None,
+            "last_context": {"type": "approval_query", "open_issue": "freight charge"},
+        }
+
+    def test_freight_accepted_returns_approve(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("freight accepted", self._state_with_freight_query())
+        self.assertIn("APPROVE", r)
+        self.assertNotIn("HOLD", r)
+
+    def test_freight_agreed_returns_approve(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("freight agreed", self._state_with_freight_query())
+        self.assertIn("APPROVE", r)
+
+    def test_accepted_exact_returns_approve(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("accepted", self._state_with_freight_query())
+        self.assertIn("APPROVE", r)
+
+    def test_agreed_exact_returns_approve(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("agreed", self._state_with_freight_query())
+        self.assertIn("APPROVE", r)
+
+    def test_approve_risk_is_low(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("freight accepted", self._state_with_freight_query())
+        self.assertIn("Low", r)
+
+    def test_freight_not_accepted_returns_hold(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("freight not accepted", self._state_with_freight_query())
+        self.assertIn("HOLD", r)
+        self.assertNotIn("APPROVE", r)
+
+    def test_not_accepted_returns_hold(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("not accepted", self._state_with_freight_query())
+        self.assertIn("HOLD", r)
+
+    def test_not_agreed_returns_hold(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("not agreed", self._state_with_freight_query())
+        self.assertIn("HOLD", r)
+
+    def test_hold_risk_is_medium(self):
+        from whatsapp_app import _handle_approval_clarification
+        r = _handle_approval_clarification("not accepted", self._state_with_freight_query())
+        self.assertIn("Medium", r)
+
+    def test_no_approval_query_context_returns_no_active_query(self):
+        from whatsapp_app import _handle_approval_clarification
+        state = {
+            "user_id": "",
+            "last_context": {"type": "market_check"},
+        }
+        r = _handle_approval_clarification("accepted", state)
+        self.assertIn("NO ACTIVE APPROVAL QUERY", r)
+        self.assertNotIn("APPROVE", r)
+
+    def test_no_context_at_all_returns_no_active_query(self):
+        from whatsapp_app import _handle_approval_clarification
+        state = {"user_id": "", "last_context": {}}
+        r = _handle_approval_clarification("agreed", state)
+        self.assertIn("NO ACTIVE APPROVAL QUERY", r)
+
+    def test_positive_clears_context(self):
+        from whatsapp_app import _handle_approval_clarification
+        state = self._state_with_freight_query()
+        _handle_approval_clarification("freight accepted", state)
+        self.assertIsNone(state.get("last_context"))
+
+    def test_negative_clears_context(self):
+        from whatsapp_app import _handle_approval_clarification
+        state = self._state_with_freight_query()
+        _handle_approval_clarification("not accepted", state)
+        self.assertIsNone(state.get("last_context"))
+
+
+# ---------------------------------------------------------------------------
+# End-to-end: QUERY → clarification → APPROVE/HOLD
+# ---------------------------------------------------------------------------
+
+class TestApprovalClarificationEndToEnd(unittest.TestCase):
+    """Full flow: freight comparison → 'can I approve?' → QUERY → clarification → APPROVE/HOLD."""
+
+    def _freight_state(self):
+        quote = _q(total=1000.0)
+        invoice = _inv(
+            total=1150.0,
+            items=[
+                {"description": "Pump seal kit", "quantity": 1, "unit_rate": 500.0, "line_total": 500.0},
+                {"description": "Labour — engine service", "quantity": 5, "unit_rate": 100.0, "line_total": 500.0},
+                {"description": "Freight", "quantity": 1, "unit_rate": 150.0, "line_total": 150.0},
+            ],
+        )
+        return _state_with_comparison(quote, invoice)
+
+    def _run(self, message, state):
+        from whatsapp_app import _handle_text_message
+        result, new_state = _handle_text_message(message, state, "whatsapp:+44123456789")
+        return result, new_state
+
+    def test_step1_can_i_approve_returns_query(self):
+        state = self._freight_state()
+        r, _ = self._run("can I approve this?", state)
+        self.assertIn("QUERY", r)
+
+    def test_step1_sets_approval_query_context(self):
+        state = self._freight_state()
+        _, new_state = self._run("can I approve this?", state)
+        self.assertEqual(new_state.get("last_context", {}).get("type"), "approval_query")
+
+    def test_step2_freight_accepted_returns_approve(self):
+        state = self._freight_state()
+        _, state = self._run("can I approve this?", state)
+        r, _ = self._run("freight accepted", state)
+        self.assertIn("APPROVE", r)
+        self.assertIn("Low", r)
+        self.assertNotIn("HOLD", r)
+
+    def test_step2_freight_agreed_returns_approve(self):
+        state = self._freight_state()
+        _, state = self._run("can I approve this?", state)
+        r, _ = self._run("freight agreed", state)
+        self.assertIn("APPROVE", r)
+
+    def test_step2_freight_not_accepted_returns_hold(self):
+        state = self._freight_state()
+        _, state = self._run("can I approve this?", state)
+        r, _ = self._run("freight not accepted", state)
+        self.assertIn("HOLD", r)
+        self.assertIn("Medium", r)
+
+    def test_step2_not_accepted_returns_hold(self):
+        state = self._freight_state()
+        _, state = self._run("can I approve this?", state)
+        r, _ = self._run("not accepted", state)
+        self.assertIn("HOLD", r)
+
+    def test_accepted_with_no_context_not_document_not_understood(self):
+        """'accepted' alone without approval context must not fall through to DOCUMENT NOT UNDERSTOOD."""
+        r, _ = self._run("accepted", _state_empty())
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+        self.assertIn("NO ACTIVE APPROVAL QUERY", r)
+
+    def test_approval_query_first_still_returns_query(self):
+        """Regression: 'can I approve this?' after freight invoice still returns QUERY first."""
+        state = self._freight_state()
+        r, _ = self._run("can I approve this?", state)
+        self.assertIn("QUERY", r)
+        self.assertNotIn("APPROVE", r.split("QUERY")[0])
+
+
 if __name__ == "__main__":
     unittest.main()
