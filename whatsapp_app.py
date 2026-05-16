@@ -130,6 +130,8 @@ from domain.inventory_store import (
     find_equipment_by_query,
     clear_equipment,
     link_stock_to_equipment,
+    normalise_system_alias,
+    infer_stock_equipment_link,
 )
 from services.inventory_service import (
     classify_inventory_text,
@@ -3397,58 +3399,44 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
             ],
         ), state
 
-    lines = ["DECISION:", "STOCK FOUND", ""]
     first = results[0]
     desc = first.get("description") or first.get("part_number") or subject
-    pn   = first.get("part_number") or subject
+    pn   = first.get("part_number") or ""
     qty  = _fmt_qty(first.get("quantity_onboard"))
     loc  = first.get("storage_location") or ""
     make = first.get("make") or ""
     linked = first.get("linked_equipment") or ""
 
+    # DECISION
+    lines: list = []
+    if len(results) == 1 or (not fuzzy_only and is_pn):
+        lines += ["DECISION:", f"{qty} ONBOARD" if qty else "ONBOARD", ""]
+    else:
+        lines += ["DECISION:", f"{len(results)} MATCH(ES) FOUND", ""]
+
+    # WHY — content depends on what the user asked
     if not fuzzy_only and is_pn and query_type != "general":
-        # Specific part-number query → ANSWER + DETAILS
+        desc_note = f" ({desc})" if desc and desc.lower() != pn.lower() else ""
         if query_type == "quantity":
-            lines += ["ANSWER:", f"You have {qty} × {pn} onboard.", ""]
-            lines += ["DETAILS:"]
-            lines.append(f"• Item: {desc}")
-            if loc:
-                lines.append(f"• Location: {loc}")
-            if linked:
-                lines.append(f"• Section/system: {linked}")
-
+            why = f"You have {qty} × {pn}{desc_note} onboard."
         elif query_type == "location":
-            loc_msg = loc or "location not recorded"
-            lines += ["ANSWER:", f"{pn} is stored in {loc_msg}.", ""]
-            lines += ["DETAILS:"]
-            lines.append(f"• Item: {desc}")
-            if qty:
-                lines.append(f"• Quantity onboard: {qty}")
-            if linked:
-                lines.append(f"• Section/system: {linked}")
-
+            why = f"{pn}{desc_note} is stored in {loc or 'location not recorded'}."
         elif query_type == "equipment":
             system = make or linked or "unknown system"
-            lines += ["ANSWER:", f"{pn} is a spare for {system}.", ""]
-            lines += ["DETAILS:"]
-            lines.append(f"• Item: {desc}")
-            if qty:
-                lines.append(f"• Quantity onboard: {qty}")
-            if loc:
-                lines.append(f"• Location: {loc}")
-            if linked:
-                lines.append(f"• Section/system: {linked}")
-            if make:
-                lines.append(f"• Manufacturer: {make}")
-
+            why = f"{pn}{desc_note} is a spare for {system}."
+        else:
+            why = f"{pn}{desc_note} is held onboard."
+    elif fuzzy_only:
+        why = f"Found {len(results)} possible match(es) for '{subject}'."
+    elif len(results) > 1:
+        why = f"Found {len(results)} matches for '{subject}'."
     else:
-        # General / description query or fuzzy fallback → list format
-        why = (
-            f"Found {len(results)} possible match(es) for '{subject}'."
-            if fuzzy_only else
-            f"{desc} is held onboard."
-        )
-        lines += ["WHY:", why, "", "STOCK:"]
+        why = f"{desc} is held onboard."
+    lines += ["WHY:", why, ""]
+
+    # STOCK list (for multi-result or fuzzy fallback)
+    if len(results) > 1 or fuzzy_only:
+        lines += ["STOCK:"]
         if fuzzy_only:
             lines.append("Possible matches:")
         for item in results[:8]:
@@ -3461,8 +3449,20 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
             loc_s = f" — {l}" if l else ""
             pn_s  = f" ({p})" if p and p != d else ""
             lines.append(f"• {d}{pn_s}{qty_s}{loc_s}")
+        lines.append("")
 
-    lines += ["", "ACTIONS:", "• Check stock location before ordering"]
+    # EQUIPMENT — inferred or explicit link to vessel equipment record
+    all_equip = get_all_equipment(user_id)
+    link_info = infer_stock_equipment_link(first, all_equip)
+    if link_info["confidence"] in ("exact", "likely") and link_info["label"]:
+        lines += ["EQUIPMENT:", link_info["label"], ""]
+
+    # LOCATION
+    if loc:
+        lines += ["LOCATION:", loc, ""]
+
+    # ACTIONS
+    lines += ["ACTIONS:", "• Check stock location before ordering"]
     if query_type == "general":
         lines.append('• Ask "show spares for <system>" if you need related parts')
 
@@ -3492,7 +3492,14 @@ def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
         "whatsapp_app: spares_query inventory_query=True search_term=%r query=%r",
         system, query,
     )
-    results = find_stock_for_system(user_id, system)
+    search_terms = normalise_system_alias(system)
+    results_map: dict = {}
+    for term in search_terms:
+        for item in find_stock_for_system(user_id, term):
+            key = (item.get("part_number") or "", item.get("description") or "")
+            if key not in results_map:
+                results_map[key] = item
+    results = list(results_map.values())
     if not results:
         return _make_response(
             decision="NO STOCK FOUND",
