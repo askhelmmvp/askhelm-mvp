@@ -530,24 +530,29 @@ def infer_stock_equipment_link(stock_item: dict, equipment_records: list) -> dic
     item_desc = (stock_item.get("description") or "").lower()
 
     # Phase 1 – linked_equipment field matches equipment_name OR system
+    # Collect ALL matching records (e.g. both Main Engine PS and SB)
     if item_linked:
+        phase1: list = []
         for eq in equipment_records:
-            candidates = filter(None, [
+            candidates = [
                 (eq.get("equipment_name") or "").lower().strip(),
                 (eq.get("system") or "").lower().strip(),
-            ])
-            for eq_name in candidates:
+            ]
+            for eq_name in filter(None, candidates):
                 if eq_name and (
                     item_linked == eq_name
                     or item_linked in eq_name
                     or eq_name in item_linked
                 ):
-                    label = _eq_display(eq)
-                    return {
-                        "confidence": "exact",
-                        "equipment": [eq],
-                        "label": f"Linked to {label}" if label else "",
-                    }
+                    phase1.append(eq)
+                    break  # don't add same record twice for name vs system
+        if phase1:
+            label = _eq_display(phase1[0])
+            return {
+                "confidence": "exact",
+                "equipment": phase1[:4],
+                "label": f"Linked to {label}" if label else "",
+            }
 
     # Phase 2 – manufacturer (make) match
     if item_make and len(item_make) > 2:

@@ -3301,7 +3301,22 @@ _ITEM_SYNONYMS: dict = {
     "bearings": ["bearing"],
     "injector": ["injector"],
     "injectors": ["injector"],
+    # Compound forms — matched as bigrams in _parse_item_system_query so the
+    # specific modifier (oil/fuel/air) is preserved for stricter filtering.
+    "oil filter":  ["oil filter", "oil filter paper", "oil filter element"],
+    "oil filters": ["oil filter", "oil filter paper", "oil filter element"],
 }
+
+# For specific compound item queries (e.g. "oil filter"), descriptions that contain
+# these terms are excluded from both exact and likely results.
+_SPECIFIC_ITEM_EXCLUSIONS: dict = {
+    "oil filter":         frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter"}),
+    "oil filter paper":   frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter"}),
+    "oil filter element": frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter"}),
+}
+
+# Item terms considered oil-filter-specific (also triggers valve exclusion).
+_OIL_FILTER_TERMS: frozenset = frozenset({"oil filter", "oil filter paper", "oil filter element"})
 
 # System/section names recognisable in natural-language queries.
 # Sorted longest-first so "main engine" is matched before "engine".
@@ -3330,6 +3345,10 @@ def _parse_item_system_query(query: str):
 
     Returns (item_terms, system_term) where item_terms is a list of search strings
     (synonyms included) and system_term is the matched system name, or (None, None).
+
+    Searches for the item noun phrase in the portion of the query BEFORE the system
+    term, and checks bigrams first so "oil filters" → ["oil filter", ...] rather
+    than the generic ["filter"].
     """
     t = query.lower()
     system = None
@@ -3339,13 +3358,57 @@ def _parse_item_system_query(query: str):
             break
     if system is None:
         return None, None
-    item_terms = None
-    for word in t.split():
-        w = word.rstrip("?!.,")
+
+    # Restrict item search to the text before the system term so "main engines"
+    # is not accidentally tokenised as the item.
+    sys_pos = t.find(system)
+    pre_system = t[:sys_pos].strip()
+    pre_words = [w.rstrip("?!.,;") for w in pre_system.split() if w.rstrip("?!.,;")]
+
+    # Check bigrams first (e.g. "oil filters" → compound synonyms)
+    for i in range(len(pre_words) - 1):
+        bigram = f"{pre_words[i]} {pre_words[i + 1]}"
+        if bigram in _ITEM_SYNONYMS:
+            return _ITEM_SYNONYMS[bigram], system
+
+    # Fall back to single-word match
+    for w in pre_words:
         if w in _ITEM_SYNONYMS:
-            item_terms = _ITEM_SYNONYMS[w]
-            break
-    return item_terms, system
+            return _ITEM_SYNONYMS[w], system
+
+    return None, None
+
+
+def _item_excluded(desc: str, item_terms: list) -> bool:
+    """True when desc matches an exclusion pattern for the given specific item terms."""
+    desc_l = desc.lower()
+    for term in item_terms:
+        excl = _SPECIFIC_ITEM_EXCLUSIONS.get(term, frozenset())
+        if any(e in desc_l for e in excl):
+            return True
+        if term in _OIL_FILTER_TERMS and re.search(r'\bvalve\b', desc_l):
+            return True
+    return False
+
+
+def _item_is_likely(item: dict, item_terms: list, system_term: str) -> bool:
+    """
+    True when item has a generic description but strong system/location context
+    suggesting it may be related to the specific item type. Only applies when
+    item_terms includes multi-word terms (e.g. "oil filter").
+    """
+    if not any(len(t.split()) > 1 for t in item_terms):
+        return False
+    desc = (item.get("description") or "").lower()
+    loc = (item.get("storage_location") or "").lower()
+    linked = (item.get("linked_equipment") or "").lower()
+    # Must contain a component word (e.g. "filter" from "oil filter")
+    component_words = {w for t in item_terms for w in t.split()}
+    if not any(cw in desc for cw in component_words):
+        return False
+    # Must have system context in location or linked_equipment
+    sys_parts = system_term.lower().split()
+    return any(sp in loc for sp in sys_parts) or any(sp in linked for sp in sys_parts)
 
 
 def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
@@ -3373,20 +3436,42 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     )
 
     # Item+system combined search: "how many liners for main engine?"
+    item_terms: list | None = None
+    system_term: str | None = None
+    _likely_start_idx: int | None = None
     if not results:
         item_terms, system_term = _parse_item_system_query(query)
         if item_terms and system_term:
             system_results = find_stock_for_system(user_id, system_term)
-            results = [
-                item for item in system_results
-                if any(term in (item.get("description") or "").lower() for term in item_terms)
-            ]
+            is_specific = any(len(t.split()) > 1 for t in item_terms)
+            if is_specific:
+                # Specific compound item query: separate exact/likely, apply exclusions
+                exact_idx: set = set()
+                exact_results: list = []
+                for i, itm in enumerate(system_results):
+                    d = (itm.get("description") or "").lower()
+                    if any(term in d for term in item_terms) and not _item_excluded(d, item_terms):
+                        exact_idx.add(i)
+                        exact_results.append(itm)
+                likely_results = [
+                    itm for i, itm in enumerate(system_results)
+                    if i not in exact_idx
+                    and _item_is_likely(itm, item_terms, system_term)
+                    and not _item_excluded((itm.get("description") or ""), item_terms)
+                ]
+                results = exact_results + likely_results
+                _likely_start_idx = len(exact_results)
+            else:
+                results = [
+                    itm for itm in system_results
+                    if any(term in (itm.get("description") or "").lower() for term in item_terms)
+                ]
             if not results:
                 results = system_results  # fallback: all items for that system
             logger.info(
                 "whatsapp_app: stock_query item_system_fallback user=%s "
-                "item_terms=%r system=%r results=%d",
-                user_id, item_terms, system_term, len(results),
+                "item_terms=%r system=%r results=%d likely_start=%s",
+                user_id, item_terms, system_term, len(results), _likely_start_idx,
             )
 
     if not results:
@@ -3407,23 +3492,88 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     make = first.get("make") or ""
     linked = first.get("linked_equipment") or ""
 
+    # --- Equipment-link response: "which equipment does X belong to?" ---
+    if query_type == "equipment":
+        all_equip = get_all_equipment(user_id)
+        link_info = infer_stock_equipment_link(first, all_equip)
+        lines: list = []
+        # DECISION
+        if link_info["confidence"] in ("exact", "likely") and link_info["equipment"]:
+            sys_name = next(
+                (eq.get("system") or eq.get("equipment_name") or "" for eq in link_info["equipment"]),
+                "",
+            )
+            decision = f"LIKELY {sys_name.upper()} SPARE" if sys_name else "EQUIPMENT LINK FOUND"
+        elif make or linked:
+            sys_guess = (linked or make).split()[-1].upper()
+            decision = f"LIKELY {sys_guess} SPARE"
+        else:
+            decision = "EQUIPMENT LINK UNKNOWN"
+        lines += ["DECISION:", decision, ""]
+        # WHY
+        desc_note = f" ({desc})" if desc and desc.lower() != pn.lower() else ""
+        context_note = (
+            " and is linked to this equipment." if link_info["confidence"] == "exact"
+            else " and matches the equipment context." if link_info["confidence"] == "likely"
+            else f" (listed as {make} part)." if make else "."
+        )
+        lines += ["WHY:", f"{pn or desc}{desc_note} is held onboard{context_note}", ""]
+        # EQUIPMENT
+        if link_info["equipment"]:
+            lines += ["EQUIPMENT:"]
+            pfx = "Likely linked to " if link_info["confidence"] == "likely" else ""
+            for eq in link_info["equipment"][:4]:
+                eq_name = eq.get("equipment_name") or eq.get("system") or ""
+                eq_make = eq.get("make") or ""
+                eq_model = eq.get("model") or ""
+                detail = f" — {' '.join(p for p in [eq_make, eq_model] if p)}" if (eq_make or eq_model) else ""
+                lines.append(f"• {pfx}{eq_name}{detail}")
+            lines.append("")
+        elif make or linked:
+            eq_label = make or linked
+            lines += ["EQUIPMENT:", f"No matched equipment record — item is listed as '{eq_label}'", ""]
+        # STOCK
+        lines += ["STOCK:"]
+        if qty:
+            lines.append(f"• Qty {qty} onboard")
+        if loc:
+            lines.append(f"• Location: {loc}")
+        lines.append("")
+        lines += ["ACTIONS:", "• Check stock location before ordering"]
+        return "\n".join(lines).strip(), state
+
+    # Determine if this is a specific compound item query (e.g. "oil filters for main engine")
+    _item_compound = (
+        item_terms is not None and system_term is not None
+        and any(
+            len(t.split()) > 1 and t in query.lower()[:query.lower().find(system_term)]
+            for t in item_terms
+        )
+    )
+
     # DECISION
     lines: list = []
-    if len(results) == 1 or (not fuzzy_only and is_pn):
+    if _item_compound:
+        item_label = item_terms[0].upper()
+        lines += ["DECISION:", f"{item_label} STOCK FOUND", ""]
+    elif len(results) == 1 or (not fuzzy_only and is_pn):
         lines += ["DECISION:", f"{qty} ONBOARD" if qty else "ONBOARD", ""]
     else:
         lines += ["DECISION:", f"{len(results)} MATCH(ES) FOUND", ""]
 
     # WHY — content depends on what the user asked
-    if not fuzzy_only and is_pn and query_type != "general":
+    if _item_compound and system_term:
+        item_display = item_terms[0]
+        why = (
+            f"AskHelm found {item_display} and likely {item_display}-related stock "
+            f"linked to the {system_term} system."
+        )
+    elif not fuzzy_only and is_pn and query_type != "general":
         desc_note = f" ({desc})" if desc and desc.lower() != pn.lower() else ""
         if query_type == "quantity":
             why = f"You have {qty} × {pn}{desc_note} onboard."
         elif query_type == "location":
             why = f"{pn}{desc_note} is stored in {loc or 'location not recorded'}."
-        elif query_type == "equipment":
-            system = make or linked or "unknown system"
-            why = f"{pn}{desc_note} is a spare for {system}."
         else:
             why = f"{pn}{desc_note} is held onboard."
     elif fuzzy_only:
@@ -3434,12 +3584,12 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
         why = f"{desc} is held onboard."
     lines += ["WHY:", why, ""]
 
-    # STOCK list (for multi-result or fuzzy fallback)
-    if len(results) > 1 or fuzzy_only:
+    # STOCK list (for multi-result, fuzzy fallback, or compound item query)
+    if len(results) > 1 or fuzzy_only or _item_compound:
         lines += ["STOCK:"]
         if fuzzy_only:
             lines.append("Possible matches:")
-        for item in results[:8]:
+        for idx, item in enumerate(results[:8]):
             d = item.get("description") or item.get("part_number") or "Unknown"
             q = item.get("quantity_onboard")
             u = item.get("unit") or ""
@@ -3448,7 +3598,9 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
             qty_s = f" — {_fmt_qty(q)}{(' ' + u).rstrip()}" if q is not None else ""
             loc_s = f" — {l}" if l else ""
             pn_s  = f" ({p})" if p and p != d else ""
-            lines.append(f"• {d}{pn_s}{qty_s}{loc_s}")
+            is_likely = _likely_start_idx is not None and idx >= _likely_start_idx
+            likely_sfx = " — likely related; confirm before relying" if is_likely else ""
+            lines.append(f"• {d}{pn_s}{qty_s}{loc_s}{likely_sfx}")
         lines.append("")
 
     # EQUIPMENT — inferred or explicit link to vessel equipment record
