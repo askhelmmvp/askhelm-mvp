@@ -4910,7 +4910,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             decision="ROLE NOT RECOGNISED",
             why="I could not identify a valid role in that message.",
             actions=[
-                "Supported roles: Engineer, Deck Officer, Captain, Purser",
+                "Supported roles: Engineer, Deck Officer, Captain, Purser, Chef",
                 "Example: set my role to captain",
             ],
         ), state
@@ -4924,7 +4924,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
                 why=f"AskHelm is configured to respond as {_display}.",
                 actions=[
                     'Say "set my role to [role]" to change it',
-                    "Supported roles: Engineer, Deck Officer, Captain, Purser",
+                    "Supported roles: Engineer, Deck Officer, Captain, Purser, Chef",
                 ],
             ), state
         return _make_response(
@@ -4932,7 +4932,7 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
             why="No role has been configured for your account.",
             actions=[
                 "Example: set my role to captain",
-                "Supported roles: Engineer, Deck Officer, Captain, Purser",
+                "Supported roles: Engineer, Deck Officer, Captain, Purser, Chef",
             ],
         ), state
 
