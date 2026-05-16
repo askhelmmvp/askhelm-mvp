@@ -431,6 +431,23 @@ _ROLE_APPROVAL_ACTIONS: dict = {
             "Confirm operational readiness is not affected by the delay",
         ],
     },
+    "chef": {
+        "APPROVE": [
+            "Approve order if delivery timing suits the menu plan",
+            "Confirm product form and freshness on receipt",
+            "Note any substitutions before accepting delivery",
+        ],
+        "HOLD": [
+            "Do not accept — product specification, quantity or supplier does not match the galley requirement",
+            "Request a corrected quote or delivery note with the correct product form",
+            "Check whether the discrepancy affects menu planning or guest service",
+        ],
+        "QUERY": [
+            "Clarify product form, cut, grade or origin before approving",
+            "Confirm fresh vs frozen and whether the specification matches the menu requirement",
+            "Use the cheaper option only where the product form and quality are equivalent",
+        ],
+    },
 }
 
 # Brief role emphasis notes prepended to LLM queries for compliance and market-check.
@@ -439,6 +456,7 @@ _ROLE_COMPLIANCE_HINT = {
     "captain": "USER ROLE: Captain. Emphasise risk, compliance exposure, decision confidence and whether to proceed or escalate.",
     "purser": "USER ROLE: Purser. Emphasise documentation requirements, cost implications and record-keeping obligations.",
     "deck_officer": "USER ROLE: Deck Officer. Emphasise safety requirements, watchkeeping obligations, deck logs and operational checklists.",
+    "chef": "USER ROLE: Chef. If compliance affects food safety, hygiene, provisioning or storage, emphasise practical galley impact.",
 }
 
 _ROLE_MARKET_HINT = {
@@ -446,6 +464,7 @@ _ROLE_MARKET_HINT = {
     "captain": "USER ROLE: Captain. Emphasise overall risk, approval confidence and whether to proceed with the order.",
     "purser": "USER ROLE: Purser. Emphasise total cost, VAT treatment, payment terms and whether the price falls within budget.",
     "deck_officer": "USER ROLE: Deck Officer. Emphasise operational impact, delivery timeline and whether the item affects deck readiness.",
+    "chef": "USER ROLE: Chef. Emphasise product form (fillet/loin/side/whole/fresh/frozen), cut, grade, origin, €/kg and whether the price is justified by quality and galley requirement.",
 }
 
 
