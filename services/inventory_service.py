@@ -47,6 +47,21 @@ _STOCK_BODY_KW = frozenset([
     "storage location", "spare", "consumable",
 ])
 
+# Phrases that are unambiguous commercial-quote signals. When any of these appears
+# in a PDF, the document is a supplier quotation — not an inventory list — even if
+# it also contains item/quantity/part-number columns. One match is enough.
+_QUOTE_STRONG_INDICATORS = frozenset([
+    "quotation",             # document header says QUOTATION
+    "quote no",              # quote number field (also catches "quote no.")
+    "quote number",          # long-form variant
+    "herewith we offer",     # classic Dutch/European supplier phrasing
+    "we hereby offer",       # alternative offer phrasing
+    "our quotation",
+    "total including vat",   # commercial invoice/quote total line
+    "please find our quotation",
+    "subject: quotation",
+])
+
 
 def classify_inventory_text(text: str) -> Optional[str]:
     """
@@ -60,6 +75,13 @@ def classify_inventory_text(text: str) -> Optional[str]:
         return None
 
     t = text.lower()
+
+    # Strong quote/commercial indicators take priority over any body-keyword match.
+    # Supplier quotations contain item tables (part no./qty/unit price) that would
+    # otherwise trigger the stock-body keyword check — guard against that here.
+    if any(kw in t for kw in _QUOTE_STRONG_INDICATORS):
+        logger.debug("inventory_classify: commercial quote indicator found — not classifying as inventory")
+        return None
 
     # Heading-level signals — one match is enough.
     for kw in _STOCK_HEADING_KW:
