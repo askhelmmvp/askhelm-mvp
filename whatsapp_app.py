@@ -3310,9 +3310,12 @@ _ITEM_SYNONYMS: dict = {
 # For specific compound item queries (e.g. "oil filter"), descriptions that contain
 # these terms are excluded from both exact and likely results.
 _SPECIFIC_ITEM_EXCLUSIONS: dict = {
-    "oil filter":         frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter"}),
-    "oil filter paper":   frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter"}),
-    "oil filter element": frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter"}),
+    "oil filter":         frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter",
+                                     "pump", "gear pump", "oil pump", "spray nozzle", "nozzle", "spray"}),
+    "oil filter paper":   frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter",
+                                     "pump", "gear pump", "oil pump", "spray nozzle", "nozzle", "spray"}),
+    "oil filter element": frozenset({"air filter", "fuel filter", "racor", "removal tool", "pre-filter", "pre filter",
+                                     "pump", "gear pump", "oil pump", "spray nozzle", "nozzle", "spray"}),
 }
 
 # Item terms considered oil-filter-specific (also triggers valve exclusion).
@@ -3387,6 +3390,10 @@ def _item_excluded(desc: str, item_terms: list) -> bool:
         if any(e in desc_l for e in excl):
             return True
         if term in _OIL_FILTER_TERMS and re.search(r'\bvalve\b', desc_l):
+            return True
+        if term in _OIL_FILTER_TERMS and re.search(r'\bpump\b', desc_l):
+            return True
+        if term in _OIL_FILTER_TERMS and re.search(r'\bnozzle\b', desc_l):
             return True
     return False
 
@@ -3504,23 +3511,35 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
                 "",
             )
             decision = f"LIKELY {sys_name.upper()} SPARE" if sys_name else "EQUIPMENT LINK FOUND"
-        elif make or linked:
-            sys_guess = (linked or make).split()[-1].upper()
-            decision = f"LIKELY {sys_guess} SPARE"
+        elif linked:
+            # Parse a clean system name from linked_equipment (e.g. "0210 Main Engines" → "MAIN ENGINES")
+            linked_l = linked.lower()
+            sys_guess_raw = next(
+                (sk for sk in _SYSTEM_SEARCH_TERMS if sk in linked_l),
+                linked,  # fallback to full value
+            )
+            decision = f"LIKELY {sys_guess_raw.upper()} SPARE"
+        elif make:
+            decision = f"LIKELY {make.upper()} SPARE"
         else:
             decision = "EQUIPMENT LINK UNKNOWN"
         lines += ["DECISION:", decision, ""]
         # WHY
         desc_note = f" ({desc})" if desc and desc.lower() != pn.lower() else ""
-        context_note = (
-            " and is linked to this equipment." if link_info["confidence"] == "exact"
-            else " and matches the equipment context." if link_info["confidence"] == "likely"
-            else f" (listed as {make} part)." if make else "."
-        )
+        if link_info["confidence"] == "exact":
+            context_note = " and is linked to this equipment."
+        elif link_info["confidence"] == "likely":
+            context_note = " and matches the equipment context."
+        elif linked:
+            context_note = f" and is linked to system {linked}."
+        elif make:
+            context_note = f" (listed as {make} part)."
+        else:
+            context_note = "."
         lines += ["WHY:", f"{pn or desc}{desc_note} is held onboard{context_note}", ""]
-        # EQUIPMENT
+        # EQUIPMENT / SYSTEM
         if link_info["equipment"]:
-            lines += ["EQUIPMENT:"]
+            lines += ["EQUIPMENT / SYSTEM:"]
             pfx = "Likely linked to " if link_info["confidence"] == "likely" else ""
             for eq in link_info["equipment"][:4]:
                 eq_name = eq.get("equipment_name") or eq.get("system") or ""
@@ -3529,9 +3548,31 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
                 detail = f" — {' '.join(p for p in [eq_make, eq_model] if p)}" if (eq_make or eq_model) else ""
                 lines.append(f"• {pfx}{eq_name}{detail}")
             lines.append("")
-        elif make or linked:
-            eq_label = make or linked
-            lines += ["EQUIPMENT:", f"No matched equipment record — item is listed as '{eq_label}'", ""]
+        elif linked:
+            lines += ["EQUIPMENT / SYSTEM:", f"• {linked}"]
+            # Try to enrich with equipment records by expanding the linked_equipment alias
+            alias_terms = normalise_system_alias(linked)
+            extra_equip: list = []
+            seen_eq_ids: set = set()
+            for term in alias_terms:
+                for eq in all_equip:
+                    eq_id = eq.get("id") or eq.get("equipment_name") or eq.get("system") or ""
+                    if eq_id in seen_eq_ids:
+                        continue
+                    eq_sys = (eq.get("system") or "").lower()
+                    eq_name_l = (eq.get("equipment_name") or "").lower()
+                    if term in eq_sys or term in eq_name_l or eq_sys in term or eq_name_l in term:
+                        extra_equip.append(eq)
+                        seen_eq_ids.add(eq_id)
+            for eq in extra_equip[:3]:
+                eq_name = eq.get("equipment_name") or eq.get("system") or ""
+                eq_make = eq.get("make") or ""
+                eq_model = eq.get("model") or ""
+                detail = f" — {' '.join(p for p in [eq_make, eq_model] if p)}" if (eq_make or eq_model) else ""
+                lines.append(f"• Likely linked to {eq_name}{detail}")
+            lines.append("")
+        elif make:
+            lines += ["EQUIPMENT / SYSTEM:", f"• Manufacturer: {make}", ""]
         # STOCK
         lines += ["STOCK:"]
         if qty:

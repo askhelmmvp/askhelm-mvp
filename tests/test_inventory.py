@@ -770,10 +770,10 @@ class TestStockResponseFormat(unittest.TestCase):
 
     # --- Equipment/system response ---
 
-    def test_equipment_query_shows_manufacturer(self):
+    def test_equipment_query_shows_system_context(self):
         r = self._stock("which equipment does this belong to? XP52718300060")
         self.assertIn("WHY:", r)
-        self.assertIn("MTU", r)
+        self.assertIn("0290 Generators", r)
 
     # --- Manufacturer list still returns multiple records ---
 
@@ -1507,7 +1507,7 @@ class TestEquipmentLinkResponse(unittest.TestCase):
 
     def test_equipment_link_has_equipment_section(self):
         r = self._stock("which equipment does XP52718300060 belong to?")
-        self.assertIn("EQUIPMENT:", r)
+        self.assertIn("EQUIPMENT / SYSTEM:", r)
 
     def test_equipment_link_decision_mentions_main_engine(self):
         r = self._stock("which equipment does XP52718300060 belong to?")
@@ -1589,6 +1589,33 @@ class TestOilFilterItemSystemQuery(unittest.TestCase):
             "part_number": "VLV-001",
             "quantity_onboard": 1.0,
             "storage_location": "Engine Room",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — pump
+        {
+            "description": "Gear pump for oil replenish",
+            "part_number": "GRP-001",
+            "quantity_onboard": 1.0,
+            "storage_location": "Engine Room",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — oil pump
+        {
+            "description": "Oil pump",
+            "part_number": "OLP-001",
+            "quantity_onboard": 1.0,
+            "storage_location": "Main Engine Store",
+            "linked_equipment": "Main Engine",
+            "confidence": 0.9,
+        },
+        # Should be excluded — spray nozzle
+        {
+            "description": "Oil spray nozzle",
+            "part_number": "OSN-001",
+            "quantity_onboard": 4.0,
+            "storage_location": "Main Engine Store",
             "linked_equipment": "Main Engine",
             "confidence": 0.9,
         },
@@ -1688,6 +1715,72 @@ class TestOilFilterItemSystemQuery(unittest.TestCase):
         from domain.intent import classify_text
         result = classify_text("is 45 EUR a fair price for an oil filter?")
         self.assertEqual(result, "market_check")
+
+    # New pump/nozzle exclusion tests (ASK-32 Follow-up #2)
+    def test_oil_filter_excludes_gear_pump(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("Gear pump for oil replenish", r)
+
+    def test_oil_filter_excludes_oil_pump(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("Oil pump", r)
+
+    def test_oil_filter_excludes_spray_nozzle(self):
+        r = self._stock("how many oil filters do we have for the main engines?")
+        self.assertNotIn("Oil spray nozzle", r)
+
+    def test_broad_spares_includes_pump_and_nozzle(self):
+        """Pump/nozzle exclusions must not bleed into broad spares queries."""
+        r = self._spares("show main engine spares")
+        self.assertIn("Oil pump", r)
+        self.assertIn("Gear pump for oil replenish", r)
+
+
+class TestEquipmentLinkSystemContext(unittest.TestCase):
+    """ASK-32 Follow-up #2: linked_equipment shown as system context when no record matches."""
+
+    _ITEMS = [
+        {
+            "description": "Oil filter Paper inserts",
+            "part_number": "XP52718300060",
+            "quantity_onboard": 28.0,
+            "storage_location": "LD / Generator Room / Filter Cabinet",
+            "linked_equipment": "0210 Main Engines",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+        # No equipment records — forces confidence="none" path
+        inv.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+
+    def _stock(self, q):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(q, {"user_id": ""})
+        return result
+
+    def test_linked_equipment_shown_not_no_match_message(self):
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("0210 Main Engines", r)
+        self.assertNotIn("No matched equipment record", r)
+
+    def test_decision_uses_system_keyword_not_last_word(self):
+        """DECISION should say MAIN ENGINE(S) SPARE, not ENGINES SPARE."""
+        r = self._stock("which equipment does XP52718300060 belong to?")
+        self.assertIn("MAIN ENGINE", r)
+        self.assertNotIn("LIKELY ENGINES SPARE", r)
 
 
 if __name__ == "__main__":
