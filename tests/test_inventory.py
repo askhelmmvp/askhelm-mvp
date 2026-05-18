@@ -2103,6 +2103,104 @@ class TestDeckStockQueries(unittest.TestCase):
         r = self._spares("show main engine spares")
         self.assertIn("Oil filter Paper inserts", r)
 
+    # Issue 2: "where are" routing
+    def test_where_are_ratchet_straps_routes_to_stock_query(self):
+        self.assertEqual(self._intent("where are the ratchet straps?"), "stock_query")
+
+    def test_where_do_we_keep_routes_to_stock_query(self):
+        self.assertEqual(self._intent("where do we keep the wetsuits?"), "stock_query")
+
+    def test_where_are_allowed_stays_compliance(self):
+        self.assertEqual(self._intent("where are we allowed to discharge?"), "compliance_question")
+
+    def test_where_are_ratchet_straps_finds_item(self):
+        r = self._stock("where are the ratchet straps?")
+        self.assertIn("Ratchet Straps", r)
+        self.assertNotIn("NO STOCK FOUND", r)
+
+    # Issue 3: location-focused actions
+    def test_where_query_uses_location_actions(self):
+        r = self._stock("where are the ratchet straps?")
+        self.assertIn("listed location before use", r)
+        self.assertNotIn("before ordering", r)
+
+    def test_where_can_i_find_uses_location_actions(self):
+        r = self._stock("where can I find the wetsuits?")
+        self.assertIn("listed location before use", r)
+
+    # Issue 4: deck items suppress weak equipment links
+    def test_sikaflex_query_has_no_rudder_angle_link(self):
+        r = self._stock("do we have Sikaflex 295 onboard?")
+        self.assertNotIn("Rudder Angle", r)
+        self.assertNotIn("EQUIPMENT:", r)
+
+    def test_deck_item_query_shows_department_not_equipment(self):
+        r = self._stock("do we have Sikaflex 295 onboard?")
+        self.assertIn("DEPARTMENT:", r)
+
+    def test_deck_item_query_shows_category(self):
+        r = self._stock("do we have Sikaflex 295 onboard?")
+        self.assertIn("CATEGORY:", r)
+
+
+class TestDeckMalformedRowFiltering(unittest.TestCase):
+    """ASK-33 follow-up Issue 1: malformed/NaN rows are skipped on import."""
+
+    def _write_deck_csv_with_malformed(self, path):
+        import csv as _csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            w.writerow(["ID", "Title", "Quantity", "Minimum Quantity", "Location",
+                        "Box ID", "Tags", "Category", "Total Value"])
+            # Valid row
+            w.writerow(["1", "Ratchet Straps", "4", "2", "Watersports Locker",
+                        "WS-01", "Watersports", "DECK/Watersports", "180.00"])
+            # Malformed: numeric title (e.g. row number leaked into Title col)
+            w.writerow(["2", "36", "nan", "0", "NaN", "", "", "0", ""])
+            # Malformed: nan title
+            w.writerow(["3", "nan", "2", "1", "Deck Store", "", "", "", ""])
+            # Malformed: empty title
+            w.writerow(["4", "", "1", "1", "Store", "", "", "", ""])
+
+    def test_malformed_rows_skipped(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv_with_malformed(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        stock = result.get("stock", [])
+        descs = [i.get("description", "") for i in stock]
+        self.assertIn("Ratchet Straps", descs, "Valid row should be imported")
+        self.assertNotIn("36", descs, "Numeric-only title should be skipped")
+        self.assertNotIn("nan", descs, "nan title should be skipped")
+        self.assertFalse(any(d == "" for d in descs), "Empty title should be skipped")
+
+    def test_nan_quantity_not_stored(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv_with_malformed(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        stock = result.get("stock", [])
+        for item in stock:
+            qty = item.get("quantity_onboard")
+            if qty is not None:
+                import math
+                self.assertFalse(math.isnan(qty), f"NaN quantity stored for {item.get('description')}")
+
+    def test_fmt_qty_handles_nan(self):
+        from whatsapp_app import _fmt_qty
+        import math
+        self.assertEqual(_fmt_qty(float("nan")), "")
+        self.assertEqual(_fmt_qty(None), "")
+        self.assertEqual(_fmt_qty(4.0), "4")
+
 
 if __name__ == "__main__":
     unittest.main()
