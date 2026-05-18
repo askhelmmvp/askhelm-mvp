@@ -265,7 +265,10 @@ def merge_stock(user_id: str, new_items: list, source_file: str) -> tuple:
                     # Conflicting quantities — lower confidence
                     old["confidence"] = round(max(0.4, old.get("confidence", 0.7) - 0.15), 2)
             for field in ("storage_location", "unit", "linked_equipment",
-                          "make", "model", "supplier", "part_number", "notes"):
+                          "make", "model", "supplier", "part_number", "notes",
+                          "department", "source_type", "min_quantity", "box_id",
+                          "tags", "brand", "colour", "category", "purchase_price",
+                          "total_value"):
                 if item.get(field) and not old.get(field):
                     old[field] = item[field]
             merged += 1
@@ -376,15 +379,22 @@ def find_stock_by_part_number(user_id: str, part_number: str) -> list:
 def find_stock_by_query(user_id: str, query: str) -> list:
     """Fuzzy substring match against description, part_number, linked_equipment."""
     q = query.lower().strip()
+    # Also try the de-pluralised form for natural-language queries ("wetsuits" → "wetsuit")
+    q_depluralised = q[:-1] if q.endswith("s") and len(q) > 3 else q
     results = []
     for item in get_all_stock(user_id):
         desc = (item.get("description") or "").lower()
         pn = (item.get("part_number") or "").lower()
         linked = (item.get("linked_equipment") or "").lower()
+        tags = (item.get("tags") or "").lower()
+        category = (item.get("category") or "").lower()
         if (
             q in desc or (desc and desc in q)
             or q in pn or (pn and pn in q)
             or (linked and q in linked)
+            or (tags and q in tags)
+            or (category and q in category)
+            or (q_depluralised != q and q_depluralised in desc)
         ):
             results.append(item)
     logger.info(
@@ -413,6 +423,58 @@ def find_stock_for_system(user_id: str, query: str) -> list:
     logger.info(
         "inventory_store: find_stock_for_system user=%s query=%r results=%d",
         user_id, query, len(results),
+    )
+    return results
+
+
+def find_deck_stock(user_id: str, query: str = "") -> list:
+    """Return deck inventory items (department==deck or source_type==deck_inventory).
+
+    If query is provided, filter by substring match against description, tags, category,
+    or brand.  Empty query returns all deck items.
+    """
+    q = query.lower().strip()
+    results = []
+    for item in get_all_stock(user_id):
+        if item.get("department") != "deck" and item.get("source_type") != "deck_inventory":
+            continue
+        if not q:
+            results.append(item)
+            continue
+        desc = (item.get("description") or "").lower()
+        tags = (item.get("tags") or "").lower()
+        category = (item.get("category") or "").lower()
+        brand = (item.get("brand") or "").lower()
+        make = (item.get("make") or "").lower()
+        if (q in desc or (desc and desc in q)
+                or q in tags or q in category
+                or (brand and q in brand) or (make and q in make)):
+            results.append(item)
+    logger.info(
+        "inventory_store: find_deck_stock user=%s query=%r results=%d",
+        user_id, query, len(results),
+    )
+    return results
+
+
+def find_low_deck_stock(user_id: str) -> list:
+    """Return deck items where quantity_onboard <= min_quantity (both must be numeric)."""
+    results = []
+    for item in get_all_stock(user_id):
+        if item.get("department") != "deck" and item.get("source_type") != "deck_inventory":
+            continue
+        qty = item.get("quantity_onboard")
+        min_qty = item.get("min_quantity")
+        if qty is None or min_qty is None:
+            continue
+        try:
+            if float(qty) <= float(min_qty):
+                results.append(item)
+        except (ValueError, TypeError):
+            continue
+    logger.info(
+        "inventory_store: find_low_deck_stock user=%s results=%d",
+        user_id, len(results),
     )
     return results
 

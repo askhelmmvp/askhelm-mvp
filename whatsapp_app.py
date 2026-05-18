@@ -127,6 +127,8 @@ from domain.inventory_store import (
     find_stock_by_query,
     find_stock_by_part_number,
     find_stock_for_system,
+    find_deck_stock,
+    find_low_deck_stock,
     find_equipment_by_query,
     clear_equipment,
     link_stock_to_equipment,
@@ -3121,6 +3123,25 @@ def _handle_inventory_file(file_path: str, content_type: str, state: dict) -> Tu
     user_id = state.get("user_id", "")
     from storage_paths import get_yacht_id_for_user as _gyid
     yacht_id = _gyid(user_id)
+
+    # Deck inventory: skip equipment linking; return deck-specific response
+    if data.get("source_type") == "deck_inventory":
+        stock_items = data.get("stock") or []
+        st_added, st_merged = merge_stock(user_id, stock_items, file_path)
+        state["last_context"] = {"type": "inventory_import", "department": "deck"}
+        total = st_added + st_merged
+        yid = yacht_id.upper()
+        return (
+            f"DECISION:\nDECK INVENTORY IMPORTED\n\n"
+            f"WHY:\nImported {total} deck inventory records for {yid}.\n\n"
+            "ACTIONS:\n"
+            "• Ask \"show deck stock\"\n"
+            "• Ask \"show watersports inventory\"\n"
+            "• Ask \"do we have <item> onboard?\"\n"
+            "• Ask \"show low deck stock\"\n"
+            "• Ask \"where is <item>?\""
+        ), state
+
     parse_error = bool(data.get("parse_error"))
     skipped_rows = data.get("skipped_rows", 0)
 
@@ -3238,13 +3259,115 @@ def _handle_show_stock(state: dict) -> Tuple[str, dict]:
     return "\n".join(lines).strip(), state
 
 
+# Deck category/tag keywords extracted from common query phrases
+_DECK_CATEGORY_KEYWORDS: dict = {
+    "watersports": ["watersports", "water sports", "jet ski", "wetsuit", "sup", "paddleboard"],
+    "guest operations": ["guest", "guest operations"],
+    "caulking": ["caulking", "caulk", "sika", "sikaflex"],
+    "safety": ["safety", "life raft", "life jacket", "flare"],
+}
+
+
+def _handle_show_deck_stock(query: str, state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user as _gyid
+    _yid = _gyid(user_id)
+    q_lower = query.lower()
+
+    # Determine category filter from the query text
+    cat_filter = ""
+    for cat_key, keywords in _DECK_CATEGORY_KEYWORDS.items():
+        if any(kw in q_lower for kw in keywords):
+            cat_filter = cat_key
+            break
+
+    items = find_deck_stock(user_id, cat_filter)
+
+    if not items:
+        what = f"{cat_filter} " if cat_filter else ""
+        return _make_response(
+            decision="NO DECK STOCK FOUND",
+            why=f"No {what}deck inventory records found in {_yid.upper()} vessel memory.",
+            actions=[
+                "Upload the deck inventory CSV to build deck stock memory",
+                "Ask \"show stock\" to see all stock including engineering",
+            ],
+        ), state
+
+    what = f"{cat_filter}-related " if cat_filter else ""
+    lines = [
+        "DECISION:", "DECK STOCK FOUND", "",
+        "WHY:", f"Found {what}deck inventory records in {_yid.upper()} vessel memory.", "",
+        "STOCK:",
+    ]
+    for item in items[:20]:
+        desc = item.get("description") or "Unknown"
+        qty = item.get("quantity_onboard")
+        loc = item.get("storage_location") or item.get("box_id") or ""
+        cat = item.get("category") or ""
+        qty_str = f" — Qty {_fmt_qty(qty)}" if qty is not None else ""
+        loc_str = f" — {loc}" if loc else ""
+        cat_str = f" — {cat}" if cat and cat not in loc else ""
+        lines.append(f"• {desc}{qty_str}{loc_str}{cat_str}")
+    if len(items) > 20:
+        lines.append(f"... and {len(items) - 20} more")
+    lines += [
+        "",
+        "ACTIONS:",
+        "• Ask \"where is <item>?\" for location",
+        "• Ask \"show low deck stock\" for minimum quantity checks",
+    ]
+    return "\n".join(lines).strip(), state
+
+
+def _handle_show_low_deck_stock(state: dict) -> Tuple[str, dict]:
+    user_id = state.get("user_id", "")
+    from storage_paths import get_yacht_id_for_user as _gyid
+    _yid = _gyid(user_id)
+    items = find_low_deck_stock(user_id)
+
+    if not items:
+        return _make_response(
+            decision="NO LOW DECK STOCK FOUND",
+            why="No deck inventory items are currently at or below minimum quantity.",
+            actions=["Continue monitoring deck stock levels"],
+        ), state
+
+    lines = [
+        "DECISION:", "LOW DECK STOCK FOUND", "",
+        "WHY:", "Some deck inventory items are at or below minimum quantity.", "",
+        "STOCK:",
+    ]
+    for item in items[:15]:
+        desc = item.get("description") or "Unknown"
+        qty = item.get("quantity_onboard")
+        min_qty = item.get("min_quantity")
+        loc = item.get("storage_location") or item.get("category") or ""
+        qty_str = f"Qty {_fmt_qty(qty)} / Min {_fmt_qty(min_qty)}"
+        loc_str = f" — {loc}" if loc else ""
+        lines.append(f"• {desc} — {qty_str}{loc_str}")
+    if len(items) > 15:
+        lines.append(f"... and {len(items) - 15} more")
+    lines += [
+        "",
+        "ACTIONS:",
+        "• Check physical stock before ordering",
+        "• Reorder items below minimum",
+        "• Update inventory after receipt",
+    ]
+    return "\n".join(lines).strip(), state
+
+
 def _extract_subject_from_query(query: str, prefixes: list) -> str:
     t = query.lower().strip()
+    best = ""
     for prefix in sorted(prefixes, key=len, reverse=True):
         if prefix in t:
             idx = t.index(prefix) + len(prefix)
-            return query[idx:].strip().rstrip("?").strip()
-    return query.strip()
+            candidate = query[idx:].strip().rstrip("?").strip()
+            if candidate and len(candidate) > len(best):
+                best = candidate
+    return best or query.strip()
 
 
 # Alphanumeric part-number token (letters+digits mixed) or long barcode (5+ digits).
@@ -3300,11 +3423,14 @@ def _extract_stock_search_term(query: str) -> str:
     term = _extract_subject_from_query(query, _STOCK_QUERY_PREFIXES)
     q_norm = query.lower().strip().rstrip("?!").strip()
     if term.lower().strip() != q_norm:
+        # Further strip boilerplate words trailing after the prefix
+        # e.g. "wetsuits do we have" → "wetsuits"; "Sikaflex 295 onboard" → "Sikaflex 295"
+        term_clean = _strip_query_noise(term) or term
         logger.info(
             "inventory_query: inventory_query=True search_term_type=prefix_stripped search_term=%r query=%r",
-            term, query[:80],
+            term_clean, query[:80],
         )
-        return term
+        return term_clean
 
     stripped = _strip_query_noise(query)
     logger.info(
@@ -5354,6 +5480,12 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "show_stock":
         return _handle_show_stock(state)
+
+    if intent == "show_deck_stock":
+        return _handle_show_deck_stock(incoming, state)
+
+    if intent == "show_low_deck_stock":
+        return _handle_show_low_deck_stock(state)
 
     if intent == "stock_query":
         return _handle_stock_query(incoming, state)

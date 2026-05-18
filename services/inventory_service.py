@@ -671,6 +671,100 @@ def _extract_two_row_stock_items(
     return {"equipment": [], "stock": stock_items}
 
 
+# ---------------------------------------------------------------------------
+# Deck inventory detection and extraction
+# ---------------------------------------------------------------------------
+
+# Columns that uniquely identify a deck inventory CSV (not present in engineering stock CSVs)
+_DECK_CSV_INDICATORS = frozenset({
+    "minimum quantity", "min quantity", "box id", "tags", "colour", "total value",
+})
+
+_DECK_COL_MAP = {
+    "title": "description",
+    "quantity": "quantity_onboard",
+    "minimum quantity": "min_quantity",
+    "min quantity": "min_quantity",
+    "min qty": "min_quantity",
+    "description": "notes",
+    "location": "storage_location",
+    "box id": "box_id",
+    "tags": "tags",
+    "brand": "brand",
+    "colour": "colour",
+    "color": "colour",
+    "supplier": "supplier",
+    "purchase price": "purchase_price",
+    "category": "category",
+    "total value": "total_value",
+}
+
+
+def _is_deck_inventory_csv(normalised_headers: list) -> bool:
+    """Return True when ≥3 deck-specific column names are present."""
+    header_set = set(normalised_headers)
+    return len(_DECK_CSV_INDICATORS & header_set) >= 3
+
+
+def _extract_deck_rows(all_rows: list, header_idx: int) -> dict:
+    """Parse deck inventory rows given the detected header index."""
+    raw_headers = all_rows[header_idx]
+    col_idx: dict = {}
+    for i, h in enumerate(raw_headers):
+        norm = _normalise_col(str(h))
+        if norm in _DECK_COL_MAP:
+            col_idx[_DECK_COL_MAP[norm]] = i
+
+    def _cell(row: list, field: str) -> str:
+        idx = col_idx.get(field)
+        if idx is None or idx >= len(row):
+            return ""
+        return str(row[idx]).strip()
+
+    stock = []
+    for row in all_rows[header_idx + 1:]:
+        if not any(str(c).strip() for c in row):
+            continue
+        desc = _cell(row, "description")
+        if not desc:
+            continue
+        item: dict = {
+            "description": desc,
+            "department": "deck",
+            "source_type": "deck_inventory",
+            "confidence": 0.85,
+        }
+        qty_raw = _cell(row, "quantity_onboard")
+        if qty_raw:
+            try:
+                item["quantity_onboard"] = float(qty_raw.replace(",", "."))
+            except ValueError:
+                pass
+        min_qty_raw = _cell(row, "min_quantity")
+        if min_qty_raw:
+            try:
+                item["min_quantity"] = float(min_qty_raw.replace(",", "."))
+            except ValueError:
+                pass
+        for field in ("storage_location", "box_id", "tags", "brand", "colour",
+                      "supplier", "category", "notes"):
+            val = _cell(row, field)
+            if val:
+                item[field] = val
+        if item.get("brand"):
+            item.setdefault("make", item["brand"])
+        for price_field in ("purchase_price", "total_value"):
+            val = _cell(row, price_field)
+            if val:
+                cleaned = val.replace(",", ".").replace("€", "").replace("$", "").replace("£", "").strip()
+                try:
+                    item[price_field] = float(cleaned)
+                except ValueError:
+                    item[price_field] = val
+        stock.append(item)
+    return {"equipment": [], "stock": stock, "source_type": "deck_inventory"}
+
+
 def extract_inventory_from_csv(file_path: str) -> dict:
     """Parse a CSV file into an inventory dict, auto-detecting the header row.
 
@@ -720,6 +814,16 @@ def extract_inventory_from_csv(file_path: str) -> dict:
 
     headers_a = [_flatten_csv_header(h) for h in all_rows[header_idx]]
     data_start = header_idx + 1
+
+    # Detect deck inventory CSV by presence of deck-specific column names.
+    if _is_deck_inventory_csv([_normalise_col(h) for h in all_rows[header_idx]]):
+        logger.info("inventory csv: deck_inventory_detected file=%s", fname)
+        result = _extract_deck_rows(all_rows, header_idx)
+        logger.info(
+            "inventory deck csv: stock=%d encoding=%s file=%s",
+            len(result["stock"]), used_encoding, fname,
+        )
+        return result
 
     # Detect AMOS-style two-row header: secondary header immediately follows primary.
     if data_start < len(all_rows) and _score_row_as_header(all_rows[data_start]) >= 4:

@@ -1783,5 +1783,326 @@ class TestEquipmentLinkSystemContext(unittest.TestCase):
         self.assertNotIn("LIKELY ENGINES SPARE", r)
 
 
+# ---------------------------------------------------------------------------
+# ASK-33 Deck Inventory Tests
+# ---------------------------------------------------------------------------
+
+def _deck_csv_rows():
+    """Representative deck inventory CSV rows."""
+    return [
+        ["ID", "Title", "Quantity", "Minimum Quantity", "Description", "Updated",
+         "Location", "Box ID", "Tags", "Brand", "Colour", "Supplier",
+         "Purchase Price", "Category", "Total Value", "Deck"],
+        ["1", "Watersports Ratchet Straps", "4", "2", "Heavy duty ratchet straps",
+         "2024-01-01", "Watersports Locker", "WS-01", "Watersports", "Ancra", "Black",
+         "Marine Store", "45.00", "DECK/Watersports", "180.00", "Deck"],
+        ["2", "Sikaflex 295 UV Black", "3", "1", "UV-resistant sealant",
+         "2024-01-01", "Deck Store", "SEAL-01", "Caulking", "Sika", "Black",
+         "Sika AG", "12.50", "DECK/Caulking & Sika", "37.50", "Deck"],
+        ["3", "Wetsuit 3mm Medium", "2", "1", "Guest wetsuit",
+         "2024-01-01", "Watersports Locker", "WS-02", "Watersports", "O'Neill", "Black",
+         "Watersports Gear Ltd", "95.00", "DECK/Watersports", "190.00", "Deck"],
+        ["4", "Life Ring", "4", "4", "SOLAS life rings",
+         "2024-01-01", "Bridge Wing", "SAF-01", "Safety", "Lalizas", "Orange",
+         "Marine Safety", "35.00", "DECK/Safety", "140.00", "Deck"],
+        # Low stock item: qty 0, min 2
+        ["5", "Sun Cream SPF50", "0", "2", "Guest sunscreen",
+         "2024-01-01", "Guest Supply", "GS-01", "Guest Operations", "Riemann P20", "",
+         "Guest Supplies Ltd", "8.00", "DECK/Guest Operations", "0.00", "Deck"],
+    ]
+
+
+class TestDeckInventoryDetection(unittest.TestCase):
+    """ASK-33: Deck CSV is classified as deck_inventory, not engineering stock."""
+
+    def _write_deck_csv(self, path):
+        import csv as _csv
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            for row in _deck_csv_rows():
+                w.writerow(row)
+
+    def test_deck_csv_detected_as_deck_inventory(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(result.get("source_type"), "deck_inventory")
+
+    def test_deck_csv_produces_no_equipment_records(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        self.assertEqual(result.get("equipment"), [])
+
+    def test_deck_csv_stock_has_department_deck(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        stock = result.get("stock", [])
+        self.assertTrue(stock, "Should import at least one deck item")
+        self.assertTrue(all(i.get("department") == "deck" for i in stock))
+
+    def test_deck_csv_preserves_tags(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        stock = result.get("stock", [])
+        tags = [i.get("tags", "") for i in stock]
+        self.assertTrue(any("Watersports" in t for t in tags))
+
+    def test_deck_csv_preserves_min_quantity(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        stock = result.get("stock", [])
+        min_qtys = [i.get("min_quantity") for i in stock if i.get("min_quantity") is not None]
+        self.assertTrue(min_qtys, "At least one item should have min_quantity")
+
+    def test_deck_csv_preserves_category(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            self._write_deck_csv(path)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        stock = result.get("stock", [])
+        categories = [i.get("category", "") for i in stock]
+        self.assertTrue(any("DECK" in c for c in categories))
+
+    def test_engineering_csv_not_detected_as_deck(self):
+        from services.inventory_service import extract_inventory_from_csv
+        with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as f:
+            path = f.name
+        try:
+            import csv as _csv
+            with open(path, "w", newline="", encoding="utf-8") as f2:
+                w = _csv.writer(f2)
+                for row in _stock_csv_rows():
+                    w.writerow(row)
+            result = extract_inventory_from_csv(path)
+        finally:
+            os.unlink(path)
+        self.assertNotEqual(result.get("source_type"), "deck_inventory")
+
+
+class TestDeckInventoryImportResponse(unittest.TestCase):
+    """ASK-33: Upload of deck CSV returns DECK INVENTORY IMPORTED response."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+
+    def _write_deck_csv(self):
+        import csv as _csv
+        path = os.path.join(self.tmpdir, "deck.csv")
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            for row in _deck_csv_rows():
+                w.writerow(row)
+        return path
+
+    def test_deck_upload_response_says_deck_inventory_imported(self):
+        from whatsapp_app import _handle_inventory_file
+        path = self._write_deck_csv()
+        result, _ = _handle_inventory_file(path, "text/csv", {"user_id": ""})
+        self.assertIn("DECK INVENTORY IMPORTED", result)
+
+    def test_deck_upload_response_mentions_show_deck_stock(self):
+        from whatsapp_app import _handle_inventory_file
+        path = self._write_deck_csv()
+        result, _ = _handle_inventory_file(path, "text/csv", {"user_id": ""})
+        self.assertIn("show deck stock", result)
+
+    def test_deck_upload_response_mentions_low_stock(self):
+        from whatsapp_app import _handle_inventory_file
+        path = self._write_deck_csv()
+        result, _ = _handle_inventory_file(path, "text/csv", {"user_id": ""})
+        self.assertIn("show low deck stock", result)
+
+
+class TestDeckStockQueries(unittest.TestCase):
+    """ASK-33: Deck stock query handlers return correct results."""
+
+    _DECK_ITEMS = [
+        {"description": "Watersports Ratchet Straps", "quantity_onboard": 4.0,
+         "min_quantity": 2.0, "storage_location": "Watersports Locker",
+         "tags": "Watersports", "category": "DECK/Watersports",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+        {"description": "Sikaflex 295 UV Black", "quantity_onboard": 3.0,
+         "min_quantity": 1.0, "storage_location": "Deck Store",
+         "tags": "Caulking", "category": "DECK/Caulking & Sika",
+         "brand": "Sika", "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+        {"description": "Wetsuit 3mm Medium", "quantity_onboard": 2.0,
+         "min_quantity": 1.0, "storage_location": "Watersports Locker",
+         "tags": "Watersports", "category": "DECK/Watersports",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+        {"description": "Sun Cream SPF50", "quantity_onboard": 0.0,
+         "min_quantity": 2.0, "storage_location": "Guest Supply",
+         "tags": "Guest Operations", "category": "DECK/Guest Operations",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+    ]
+
+    _ENG_ITEMS = [
+        {"description": "Oil filter Paper inserts", "part_number": "XP52718300060",
+         "quantity_onboard": 28.0, "storage_location": "LD / Generator Room",
+         "linked_equipment": "Main Engine", "confidence": 0.9},
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+        inv.merge_stock("", self._DECK_ITEMS + self._ENG_ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+
+    def _intent(self, q):
+        from domain.intent import classify_text
+        return classify_text(q)
+
+    def _deck(self, q):
+        from whatsapp_app import _handle_show_deck_stock
+        r, _ = _handle_show_deck_stock(q, {"user_id": ""})
+        return r
+
+    def _low(self):
+        from whatsapp_app import _handle_show_low_deck_stock
+        r, _ = _handle_show_low_deck_stock({"user_id": ""})
+        return r
+
+    def _stock(self, q):
+        from whatsapp_app import _handle_stock_query
+        r, _ = _handle_stock_query(q, {"user_id": ""})
+        return r
+
+    def _spares(self, q):
+        from whatsapp_app import _handle_spares_query
+        r, _ = _handle_spares_query(q, {"user_id": ""})
+        return r
+
+    # Intent routing tests
+    def test_show_deck_stock_routes_to_show_deck_stock(self):
+        self.assertEqual(self._intent("show deck stock"), "show_deck_stock")
+
+    def test_show_deck_inventory_routes_to_show_deck_stock(self):
+        self.assertEqual(self._intent("show deck inventory"), "show_deck_stock")
+
+    def test_show_watersports_inventory_routes_to_show_deck_stock(self):
+        self.assertEqual(self._intent("show watersports inventory"), "show_deck_stock")
+
+    def test_show_low_deck_stock_routes_to_show_low_deck_stock(self):
+        self.assertEqual(self._intent("show low deck stock"), "show_low_deck_stock")
+
+    # Deck stock display tests
+    def test_show_deck_stock_returns_deck_items(self):
+        r = self._deck("show deck stock")
+        self.assertIn("DECK STOCK FOUND", r)
+        self.assertIn("Watersports Ratchet Straps", r)
+        self.assertIn("Sikaflex 295 UV Black", r)
+
+    def test_show_deck_stock_excludes_engineering_items(self):
+        r = self._deck("show deck stock")
+        self.assertNotIn("Oil filter Paper inserts", r)
+
+    def test_show_watersports_inventory_filters_by_tag(self):
+        r = self._deck("show watersports inventory")
+        self.assertIn("Ratchet Straps", r)
+        self.assertIn("Wetsuit", r)
+        self.assertNotIn("Sikaflex", r)
+
+    def test_show_caulking_stock_filters_by_category(self):
+        r = self._deck("show caulking and sika stock")
+        self.assertIn("Sikaflex 295 UV Black", r)
+        self.assertNotIn("Ratchet Straps", r)
+
+    def test_sika_item_found_via_stock_query(self):
+        r = self._stock("do we have Sikaflex 295 onboard?")
+        self.assertIn("DECISION:", r)
+        self.assertIn("Sikaflex", r)
+
+    def test_wetsuit_found_via_stock_query(self):
+        r = self._stock("how many wetsuits do we have?")
+        self.assertIn("Wetsuit", r)
+
+    # Low deck stock tests
+    def test_low_deck_stock_shows_low_items(self):
+        r = self._low()
+        self.assertIn("LOW DECK STOCK FOUND", r)
+        self.assertIn("Sun Cream SPF50", r)
+
+    def test_low_deck_stock_shows_qty_and_min(self):
+        r = self._low()
+        self.assertIn("Qty", r)
+        self.assertIn("Min", r)
+
+    def test_normal_quantity_not_flagged_as_low(self):
+        r = self._low()
+        # Ratchet straps: qty 4, min 2 — not low stock
+        self.assertNotIn("Ratchet Straps", r)
+
+    def test_item_without_min_quantity_not_flagged(self):
+        import importlib, domain.inventory_store as inv
+        inv.merge_stock("", [
+            {"description": "Extra Rope", "quantity_onboard": 2.0,
+             "department": "deck", "source_type": "deck_inventory", "confidence": 0.85}
+        ], "test2.csv")
+        r = self._low()
+        self.assertNotIn("Extra Rope", r)
+
+    # Engineering regression tests
+    def test_engineering_stock_query_still_works(self):
+        r = self._stock("how many XP52718300060 onboard?")
+        self.assertIn("28", r)
+        self.assertNotIn("DECK STOCK", r)
+
+    def test_main_engine_spares_still_works(self):
+        r = self._spares("show main engine spares")
+        self.assertIn("Oil filter Paper inserts", r)
+
+
 if __name__ == "__main__":
     unittest.main()
