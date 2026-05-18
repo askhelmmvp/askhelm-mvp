@@ -149,6 +149,20 @@ _FOLLOW_UPS = {
     "what stock do we have": "show_stock",
     "list stock": "show_stock",
     "list spares": "show_stock",
+    # Deck inventory — must come before generic show_stock to avoid bleed-through
+    "show deck stock": "show_deck_stock",
+    "show deck inventory": "show_deck_stock",
+    "show deck items": "show_deck_stock",
+    "deck stock": "show_deck_stock",
+    "deck inventory": "show_deck_stock",
+    "show watersports inventory": "show_deck_stock",
+    "watersports inventory": "show_deck_stock",
+    "show guest operations stock": "show_deck_stock",
+    "guest operations stock": "show_deck_stock",
+    "show caulking and sika stock": "show_deck_stock",
+    "caulking and sika stock": "show_deck_stock",
+    "show low deck stock": "show_low_deck_stock",
+    "low deck stock": "show_low_deck_stock",
     # Equipment memory reset — must live in _FOLLOW_UPS so it is checked BEFORE
     # the _NEW_SESSION_EXACT startswith loop ("reset equipment" starts with "reset"
     # which is in that set with len > 4).
