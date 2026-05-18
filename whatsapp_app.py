@@ -1762,8 +1762,27 @@ def _handle_invoice_clarification(message: str, state: dict) -> str:
                 ctx_parts.append(f"  - {desc}")
 
     invoice_ctx = "\n".join(ctx_parts)
-    if doc_record and _is_utility_invoice(doc_record):
-        invoice_ctx += "\nNOTE: This appears to be a utility or yard consumable invoice (shore power, metered services, etc.)."
+
+    if doc_record:
+        excl_vat, vat_amt, reconciles = _vat_reconciliation(doc_record)
+        currency_str = (doc_record.get("currency") or "").strip()
+        total_val = doc_record.get("total")
+        if reconciles:
+            invoice_ctx += (
+                f"\nNOTE: Arithmetic reconciles — "
+                f"{excl_vat:.2f} {currency_str} excl. VAT + {vat_amt:.2f} {currency_str} VAT"
+                f" = {total_val:.2f} {currency_str} total. Arithmetic is correct."
+            )
+        elif excl_vat is not None:
+            invoice_ctx += (
+                f"\nNOTE: Arithmetic discrepancy — "
+                f"line sum {excl_vat:.2f} + VAT {vat_amt:.2f} ≠ {total_val:.2f} {currency_str}."
+                f" Investigate before approval."
+            )
+
+        if _is_utility_invoice(doc_record):
+            invoice_ctx += "\nNOTE: This appears to be a utility or yard consumable invoice (shore power, metered services, etc.)."
+
     logger.info(
         "invoice_clarification: supplier=%r total=%r message=%r",
         (doc_record or {}).get("supplier_name", ""),
@@ -1812,6 +1831,47 @@ def _is_utility_invoice(doc: dict) -> bool:
     )
     text += " " + (doc.get("supplier_name") or "").lower()
     return any(kw in text for kw in _UTILITY_INVOICE_KEYWORDS)
+
+
+_VAT_DESC_KEYWORDS = frozenset({"vat", "tax", "btw", "mwst", "tva", "iva", "gst", "hst", "pst"})
+_TOTAL_DESC_KEYWORDS = frozenset({"total", "subtotal", "sub-total", "sub total", "grand total", "amount due"})
+
+
+def _vat_reconciliation(doc_record: dict) -> tuple:
+    """
+    Inspect line items for VAT reconciliation.
+
+    Returns (excl_vat_sum, vat_sum, reconciles) where reconciles is True when
+    excl_vat_sum + vat_sum ≈ invoice total.  Returns (None, None, False) when
+    no VAT line is found or data is insufficient.
+    """
+    if not doc_record:
+        return None, None, False
+    total = doc_record.get("total")
+    if total is None:
+        return None, None, False
+
+    product_sum = 0.0
+    vat_sum = 0.0
+    found_vat = False
+    for item in (doc_record.get("line_items") or []):
+        desc = (item.get("description") or "").lower()
+        lt = item.get("line_total")
+        if lt is None:
+            continue
+        if any(kw in desc for kw in _TOTAL_DESC_KEYWORDS):
+            continue
+        if any(kw in desc for kw in _VAT_DESC_KEYWORDS):
+            vat_sum += float(lt)
+            found_vat = True
+        else:
+            product_sum += float(lt)
+
+    if not found_vat:
+        return None, None, False
+
+    reconciles = abs(product_sum + vat_sum - float(total)) < 0.10
+    return product_sum, vat_sum, reconciles
 
 
 _VAGUE_DOC_REF_WORDS = frozenset({"this", "these", "it", "them"})

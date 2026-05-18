@@ -603,5 +603,172 @@ class TestFairPriceMultiUnitIntegration(unittest.TestCase):
         self.assertNotIn("UNIT PRICE NOTE", q)
 
 
+_SANDFIRDEN_INVOICE = {
+    "doc_type": "invoice",
+    "supplier_name": "Sandfirden Technics b.v.",
+    "total": 761.57,
+    "currency": "EUR",
+    "line_items": [
+        {"description": "4 × 246458 GASKET", "line_total": 187.20},
+        {"description": "1 × PVKAAN FREIGHT COSTS WITH KAAN", "line_total": 75.00},
+        {"description": "60 × 1921956 ANTIFREEZE/CORR. 50/50 20L", "line_total": 367.20},
+        {"description": "Total excl. VAT / material", "line_total": 629.40},
+        {"description": "21% VAT", "line_total": 132.17},
+        {"description": "Total incl. VAT", "line_total": 761.57},
+    ],
+}
+
+
+class TestVATReconciliation(unittest.TestCase):
+    """_vat_reconciliation correctly identifies reconciled and unreconciled arithmetic."""
+
+    def _reconcile(self, doc):
+        from whatsapp_app import _vat_reconciliation
+        return _vat_reconciliation(doc)
+
+    def test_sandfirden_reconciles(self):
+        excl, vat, ok = self._reconcile(_SANDFIRDEN_INVOICE)
+        self.assertTrue(ok, f"629.40 + 132.17 = 761.57 should reconcile; got excl={excl}, vat={vat}")
+
+    def test_sandfirden_excl_vat_correct(self):
+        excl, _, _ = self._reconcile(_SANDFIRDEN_INVOICE)
+        self.assertAlmostEqual(excl, 629.40, places=1)
+
+    def test_sandfirden_vat_amount_correct(self):
+        _, vat, _ = self._reconcile(_SANDFIRDEN_INVOICE)
+        self.assertAlmostEqual(vat, 132.17, places=1)
+
+    def test_genuine_discrepancy_not_reconciled(self):
+        doc = {
+            "total": 500.00,
+            "currency": "EUR",
+            "line_items": [
+                {"description": "Part A", "line_total": 200.00},
+                {"description": "Part B", "line_total": 200.00},
+                {"description": "21% VAT", "line_total": 42.00},
+                # 200 + 200 + 42 = 442 ≠ 500
+            ],
+        }
+        _, _, ok = self._reconcile(doc)
+        self.assertFalse(ok, "Genuine discrepancy must not reconcile")
+
+    def test_no_vat_line_returns_none(self):
+        doc = {
+            "total": 434.00,
+            "currency": "EUR",
+            "line_items": [
+                {"description": "Shore power — 1,240 kWh @ EUR 0.35", "line_total": 434.00},
+            ],
+        }
+        excl, vat, ok = self._reconcile(doc)
+        self.assertIsNone(excl)
+        self.assertFalse(ok)
+
+
+class TestSandfirdenInvoiceOnlyContext(unittest.TestCase):
+    """_handle_invoice_clarification injects reconciliation note for Sandfirden invoice."""
+
+    def test_reconciliation_note_in_context(self):
+        captured = {}
+
+        def capture(ctx, msg):
+            captured["ctx"] = ctx
+            return "DECISION:\nNO QUOTE — CHECK PRICE\n\nWHY:\nReconciled.\n\nACTIONS:\n• Confirm receipt"
+
+        with patch("whatsapp_app.invoice_approval_checks", side_effect=capture):
+            from whatsapp_app import _handle_invoice_clarification
+            state = {
+                "user_id": "",
+                "documents": [_SANDFIRDEN_INVOICE],
+                "pending_invoice": None,
+            }
+            _handle_invoice_clarification("no quote", state)
+        ctx = captured.get("ctx", "")
+        self.assertIn("Arithmetic reconciles", ctx)
+        self.assertNotIn("discrepancy", ctx.lower())
+
+    def test_freight_check_in_response(self):
+        def make_response(ctx, msg):
+            return (
+                "DECISION:\nNO QUOTE — CHECK PRICE, FREIGHT AND VAT\n\n"
+                "WHY:\nParts/consumables invoice. Arithmetic reconciles: "
+                "629.40 EUR excl. VAT + 132.17 EUR VAT = 761.57 EUR total.\n\n"
+                "ACTIONS:\n"
+                "• Confirm gasket and antifreeze quantities received\n"
+                "• Confirm 75.00 EUR freight charge via Kaan was agreed\n"
+                "• Check unit pricing against order\n"
+                "• Approve only once freight and receipt confirmed"
+            )
+
+        with patch("whatsapp_app.invoice_approval_checks", side_effect=make_response):
+            from whatsapp_app import _handle_invoice_clarification
+            state = {
+                "user_id": "",
+                "documents": [_SANDFIRDEN_INVOICE],
+                "pending_invoice": None,
+            }
+            result = _handle_invoice_clarification("no quote", state)
+        self.assertIn("freight", result.lower())
+        self.assertNotIn("discrepancy", result.lower())
+
+    def test_genuine_discrepancy_flagged_in_context(self):
+        captured = {}
+
+        def capture(ctx, msg):
+            captured["ctx"] = ctx
+            return "DECISION:\nINVESTIGATE\n\nWHY:\nDiscrepancy.\n\nACTIONS:\n• Check"
+
+        discrepancy_doc = {
+            "doc_type": "invoice",
+            "supplier_name": "Test Supplier",
+            "total": 500.00,
+            "currency": "EUR",
+            "line_items": [
+                {"description": "Part A", "line_total": 200.00},
+                {"description": "Part B", "line_total": 200.00},
+                {"description": "21% VAT", "line_total": 42.00},
+            ],
+        }
+        with patch("whatsapp_app.invoice_approval_checks", side_effect=capture):
+            from whatsapp_app import _handle_invoice_clarification
+            state = {
+                "user_id": "",
+                "documents": [discrepancy_doc],
+                "pending_invoice": None,
+            }
+            _handle_invoice_clarification("no quote", state)
+        ctx = captured.get("ctx", "")
+        self.assertIn("Arithmetic discrepancy", ctx)
+
+    def test_utility_invoice_no_reconciliation_note(self):
+        """Shore power invoice with no VAT line does not get a reconciliation note."""
+        captured = {}
+
+        def capture(ctx, msg):
+            captured["ctx"] = ctx
+            return "DECISION:\nVALIDATE\n\nWHY:\nMetered.\n\nACTIONS:\n• Check kWh"
+
+        utility_doc = {
+            "doc_type": "invoice",
+            "supplier_name": "Marina Barceloneta",
+            "total": 434.00,
+            "currency": "EUR",
+            "line_items": [
+                {"description": "Shore power — 1,240 kWh @ EUR 0.35", "line_total": 434.00},
+            ],
+        }
+        with patch("whatsapp_app.invoice_approval_checks", side_effect=capture):
+            from whatsapp_app import _handle_invoice_clarification
+            state = {
+                "user_id": "",
+                "documents": [utility_doc],
+                "pending_invoice": None,
+            }
+            _handle_invoice_clarification("no quote", state)
+        ctx = captured.get("ctx", "")
+        self.assertNotIn("Arithmetic reconciles", ctx)
+        self.assertIn("utility", ctx.lower())
+
+
 if __name__ == "__main__":
     unittest.main()
