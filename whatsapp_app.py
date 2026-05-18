@@ -3445,7 +3445,10 @@ def _fmt_qty(qty) -> str:
     if qty is None:
         return ""
     try:
+        import math as _math
         n = float(qty)
+        if _math.isnan(n):
+            return ""
         return str(int(n)) if n == int(n) else str(n)
     except (TypeError, ValueError):
         return str(qty)
@@ -3766,7 +3769,12 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
         if loc:
             lines.append(f"• Location: {loc}")
         lines.append("")
-        lines += ["ACTIONS:", "• Check stock location before ordering"]
+        if query_type == "location":
+            lines += ["ACTIONS:",
+                      "• Check the listed location before use",
+                      "• Update the inventory if the item has been moved"]
+        else:
+            lines += ["ACTIONS:", "• Check stock location before ordering"]
         return "\n".join(lines).strip(), state
 
     # Determine if this is a specific compound item query (e.g. "oil filters for main engine")
@@ -3833,7 +3841,17 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     # EQUIPMENT — inferred or explicit link to vessel equipment record
     all_equip = get_all_equipment(user_id)
     link_info = infer_stock_equipment_link(first, all_equip)
-    if link_info["confidence"] in ("exact", "likely") and link_info["label"]:
+    is_deck_item = first.get("department") == "deck" or first.get("source_type") == "deck_inventory"
+    if is_deck_item:
+        if link_info["confidence"] == "exact" and link_info["label"]:
+            lines += ["EQUIPMENT:", link_info["label"], ""]
+        else:
+            dept = (first.get("department") or "deck").capitalize()
+            cat = first.get("category") or ""
+            lines += ["DEPARTMENT:", dept, ""]
+            if cat:
+                lines += ["CATEGORY:", cat, ""]
+    elif link_info["confidence"] in ("exact", "likely") and link_info["label"]:
         lines += ["EQUIPMENT:", link_info["label"], ""]
 
     # LOCATION
@@ -3841,9 +3859,14 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
         lines += ["LOCATION:", loc, ""]
 
     # ACTIONS
-    lines += ["ACTIONS:", "• Check stock location before ordering"]
-    if query_type == "general":
-        lines.append('• Ask "show spares for <system>" if you need related parts')
+    if query_type == "location":
+        lines += ["ACTIONS:",
+                  "• Check the listed location before use",
+                  "• Update the inventory if the item has been moved"]
+    else:
+        lines += ["ACTIONS:", "• Check stock location before ordering"]
+        if query_type == "general":
+            lines.append('• Ask "show spares for <system>" if you need related parts')
 
     return "\n".join(lines).strip(), state
 

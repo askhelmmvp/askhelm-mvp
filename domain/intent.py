@@ -459,6 +459,8 @@ _STOCK_QUERY_SUBSTRINGS = [
     "what is the stock of",
     "stock of ",
     "onboard stock",
+    "where are ",
+    "where do we keep ",
     "where can i find",
     "where is this",
     "which equipment does this belong to",
@@ -1159,9 +1161,17 @@ def classify_text(text: str) -> str:
     _how_many_is_compliance = (
         "how many " in t and bool(_HOW_MANY_COMPLIANCE_RE.search(t))
     )
+    # "where are/where do we keep" yield to compliance when the query contains
+    # explicit compliance keywords (e.g. "where are we allowed to discharge?").
+    _where_is_compliance = (
+        ("where are " in t or "where do we keep " in t)
+        and any(c in t for c in _COMPLIANCE_SUBSTRINGS)
+    )
     for phrase in _STOCK_QUERY_SUBSTRINGS:
         if phrase in t:
             if phrase == "how many " and _how_many_is_compliance:
+                continue  # let compliance routing handle this
+            if phrase in ("where are ", "where do we keep ") and _where_is_compliance:
                 continue  # let compliance routing handle this
             return "stock_query"
 

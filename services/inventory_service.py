@@ -721,12 +721,24 @@ def _extract_deck_rows(all_rows: list, header_idx: int) -> dict:
             return ""
         return str(row[idx]).strip()
 
+    _INVALID_DESCS = frozenset({"nan", "none", "null", "n/a", "na", "-", "–", "—"})
+
+    def _is_valid_deck_desc(s: str) -> bool:
+        if not s:
+            return False
+        sl = s.lower().strip()
+        if sl in _INVALID_DESCS:
+            return False
+        if sl.replace(".", "").replace(",", "").isdigit():
+            return False
+        return True
+
     stock = []
     for row in all_rows[header_idx + 1:]:
         if not any(str(c).strip() for c in row):
             continue
         desc = _cell(row, "description")
-        if not desc:
+        if not _is_valid_deck_desc(desc):
             continue
         item: dict = {
             "description": desc,
@@ -735,15 +747,21 @@ def _extract_deck_rows(all_rows: list, header_idx: int) -> dict:
             "confidence": 0.85,
         }
         qty_raw = _cell(row, "quantity_onboard")
-        if qty_raw:
+        if qty_raw and qty_raw.lower() not in ("nan", "none", "null", ""):
             try:
-                item["quantity_onboard"] = float(qty_raw.replace(",", "."))
+                parsed_qty = float(qty_raw.replace(",", "."))
+                import math as _math
+                if not _math.isnan(parsed_qty):
+                    item["quantity_onboard"] = parsed_qty
             except ValueError:
                 pass
         min_qty_raw = _cell(row, "min_quantity")
-        if min_qty_raw:
+        if min_qty_raw and min_qty_raw.lower() not in ("nan", "none", "null", ""):
             try:
-                item["min_quantity"] = float(min_qty_raw.replace(",", "."))
+                parsed_min = float(min_qty_raw.replace(",", "."))
+                import math as _math
+                if not _math.isnan(parsed_min):
+                    item["min_quantity"] = parsed_min
             except ValueError:
                 pass
         for field in ("storage_location", "box_id", "tags", "brand", "colour",
