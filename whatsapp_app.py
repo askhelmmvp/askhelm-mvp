@@ -3687,6 +3687,10 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     loc  = first.get("storage_location") or ""
     make = first.get("make") or ""
     linked = first.get("linked_equipment") or ""
+    is_deck_item = (
+        first.get("department") == "deck"
+        or first.get("source_type") == "deck_inventory"
+    )
 
     # --- Equipment-link response: "which equipment does X belong to?" ---
     if query_type == "equipment":
@@ -3777,6 +3781,32 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
             lines += ["ACTIONS:", "• Check stock location before ordering"]
         return "\n".join(lines).strip(), state
 
+    # --- Deck inventory item: dedicated response format ---
+    if is_deck_item:
+        lines: list = []
+        lines += ["DECISION:", "DECK STOCK FOUND", ""]
+        lines += ["WHY:", f"{desc} is recorded in {_yid.upper()} deck inventory.", ""]
+        lines += ["STOCK:"]
+        for item in results[:8]:
+            d = item.get("description") or "Unknown"
+            q = item.get("quantity_onboard")
+            brand = item.get("brand") or item.get("make") or ""
+            qty_s = f" — Qty {_fmt_qty(q)}" if q is not None else ""
+            brand_s = f" — {brand}" if brand else ""
+            lines.append(f"• {d}{qty_s}{brand_s}")
+        lines.append("")
+        cat = first.get("category") or ""
+        if cat:
+            lines += ["CATEGORY:", cat, ""]
+        if loc:
+            lines += ["LOCATION:", loc, ""]
+        else:
+            lines += ["LOCATION:", "Location not recorded", ""]
+        lines += ["ACTIONS:",
+                  "• Check the listed deck inventory location before use",
+                  "• Update inventory if moved or used"]
+        return "\n".join(lines).strip(), state
+
     # Determine if this is a specific compound item query (e.g. "oil filters for main engine")
     _item_compound = (
         item_terms is not None and system_term is not None
@@ -3841,17 +3871,7 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     # EQUIPMENT — inferred or explicit link to vessel equipment record
     all_equip = get_all_equipment(user_id)
     link_info = infer_stock_equipment_link(first, all_equip)
-    is_deck_item = first.get("department") == "deck" or first.get("source_type") == "deck_inventory"
-    if is_deck_item:
-        if link_info["confidence"] == "exact" and link_info["label"]:
-            lines += ["EQUIPMENT:", link_info["label"], ""]
-        else:
-            dept = (first.get("department") or "deck").capitalize()
-            cat = first.get("category") or ""
-            lines += ["DEPARTMENT:", dept, ""]
-            if cat:
-                lines += ["CATEGORY:", cat, ""]
-    elif link_info["confidence"] in ("exact", "likely") and link_info["label"]:
+    if link_info["confidence"] in ("exact", "likely") and link_info["label"]:
         lines += ["EQUIPMENT:", link_info["label"], ""]
 
     # LOCATION
