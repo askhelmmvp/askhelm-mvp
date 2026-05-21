@@ -1968,7 +1968,8 @@ class TestDeckStockQueries(unittest.TestCase):
         {"description": "Sikaflex 295 UV Black", "quantity_onboard": 3.0,
          "min_quantity": 1.0, "storage_location": "Deck Store",
          "tags": "Caulking", "category": "DECK/Caulking & Sika",
-         "brand": "Sika", "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+         "brand": "Sika", "make": "Sika",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
         {"description": "Wetsuit 3mm Medium", "quantity_onboard": 2.0,
          "min_quantity": 1.0, "storage_location": "Watersports Locker",
          "tags": "Watersports", "category": "DECK/Watersports",
@@ -1976,6 +1977,12 @@ class TestDeckStockQueries(unittest.TestCase):
         {"description": "Sun Cream SPF50", "quantity_onboard": 0.0,
          "min_quantity": 2.0, "storage_location": "Guest Supply",
          "tags": "Guest Operations", "category": "DECK/Guest Operations",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+        {"description": "Teak Oil", "quantity_onboard": 10.0,
+         "min_quantity": 2.0,
+         "storage_location": "5. Lower Deck/Bosun's Store/Zone S6/Shelf 1/Box 03 - Non - Skid Cleaner, Teak Oil",
+         "tags": "Consumables Teak", "category": "DECK/Consumables",
+         "brand": "Starbrite", "make": "Starbrite",
          "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
     ]
 
@@ -2103,7 +2110,32 @@ class TestDeckStockQueries(unittest.TestCase):
         r = self._spares("show main engine spares")
         self.assertIn("Oil filter Paper inserts", r)
 
-    # Issue 2: "where are" routing
+    # Teak oil location query (ASK-33 follow-up)
+    def test_where_is_teak_oil_routes_to_stock_query(self):
+        self.assertEqual(self._intent("where is the teak oil"), "stock_query")
+
+    def test_where_is_teak_oil_returns_deck_stock_found(self):
+        r = self._stock("where is the teak oil")
+        self.assertIn("DECK STOCK FOUND", r)
+        self.assertNotIn("compliance", r.lower())
+
+    def test_where_is_teak_oil_includes_description(self):
+        r = self._stock("where is the teak oil")
+        self.assertIn("Teak Oil", r)
+
+    def test_where_is_teak_oil_includes_qty(self):
+        r = self._stock("where is the teak oil")
+        self.assertIn("10", r)
+
+    def test_where_is_teak_oil_includes_brand(self):
+        r = self._stock("where is the teak oil")
+        self.assertIn("Starbrite", r)
+
+    def test_where_is_teak_oil_includes_location(self):
+        r = self._stock("where is the teak oil")
+        self.assertIn("Bosun", r)
+
+    # Issue 2: "where are/is" routing
     def test_where_are_ratchet_straps_routes_to_stock_query(self):
         self.assertEqual(self._intent("where are the ratchet straps?"), "stock_query")
 
@@ -2121,26 +2153,26 @@ class TestDeckStockQueries(unittest.TestCase):
     # Issue 3: location-focused actions
     def test_where_query_uses_location_actions(self):
         r = self._stock("where are the ratchet straps?")
-        self.assertIn("listed location before use", r)
+        self.assertIn("location before use", r)
         self.assertNotIn("before ordering", r)
 
     def test_where_can_i_find_uses_location_actions(self):
         r = self._stock("where can I find the wetsuits?")
-        self.assertIn("listed location before use", r)
+        self.assertIn("location before use", r)
 
-    # Issue 4: deck items suppress weak equipment links
+    # Issue 4: deck items show category/brand, no weak equipment link
     def test_sikaflex_query_has_no_rudder_angle_link(self):
         r = self._stock("do we have Sikaflex 295 onboard?")
         self.assertNotIn("Rudder Angle", r)
         self.assertNotIn("EQUIPMENT:", r)
 
-    def test_deck_item_query_shows_department_not_equipment(self):
-        r = self._stock("do we have Sikaflex 295 onboard?")
-        self.assertIn("DEPARTMENT:", r)
-
     def test_deck_item_query_shows_category(self):
         r = self._stock("do we have Sikaflex 295 onboard?")
         self.assertIn("CATEGORY:", r)
+
+    def test_deck_item_shows_deck_stock_found(self):
+        r = self._stock("do we have Sikaflex 295 onboard?")
+        self.assertIn("DECK STOCK FOUND", r)
 
 
 class TestDeckMalformedRowFiltering(unittest.TestCase):
