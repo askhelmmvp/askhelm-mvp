@@ -750,5 +750,105 @@ class TestApprovalClarificationEndToEnd(unittest.TestCase):
         self.assertNotIn("APPROVE", r.split("QUERY")[0])
 
 
+# ---------------------------------------------------------------------------
+# Proforma with added freight/shipping — ASK-34
+# ---------------------------------------------------------------------------
+
+def _proforma(supplier="HYDRO ELECTRIQUE MARINE S.A.S.", total=3204.48, items=None):
+    return {
+        "doc_type": "proforma",
+        "supplier_name": supplier,
+        "currency": "EUR",
+        "total": total,
+        "line_items": items or [
+            {"description": "Hydraulic pump assembly", "quantity": 1, "unit_rate": 1200.00, "line_total": 1200.00},
+            {"description": "Seawater strainer body", "quantity": 2, "unit_rate": 650.00, "line_total": 1300.00},
+            {"description": "Filter element", "quantity": 4, "unit_rate": 101.12, "line_total": 404.48},
+            {"description": "Packing/Shipping", "quantity": 1, "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "VAT", "quantity": 1, "unit_rate": 50.00, "line_total": 50.00},
+        ],
+    }
+
+
+def _hem_quote():
+    return {
+        "doc_type": "quote",
+        "supplier_name": "HYDRO ELECTRIQUE MARINE S.A.S.",
+        "currency": "EUR",
+        "total": 2904.48,
+        "line_items": [
+            {"description": "Hydraulic pump assembly", "quantity": 1, "unit_rate": 1200.00, "line_total": 1200.00},
+            {"description": "Seawater strainer body", "quantity": 2, "unit_rate": 650.00, "line_total": 1300.00},
+            {"description": "Filter element", "quantity": 4, "unit_rate": 101.12, "line_total": 404.48},
+        ],
+    }
+
+
+class TestApprovalProformaCleanMatch(unittest.TestCase):
+    """Proforma that exactly matches the quote → APPROVE, Low risk."""
+
+    def _response(self):
+        from whatsapp_app import _handle_approval
+        quote = _q(total=2904.48)
+        proforma = _proforma(
+            total=2904.48,
+            items=[
+                {"description": "Pump seal kit", "quantity": 1, "unit_rate": 500.0, "line_total": 500.0},
+                {"description": "Labour — engine service", "quantity": 5, "unit_rate": 100.0, "line_total": 500.0},
+            ],
+        )
+        state = _state_with_comparison(quote, proforma)
+        cd = state["sessions"][0]["last_comparison"]
+        return _handle_approval(state, cd)
+
+    def test_decision_is_approve(self):
+        self.assertIn("APPROVE", self._response())
+
+    def test_risk_is_low(self):
+        self.assertIn("Low", self._response())
+
+    def test_not_hold_or_query(self):
+        r = self._response()
+        self.assertNotIn("HOLD", r)
+        self.assertNotIn("QUERY", r)
+
+
+class TestApprovalProformaFreightAdded(unittest.TestCase):
+    """Proforma adds packing/shipping vs quote — should be QUERY not APPROVE (ASK-34)."""
+
+    def _response(self):
+        from whatsapp_app import _handle_approval
+        quote = _hem_quote()
+        proforma = _proforma()
+        state = _state_with_comparison(quote, proforma)
+        cd = state["sessions"][0]["last_comparison"]
+        return _handle_approval(state, cd)
+
+    def test_decision_is_query_not_approve(self):
+        r = self._response()
+        self.assertIn("QUERY", r)
+        self.assertNotIn("APPROVE", r)
+
+    def test_risk_is_medium(self):
+        self.assertIn("Medium", self._response())
+
+    def test_why_mentions_delta_amount(self):
+        r = self._response()
+        self.assertIn("300", r)
+
+    def test_why_does_not_say_rounding(self):
+        self.assertNotIn("rounding", self._response().lower())
+
+    def test_why_mentions_shipping_or_packing(self):
+        r = self._response().lower()
+        self.assertTrue(
+            "packing" in r or "shipping" in r or "freight" in r,
+            f"Expected packing/shipping/freight in: {r}",
+        )
+
+    def test_not_hold(self):
+        self.assertNotIn("HOLD", self._response())
+
+
 if __name__ == "__main__":
     unittest.main()
