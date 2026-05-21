@@ -925,5 +925,140 @@ class TestProformaComparisonShippingAdded(unittest.TestCase):
         self.assertNotIn("SHIPPING ADDED", r)
 
 
+# ---------------------------------------------------------------------------
+# ASK-34 follow-up: "it is accepted" routing and APPROVE FOR PAYMENT response
+# ---------------------------------------------------------------------------
+
+def _hem_incoterms_proforma():
+    """HEM proforma with CIP Incoterms in the packing/shipping line description."""
+    return {
+        "doc_type": "proforma",
+        "supplier_name": "HYDRO ELECTRIQUE MARINE S.A.S.",
+        "currency": "EUR",
+        "total": 3204.48,
+        "line_items": [
+            {"description": "Hydraulic pump assembly", "quantity": 1, "unit_rate": 1200.00, "line_total": 1200.00},
+            {"description": "Seawater strainer body", "quantity": 2, "unit_rate": 650.00, "line_total": 1300.00},
+            {"description": "Filter element", "quantity": 4, "unit_rate": 101.12, "line_total": 404.48},
+            {"description": "PACKING/SHIPPING EXPENSES - CIP (Incoterms 2020) BARCELONA (H.SHP)", "quantity": 1, "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "VAT", "quantity": 1, "unit_rate": 50.00, "line_total": 50.00},
+        ],
+    }
+
+
+class TestItIsAcceptedRouting(unittest.TestCase):
+    """'it is accepted' must route to approval_clarification, not fall through to LLM."""
+
+    def test_it_is_accepted_intent(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("it is accepted"), "approval_clarification")
+
+    def test_is_accepted_intent(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("charge is accepted"), "approval_clarification")
+
+    def test_is_agreed_intent(self):
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("it is agreed"), "approval_clarification")
+
+    def test_not_accepted_still_routes_to_clarification(self):
+        """'not accepted' must still route to approval_clarification (as reject)."""
+        from domain.intent import classify_text
+        self.assertEqual(classify_text("not accepted"), "approval_clarification")
+
+
+class TestIncotermsApprovalClarification(unittest.TestCase):
+    """Full flow: proforma with CIP Incoterms shipping → QUERY → 'it is accepted' → APPROVE FOR PAYMENT."""
+
+    def _run(self, message, state):
+        from whatsapp_app import _handle_text_message
+        r, new_state = _handle_text_message(message, state, "whatsapp:+44123456789")
+        return r, new_state
+
+    def _after_query(self):
+        """State after 'is this ok to pay?' returns QUERY for the Incoterms proforma."""
+        quote = _hem_quote()
+        proforma = _hem_incoterms_proforma()
+        state = _state_with_comparison(quote, proforma)
+        _, state = self._run("is this ok to pay?", state)
+        return state
+
+    def test_is_this_ok_returns_query(self):
+        quote = _hem_quote()
+        proforma = _hem_incoterms_proforma()
+        state = _state_with_comparison(quote, proforma)
+        r, _ = self._run("is this ok to pay?", state)
+        self.assertIn("QUERY", r)
+        self.assertNotIn("APPROVE", r)
+
+    def test_it_is_accepted_returns_approve_for_payment(self):
+        state = self._after_query()
+        r, _ = self._run("it is accepted", state)
+        self.assertIn("APPROVE FOR PAYMENT", r)
+        self.assertNotIn("HOLD", r)
+
+    def test_approve_risk_is_low(self):
+        state = self._after_query()
+        r, _ = self._run("it is accepted", state)
+        self.assertIn("Low", r)
+
+    def test_approve_why_mentions_packing_amount(self):
+        """WHY must mention EUR 250.00 packing/shipping (not just 'charge accepted')."""
+        state = self._after_query()
+        r, _ = self._run("it is accepted", state)
+        self.assertIn("250", r)
+
+    def test_approve_why_mentions_vat_amount(self):
+        state = self._after_query()
+        r, _ = self._run("it is accepted", state)
+        self.assertIn("50", r)
+
+    def test_approve_notes_incoterms_not_delivery_address(self):
+        """WHY must note CIP is an Incoterms term, not a delivery address."""
+        state = self._after_query()
+        r, _ = self._run("it is accepted", state)
+        self.assertTrue(
+            "incoterms" in r.lower() or "delivery condition" in r.lower(),
+            f"Expected Incoterms note in: {r[:400]}",
+        )
+
+    def test_approve_does_not_call_cip_a_delivery_point(self):
+        """Must not tell the user to confirm Barcelona as a delivery point."""
+        state = self._after_query()
+        r, _ = self._run("it is accepted", state)
+        self.assertNotIn("delivery point", r.lower())
+        self.assertNotIn("Confirm CIP", r)
+        self.assertNotIn("Confirm Barcelona", r)
+
+    def test_approve_has_vat_action(self):
+        """ACTIONS must include a VAT/accounting note."""
+        state = self._after_query()
+        r, _ = self._run("it is accepted", state)
+        self.assertIn("VAT", r)
+
+    def test_captain_role_does_not_override_approve_for_payment(self):
+        """Captain role adapter must not replace APPROVE FOR PAYMENT actions."""
+        from whatsapp_app import _handle_approval, adapt_response_for_role
+        quote = _hem_quote()
+        proforma = _hem_incoterms_proforma()
+        state = _state_with_comparison(quote, proforma)
+        cd = state["sessions"][0]["last_comparison"]
+        _handle_approval(state, cd)
+        from whatsapp_app import _handle_approval_clarification
+        base = _handle_approval_clarification("it is accepted", state)
+        adapted = adapt_response_for_role(base, "captain")
+        self.assertIn("250", adapted)
+        self.assertIn("APPROVE FOR PAYMENT", adapted)
+        # Must not get replaced by captain APPROVE generic actions
+        self.assertNotIn("no material commercial or operational risk", adapted)
+
+    def test_not_accepted_still_returns_hold(self):
+        """Regression: 'not accepted' after proforma QUERY still returns HOLD."""
+        state = self._after_query()
+        r, _ = self._run("not accepted", state)
+        self.assertIn("HOLD", r)
+        self.assertNotIn("APPROVE", r)
+
+
 if __name__ == "__main__":
     unittest.main()

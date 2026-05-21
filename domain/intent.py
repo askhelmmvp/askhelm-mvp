@@ -308,6 +308,9 @@ _APPROVAL_ACCEPT_SUBSTRINGS = [
     "ok with freight",
     "freight ok",
     "approve with freight",
+    # generic acceptance phrases — catches "it is accepted", "charge is accepted", etc.
+    "is accepted",
+    "is agreed",
 ]
 
 # Negative clarification replies after a QUERY approval decision.
