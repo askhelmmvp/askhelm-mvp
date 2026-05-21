@@ -833,8 +833,7 @@ class TestApprovalProformaFreightAdded(unittest.TestCase):
         self.assertIn("Medium", self._response())
 
     def test_why_mentions_delta_amount(self):
-        r = self._response()
-        self.assertIn("300", r)
+        self.assertIn("300", self._response())
 
     def test_why_does_not_say_rounding(self):
         self.assertNotIn("rounding", self._response().lower())
@@ -848,6 +847,82 @@ class TestApprovalProformaFreightAdded(unittest.TestCase):
 
     def test_not_hold(self):
         self.assertNotIn("HOLD", self._response())
+
+    def test_actions_mention_packing_amount(self):
+        """Actions should name the EUR 250.00 packing/shipping charge (ASK-34 follow-up)."""
+        r = self._response()
+        self.assertIn("250", r)
+
+    def test_actions_mention_vat_amount(self):
+        """Actions should name the EUR 50.00 VAT charge (ASK-34 follow-up)."""
+        r = self._response()
+        self.assertIn("50", r)
+
+    def test_actions_do_not_say_revised_scope(self):
+        """Actions must not describe a shipping addition as a 'revised scope' (ASK-34 follow-up)."""
+        self.assertNotIn("revised scope", self._response().lower())
+
+    def test_captain_role_does_not_override_charge_specific_actions(self):
+        """Captain role adapter must preserve item-specific EUR actions (ASK-34 follow-up)."""
+        from whatsapp_app import _handle_approval, adapt_response_for_role
+        quote = _hem_quote()
+        proforma = _proforma()
+        state = _state_with_comparison(quote, proforma)
+        cd = state["sessions"][0]["last_comparison"]
+        base = _handle_approval(state, cd)
+        adapted = adapt_response_for_role(base, "captain")
+        self.assertIn("250", adapted)
+        self.assertIn("50", adapted)
+        self.assertNotIn("revised scope", adapted.lower())
+
+
+class TestProformaComparisonShippingAdded(unittest.TestCase):
+    """Initial build_comparison_response for a proforma with added shipping (ASK-34 follow-up)."""
+
+    def _response(self):
+        from whatsapp_app import build_comparison_response
+        from domain.compare import compare_documents
+        quote = _hem_quote()
+        proforma = _proforma()
+        comparison = compare_documents(quote, proforma)
+        return build_comparison_response(quote, proforma, comparison)
+
+    def test_decision_says_shipping_added(self):
+        r = self._response()
+        self.assertIn("SHIPPING ADDED", r)
+
+    def test_decision_does_not_say_proforma_aligned(self):
+        self.assertNotIn("PROFORMA ALIGNED", self._response())
+
+    def test_why_mentions_packing_shipping(self):
+        r = self._response().lower()
+        self.assertTrue(
+            "packing" in r or "shipping" in r,
+            f"Expected packing/shipping in: {r}",
+        )
+
+    def test_actions_mention_packing_amount(self):
+        self.assertIn("250", self._response())
+
+    def test_actions_mention_vat_amount(self):
+        self.assertIn("50", self._response())
+
+    def test_clean_proforma_still_says_aligned(self):
+        """A matching proforma with no additions must still return PROFORMA ALIGNED."""
+        from whatsapp_app import build_comparison_response
+        from domain.compare import compare_documents
+        quote = _hem_quote()
+        proforma = {
+            "doc_type": "proforma",
+            "supplier_name": "HYDRO ELECTRIQUE MARINE S.A.S.",
+            "currency": "EUR",
+            "total": 2904.48,
+            "line_items": quote["line_items"],
+        }
+        comparison = compare_documents(quote, proforma)
+        r = build_comparison_response(quote, proforma, comparison)
+        self.assertIn("PROFORMA ALIGNED", r)
+        self.assertNotIn("SHIPPING ADDED", r)
 
 
 if __name__ == "__main__":

@@ -498,6 +498,11 @@ def adapt_response_for_role(response: str, role: Optional[str]) -> str:
     if not role_actions:
         return response
 
+    # Preserve charge-specific actions that already carry monetary amounts —
+    # they are more informative than the generic role actions.
+    if key == "QUERY" and re.search(r"ACTIONS:.*?[A-Z]{3}\s+\d", response, re.DOTALL):
+        return response
+
     bullets = "• " + "\n• ".join(role_actions)
     adapted = re.sub(
         r"(?:RECOMMENDED )?ACTIONS:\n.*$",
@@ -506,6 +511,23 @@ def adapt_response_for_role(response: str, role: Optional[str]) -> str:
         flags=re.DOTALL,
     )
     return adapted
+
+
+def _build_charge_actions(items: list, currency: str) -> list:
+    """Per-item confirmation actions with monetary amounts for freight/shipping QUERY responses."""
+    actions = []
+    for item in items[:3]:
+        desc = (item.get("description") or "charge").strip()
+        total = item.get("line_total")
+        try:
+            amt = float(total)
+            actions.append(f"Confirm the {currency} {amt:.2f} {desc} was expected or accepted")
+        except (TypeError, ValueError):
+            actions.append(f"Confirm the {desc} charge was expected or accepted")
+    if not actions:
+        actions.append("Confirm the added charges were expected or accepted")
+    actions.append("If accepted, approve payment and file the quote/proforma together")
+    return actions
 
 
 def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
@@ -562,11 +584,7 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
                 f"{delta_str} higher due to added {anc_str}. "
                 f"Confirm the charge was expected before payment."
             )
-            actions = [
-                f"Confirm the {anc_str} charge was expected or agreed",
-                "Approve only once the added charge is accepted",
-                "If not agreed, request a revised invoice",
-            ]
+            actions = _build_charge_actions(ancillary_items, currency)
         elif decision_code == "INVOICE HAS ADDITIONAL COST":
             _added_items = outcome.get("added_items") or []
             added_name_list = _get_item_names(_added_items)
@@ -576,11 +594,7 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
                 f"The invoice is {delta_str} than the quote due to added {added_str}. "
                 f"Confirm these charges were expected before payment."
             )
-            actions = [
-                f"Confirm the {added_str} charges were expected or agreed",
-                "If confirmed, approve payment",
-                "If not agreed, request a revised invoice",
-            ]
+            actions = _build_charge_actions(_added_items, currency)
         else:  # COST REDUCTION
             pct = abs(delta_percent or 0)
             why = f"The invoice is {pct:.1f}% below the quoted price. Confirm nothing has been omitted before approving."
@@ -1348,9 +1362,41 @@ def build_comparison_response(doc_a, doc_b, comparison, match_score: int = 0):
     added_names = _get_item_names(added_items)
     missing_names = _get_item_names(missing_items)
 
-    # Proforma: return aligned response with quote reference number if captured.
+    # Proforma: use outcome decision to pick the right response.
     quote_to_proforma = outcome["comparison_type"] == "quote_vs_proforma"
     if quote_to_proforma:
+        _outcome_decision = outcome["decision"]
+        cur = currency_b or currency_a or BASE_CURRENCY
+
+        if _outcome_decision in ("MATCH CONFIRMED — FREIGHT ADDED", "INVOICE HAS ADDITIONAL COST"):
+            _added_items_p = outcome.get("added_items") or []
+            added_name_list_p = _get_item_names(_added_items_p)
+            added_str_p = ", ".join(added_name_list_p) if added_name_list_p else "shipping/packing"
+            why = (
+                f"The quoted parts, quantities and unit prices match, but the proforma includes "
+                f"added {added_str_p} not in the quote. "
+                f"Confirm the added charge before payment."
+            )
+            if confidence_label:
+                why = f"{why} Confidence: {confidence_label}."
+            _p_actions = []
+            for _pi in _added_items_p[:3]:
+                _pdesc = (_pi.get("description") or "charge").strip()
+                _ptotal = _pi.get("line_total")
+                try:
+                    _pamt = float(_ptotal)
+                    _p_actions.append(f"Confirm the {cur} {_pamt:.2f} {_pdesc} charge was expected")
+                except (TypeError, ValueError):
+                    _p_actions.append(f"Confirm the {_pdesc} charge was expected")
+            if not _p_actions:
+                _p_actions.append("Confirm the added shipping/packing charge was expected")
+            _p_actions.append("Approve only once all added charges are accepted")
+            return _make_response(
+                decision="MATCH CONFIRMED — SHIPPING ADDED",
+                why=why,
+                actions=_p_actions,
+            )
+
         ref_num = (doc_b.get("reference_number") or "").strip()
         if ref_num:
             why = f"{supplier_b} proforma matches the quoted amount and references quote {ref_num}."
