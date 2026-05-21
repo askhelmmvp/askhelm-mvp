@@ -1984,6 +1984,12 @@ class TestDeckStockQueries(unittest.TestCase):
          "tags": "Consumables Teak", "category": "DECK/Consumables",
          "brand": "Starbrite", "make": "Starbrite",
          "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+        {"description": "Osmo Teak Oil", "quantity_onboard": 0.0,
+         "min_quantity": 1.0,
+         "storage_location": "4. Main Deck/Port TB/L19/Paint Box 3",
+         "tags": "Consumables Teak", "category": "DECK/Consumables",
+         "brand": "Osmo", "make": "Osmo",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
     ]
 
     _ENG_ITEMS = [
@@ -2135,6 +2141,27 @@ class TestDeckStockQueries(unittest.TestCase):
         r = self._stock("where is the teak oil")
         self.assertIn("Bosun", r)
 
+    def test_teak_oil_positive_qty_sorted_before_zero(self):
+        r = self._stock("where is the teak oil")
+        idx_starbrite = r.find("Starbrite")
+        idx_osmo = r.find("Osmo")
+        self.assertGreater(idx_starbrite, 0)
+        self.assertGreater(idx_osmo, 0)
+        self.assertLess(idx_starbrite, idx_osmo, "Starbrite (qty 10) should appear before Osmo (qty 0)")
+
+    def test_teak_oil_multi_match_both_locations_shown(self):
+        r = self._stock("where is the teak oil")
+        self.assertIn("Bosun", r)
+        self.assertIn("Main Deck", r)
+
+    def test_teak_oil_multi_match_location_section(self):
+        r = self._stock("where is the teak oil")
+        self.assertIn("Multiple matches", r)
+
+    def test_teak_oil_multi_match_no_global_location_not_recorded(self):
+        r = self._stock("where is the teak oil")
+        self.assertNotIn("Location not recorded", r)
+
     # Issue 2: "where are/is" routing
     def test_where_are_ratchet_straps_routes_to_stock_query(self):
         self.assertEqual(self._intent("where are the ratchet straps?"), "stock_query")
@@ -2173,6 +2200,70 @@ class TestDeckStockQueries(unittest.TestCase):
     def test_deck_item_shows_deck_stock_found(self):
         r = self._stock("do we have Sikaflex 295 onboard?")
         self.assertIn("DECK STOCK FOUND", r)
+
+
+class TestDeckStockMultiRatchet(unittest.TestCase):
+    """ASK-33 follow-up: multiple ratchet strap matches should not show a global Location not recorded."""
+
+    _RATCHET_ITEMS = [
+        {"description": "Watersports Ratchet Straps", "quantity_onboard": 1.0,
+         "storage_location": "Watersports Locker",
+         "tags": "Watersports", "category": "DECK/Watersports",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+        {"description": "Ratchet Straps For Tenders Box", "quantity_onboard": None,
+         "storage_location": "",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+        {"description": "Spare Ratchet Straps XL", "quantity_onboard": 3.0,
+         "storage_location": "Equipment Store",
+         "tags": "Deck", "category": "DECK/Rigging",
+         "department": "deck", "source_type": "deck_inventory", "confidence": 0.85},
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+        inv.merge_stock("", self._RATCHET_ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv)
+
+    def _stock(self, q):
+        from whatsapp_app import _handle_stock_query
+        r, _ = _handle_stock_query(q, {"user_id": ""})
+        return r
+
+    def test_ratchet_straps_returns_deck_stock_found(self):
+        r = self._stock("where are the ratchet straps?")
+        self.assertIn("DECK STOCK FOUND", r)
+
+    def test_ratchet_straps_no_global_location_not_recorded(self):
+        r = self._stock("where are the ratchet straps?")
+        self.assertNotIn("Location not recorded", r)
+
+    def test_ratchet_straps_shows_inline_location_for_located_items(self):
+        r = self._stock("where are the ratchet straps?")
+        self.assertIn("Watersports Locker", r)
+        self.assertIn("Equipment Store", r)
+
+    def test_ratchet_straps_multi_match_location_section(self):
+        r = self._stock("where are the ratchet straps?")
+        self.assertIn("Multiple matches", r)
+
+    def test_ratchet_straps_positive_qty_first(self):
+        r = self._stock("where are the ratchet straps?")
+        # Watersports Ratchet Straps (qty 1) and Spare XL (qty 3) before qty None
+        idx_spare = r.find("Spare Ratchet Straps XL")
+        idx_tender = r.find("Ratchet Straps For Tenders Box")
+        self.assertGreater(idx_spare, 0)
+        self.assertGreater(idx_tender, 0)
+        self.assertLess(idx_spare, idx_tender, "Positive-qty items should appear before None-qty")
 
 
 class TestDeckMalformedRowFiltering(unittest.TestCase):
