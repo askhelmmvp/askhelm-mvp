@@ -485,13 +485,14 @@ def adapt_response_for_role(response: str, role: Optional[str]) -> str:
         return response
     decision_text = decision_m.group(1).strip()
 
-    if decision_text.startswith("APPROVE"):
+    if decision_text == "APPROVE":
         key = "APPROVE"
     elif decision_text.startswith("HOLD"):
         key = "HOLD"
     elif decision_text.startswith("QUERY"):
         key = "QUERY"
     else:
+        # "APPROVE FOR PAYMENT" and other specific decisions keep their own actions
         return response
 
     role_actions = _ROLE_APPROVAL_ACTIONS[role].get(key)
@@ -729,6 +730,9 @@ _APPROVAL_ACCEPT_SUBSTRINGS_HANDLER = [
     "ok with freight",
     "freight ok",
     "approve with freight",
+    # generic acceptance phrases — catches "it is accepted", "charge is accepted", etc.
+    "is accepted",
+    "is agreed",
 ]
 
 _APPROVAL_CLARIFICATION_EXACT_HANDLER = frozenset({"accepted", "agreed"})
@@ -771,18 +775,74 @@ def _handle_approval_clarification(message: str, state: dict) -> str:
 
     if any(pos in t for pos in _APPROVAL_ACCEPT_SUBSTRINGS_HANDLER) or t_core in _APPROVAL_CLARIFICATION_EXACT_HANDLER:
         state.pop("last_context", None)
-        return _make_approval_response(
-            decision="APPROVE",
-            why=(
+
+        _a_items = last_ctx.get("added_items") or []
+        _a_cur = last_ctx.get("currency") or BASE_CURRENCY
+
+        if _a_items:
+            # Build amounts-specific WHY from stored comparison context
+            _amt_parts = []
+            for _ai in _a_items[:3]:
+                _ai_desc = (_ai.get("description") or "charge").strip()
+                _ai_total = _ai.get("line_total")
+                try:
+                    _amt_parts.append(f"{_a_cur} {float(_ai_total):.2f} {_ai_desc}")
+                except (TypeError, ValueError):
+                    _amt_parts.append(_ai_desc)
+            if len(_amt_parts) == 1:
+                _added_summary = _amt_parts[0]
+            elif len(_amt_parts) == 2:
+                _added_summary = f"{_amt_parts[0]} and {_amt_parts[1]}"
+            else:
+                _added_summary = ", ".join(_amt_parts[:-1]) + f" and {_amt_parts[-1]}"
+
+            _why = (
+                f"The quoted parts, quantities and unit prices match. "
+                f"The only open item was the added {_added_summary}, "
+                f"and this has now been accepted."
+            )
+
+            # Detect Incoterms codes in charge descriptions — do not misread as delivery address
+            _INCOTERMS = frozenset({"EXW", "FCA", "CPT", "CIP", "DAP", "DPU", "DDP", "FAS", "FOB", "CFR", "CIF"})
+            for _ai in _a_items:
+                _du = (_ai.get("description") or "").upper()
+                if any(f" {_ic} " in f" {_du} " or f"({_ic}" in _du or f"({_ic} " in _du for _ic in _INCOTERMS):
+                    _why += (
+                        " Any Incoterms code in the charge description (e.g. CIP, FOB) refers "
+                        "to the delivery condition and place of risk transfer, not the vessel's "
+                        "saved delivery address."
+                    )
+                    break
+
+            _has_vat = any(
+                "vat" in (_ai.get("description") or "").lower()
+                or "tax" in (_ai.get("description") or "").lower()
+                for _ai in _a_items
+            )
+            _actions = [
+                "Approve payment — the added charge has been accepted",
+                "File the quote and proforma together with the approval note",
+            ]
+            if _has_vat:
+                _actions.append(
+                    "Keep the VAT breakdown with the payment record for accounting treatment"
+                )
+        else:
+            _why = (
                 f"The only open query was the {open_issue}. You have confirmed it is "
                 "accepted, and the quoted material lines otherwise match the invoice."
-            ),
-            risk="Low",
-            actions=[
+            )
+            _actions = [
                 "Approve for payment",
                 "File the quote and invoice together",
                 f"Note that the {open_issue} was accepted after invoice review",
-            ],
+            ]
+
+        return _make_approval_response(
+            decision="APPROVE FOR PAYMENT",
+            why=_why,
+            risk="Low",
+            actions=_actions,
         )
 
     # Ambiguous reply — keep context open and re-prompt
@@ -841,12 +901,28 @@ def _handle_approval(state: dict, comparison_data) -> str:
         response = _build_invoice_approval_response(outcome, comparison)
         # Store approval query context so clarification follow-ups can resolve it
         _dc = outcome.get("decision", "")
+        _ctx_currency = outcome.get("currency_b") or outcome.get("currency_a") or BASE_CURRENCY
         if _dc == "MATCH CONFIRMED — FREIGHT ADDED":
-            state["last_context"] = {"type": "approval_query", "open_issue": "freight charge"}
+            state["last_context"] = {
+                "type": "approval_query",
+                "open_issue": "freight charge",
+                "added_items": outcome.get("ancillary_items") or [],
+                "currency": _ctx_currency,
+            }
         elif _dc in ("INVOICE HAS ADDITIONAL COST", "MATCH CONFIRMED — COST REDUCTION"):
-            state["last_context"] = {"type": "approval_query", "open_issue": "added cost"}
+            state["last_context"] = {
+                "type": "approval_query",
+                "open_issue": "added cost",
+                "added_items": outcome.get("added_items") or [],
+                "currency": _ctx_currency,
+            }
         elif "DECISION:\nQUERY" in response:
-            state["last_context"] = {"type": "approval_query", "open_issue": "open item"}
+            state["last_context"] = {
+                "type": "approval_query",
+                "open_issue": "open item",
+                "added_items": [],
+                "currency": _ctx_currency,
+            }
         return response
 
     response = _build_quote_approval_response(outcome, comparison)
