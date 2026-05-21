@@ -539,7 +539,7 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
             f"The invoice from {supplier_b} matches the quoted supplier, scope, "
             "quantities and total within acceptable tolerance."
         )
-        if delta and abs(delta) > 0:
+        if decision_code == "MATCH CONFIRMED — OK TO APPROVE" and delta and abs(delta) > 0:
             why += f" Difference of {currency} {abs(delta):.2f} is within rounding tolerance."
         return _make_approval_response(
             decision="APPROVE",
@@ -554,20 +554,30 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
 
     if decision_code in _QUERY_CODES:
         if decision_code == "MATCH CONFIRMED — FREIGHT ADDED":
-            anc_names = _get_item_names(ancillary_items)
+            anc_name_list = _get_item_names(ancillary_items)
+            anc_str = ", ".join(anc_name_list) if anc_name_list else "freight/shipping"
+            delta_str = f"{currency} {abs(delta):.2f}" if delta is not None else "an additional amount"
             why = (
-                f"The supplier and main scope match, but the invoice includes added "
-                f"{anc_names} not present in the quote."
+                f"The parts, quantities and unit prices match, but the invoice is "
+                f"{delta_str} higher due to added {anc_str}. "
+                f"Confirm the charge was expected before payment."
             )
             actions = [
-                "Ask the supplier to confirm freight was agreed",
-                "If freight is accepted, approve payment",
+                f"Confirm the {anc_str} charge was expected or agreed",
+                "Approve only once the added charge is accepted",
                 "If not agreed, request a revised invoice",
             ]
         elif decision_code == "INVOICE HAS ADDITIONAL COST":
-            why = "The invoice includes additional costs not in the quote. These items need to be confirmed as agreed additions."
+            _added_items = outcome.get("added_items") or []
+            added_name_list = _get_item_names(_added_items)
+            added_str = ", ".join(added_name_list) if added_name_list else "additional items"
+            delta_str = f"{currency} {abs(delta):.2f} higher" if delta is not None else "higher"
+            why = (
+                f"The invoice is {delta_str} than the quote due to added {added_str}. "
+                f"Confirm these charges were expected before payment."
+            )
             actions = [
-                "Ask the supplier to confirm the added charges were agreed",
+                f"Confirm the {added_str} charges were expected or agreed",
                 "If confirmed, approve payment",
                 "If not agreed, request a revised invoice",
             ]
@@ -1191,7 +1201,21 @@ def _classify_comparison(
         else:
             decision = "MATCH CONFIRMED — COST REDUCTION"
     elif quote_to_proforma:
-        decision = "MATCH CONFIRMED — PROFORMA ALIGNED"
+        _qty_mismatches = comparison.get("quantity_mismatches") or []
+        _priced_non_anc = comparison.get("priced_non_ancillary_added_items") or []
+        if _qty_mismatches:
+            decision = "INVOICE QUANTITY MISMATCH"
+        elif missing_items:
+            decision = "INVOICE DOES NOT FULLY MATCH QUOTE"
+        elif _priced_non_anc:
+            decision = "INVOICE HAS ADDITIONAL COST"
+        elif delta is not None and delta > 0:
+            if ancillary_only and ancillary_items:
+                decision = "MATCH CONFIRMED — FREIGHT ADDED"
+            else:
+                decision = "MATCH CONFIRMED — COST INCREASE"
+        else:
+            decision = "MATCH CONFIRMED — PROFORMA ALIGNED"
     else:
         decision = None  # other types resolved by _build_decision_and_why
 
