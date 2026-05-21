@@ -3833,7 +3833,11 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
             else:
                 lines += ["LOCATION:", "Location not recorded", ""]
 
-        if multi:
+        if query_type == "location":
+            lines += ["ACTIONS:",
+                      "• Check the listed location before use",
+                      "• Update inventory if moved or used"]
+        elif multi:
             lines += ["ACTIONS:",
                       "• Use the positive-stock item first",
                       "• Update inventory if moved or used"]
