@@ -3783,28 +3783,64 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
 
     # --- Deck inventory item: dedicated response format ---
     if is_deck_item:
+        # Sort positive-quantity records first, zero/None after
+        def _deck_qty_key(item):
+            q = item.get("quantity_onboard")
+            try:
+                return 0 if q is not None and float(q) > 0 else 1
+            except (TypeError, ValueError):
+                return 1
+        sorted_results = sorted(results, key=_deck_qty_key)
+        multi = len(sorted_results) > 1
+
         lines: list = []
         lines += ["DECISION:", "DECK STOCK FOUND", ""]
-        lines += ["WHY:", f"{desc} is recorded in {_yid.upper()} deck inventory.", ""]
+
+        if multi:
+            why = f"Found multiple {subject} records in {_yid.upper()} deck inventory."
+        else:
+            why = f"{desc} is recorded in {_yid.upper()} deck inventory."
+        lines += ["WHY:", why, ""]
+
         lines += ["STOCK:"]
-        for item in results[:8]:
+        for item in sorted_results[:8]:
             d = item.get("description") or "Unknown"
             q = item.get("quantity_onboard")
             brand = item.get("brand") or item.get("make") or ""
+            item_loc = item.get("storage_location") or ""
             qty_s = f" — Qty {_fmt_qty(q)}" if q is not None else ""
             brand_s = f" — {brand}" if brand else ""
-            lines.append(f"• {d}{qty_s}{brand_s}")
+            loc_s = f" — {item_loc}" if multi and item_loc else ""
+            lines.append(f"• {d}{qty_s}{brand_s}{loc_s}")
         lines.append("")
+
+        # Category only for single match (too noisy for multi)
         cat = first.get("category") or ""
-        if cat:
+        if cat and not multi:
             lines += ["CATEGORY:", cat, ""]
-        if loc:
-            lines += ["LOCATION:", loc, ""]
+
+        # LOCATION: per-item inline for multi; single section for one match
+        if multi:
+            item_locs = {item.get("storage_location") or "" for item in sorted_results[:8]}
+            item_locs.discard("")
+            if len(item_locs) == 1:
+                lines += ["LOCATION:", next(iter(item_locs)), ""]
+            else:
+                lines += ["LOCATION:", "Multiple matches found — see item locations above", ""]
         else:
-            lines += ["LOCATION:", "Location not recorded", ""]
-        lines += ["ACTIONS:",
-                  "• Check the listed deck inventory location before use",
-                  "• Update inventory if moved or used"]
+            if loc:
+                lines += ["LOCATION:", loc, ""]
+            else:
+                lines += ["LOCATION:", "Location not recorded", ""]
+
+        if multi:
+            lines += ["ACTIONS:",
+                      "• Use the positive-stock item first",
+                      "• Update inventory if moved or used"]
+        else:
+            lines += ["ACTIONS:",
+                      "• Check the listed deck inventory location before use",
+                      "• Update inventory if moved or used"]
         return "\n".join(lines).strip(), state
 
     # Determine if this is a specific compound item query (e.g. "oil filters for main engine")
