@@ -514,17 +514,71 @@ def adapt_response_for_role(response: str, role: Optional[str]) -> str:
     return adapted
 
 
+_INCOTERMS_CODES = frozenset({
+    "EXW", "FCA", "CPT", "CIP", "DAP", "DPU", "DDP", "FAS", "FOB", "CFR", "CIF",
+})
+
+
+def _extract_incoterms_place(desc: str):
+    """
+    Return (code, place) if an Incoterms code + place name is detected.
+    e.g. 'CIP(Incoterms2020) BARCELONA' → ('CIP', 'Barcelona')
+    Returns (None, None) if not found.
+    """
+    desc_up = desc.upper()
+    for code in _INCOTERMS_CODES:
+        m = re.search(rf'\b{code}\b', desc_up)
+        if m:
+            after = desc_up[m.end():]
+            after_clean = re.sub(r'^\s*\([^)]*\)', '', after).strip()
+            place_m = re.match(r'([A-Z][A-Za-z\s\-]+?)(?:\s*[\(\-]|\s*$)', after_clean)
+            if place_m:
+                return code, place_m.group(1).strip().title()
+            return code, None
+    return None, None
+
+
+def _format_ancillary_label(item: dict, currency: str, full: bool = False) -> str:
+    """
+    Human-readable label for a single ancillary charge item.
+    full=False (actions): 'EUR 250.00 packing/shipping charge'
+    full=True (WHY):      'EUR 250.00 packing/shipping charge under CIP Barcelona terms'
+    """
+    desc = (item.get("description") or "charge").strip()
+    total = item.get("line_total")
+    amt_str = ""
+    try:
+        amt_str = f"{currency} {float(total):.2f} "
+    except (TypeError, ValueError):
+        pass
+
+    desc_lower = desc.lower()
+    if "vat" in desc_lower or "tax" in desc_lower:
+        base = "VAT"
+    elif any(kw in desc_lower for kw in ("packing", "shipping", "freight", "carriage", "delivery", "transport")):
+        base = "packing/shipping charge"
+    else:
+        base = "charge"
+
+    if full:
+        code, place = _extract_incoterms_place(desc)
+        if code and place:
+            return f"{amt_str}{base} under {code} {place} terms"
+        elif code:
+            return f"{amt_str}{base} under {code} terms"
+    return f"{amt_str}{base}"
+
+
 def _build_charge_actions(items: list, currency: str) -> list:
     """Per-item confirmation actions with monetary amounts for freight/shipping QUERY responses."""
     actions = []
     for item in items[:3]:
-        desc = (item.get("description") or "charge").strip()
-        total = item.get("line_total")
-        try:
-            amt = float(total)
-            actions.append(f"Confirm the {currency} {amt:.2f} {desc} was expected or accepted")
-        except (TypeError, ValueError):
-            actions.append(f"Confirm the {desc} charge was expected or accepted")
+        label = _format_ancillary_label(item, currency)
+        desc_lower = (item.get("description") or "").lower()
+        if "vat" in desc_lower or "tax" in desc_lower:
+            actions.append(f"Confirm the {label} on the added charge is correct")
+        else:
+            actions.append(f"Confirm the {label} was expected or accepted")
     if not actions:
         actions.append("Confirm the added charges were expected or accepted")
     actions.append("If accepted, approve payment and file the quote/proforma together")
@@ -577,9 +631,9 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
 
     if decision_code in _QUERY_CODES:
         if decision_code == "MATCH CONFIRMED — FREIGHT ADDED":
-            anc_name_list = _get_item_names(ancillary_items)
-            anc_str = ", ".join(anc_name_list) if anc_name_list else "freight/shipping"
             delta_str = f"{currency} {abs(delta):.2f}" if delta is not None else "an additional amount"
+            _anc_labels = [_format_ancillary_label(i, currency) for i in ancillary_items[:2]]
+            anc_str = " and ".join(_anc_labels) if _anc_labels else "freight/shipping"
             why = (
                 f"The parts, quantities and unit prices match, but the invoice is "
                 f"{delta_str} higher due to added {anc_str}. "
@@ -588,13 +642,30 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
             actions = _build_charge_actions(ancillary_items, currency)
         elif decision_code == "INVOICE HAS ADDITIONAL COST":
             _added_items = outcome.get("added_items") or []
-            added_name_list = _get_item_names(_added_items)
-            added_str = ", ".join(added_name_list) if added_name_list else "additional items"
-            delta_str = f"{currency} {abs(delta):.2f} higher" if delta is not None else "higher"
-            why = (
-                f"The invoice is {delta_str} than the quote due to added {added_str}. "
-                f"Confirm these charges were expected before payment."
+            _has_shipping = any(
+                any(kw in (i.get("description") or "").lower()
+                    for kw in ("packing", "shipping", "freight", "carriage", "delivery", "transport"))
+                for i in _added_items
             )
+            _has_vat = any(
+                any(kw in (i.get("description") or "").lower() for kw in ("vat", "tax"))
+                for i in _added_items
+            )
+            delta_str = f"{currency} {abs(delta):.2f} higher" if delta is not None else "higher"
+            if _has_shipping and _has_vat:
+                _charge_desc = "packing/shipping and VAT"
+            elif _has_shipping:
+                _charge_desc = "packing/shipping"
+            else:
+                _charge_desc = ", ".join((_get_item_names(_added_items) or ["additional items"]))
+            why = (
+                f"The parts, quantities and unit prices match, but the invoice is "
+                f"{delta_str} than the quote due to added {_charge_desc}."
+            )
+            if _has_shipping:
+                why += " The quote excluded packing/shipping, so confirm the charge was expected before payment."
+            else:
+                why += " Confirm these charges were expected before payment."
             actions = _build_charge_actions(_added_items, currency)
         else:  # COST REDUCTION
             pct = abs(delta_percent or 0)
@@ -1446,27 +1517,39 @@ def build_comparison_response(doc_a, doc_b, comparison, match_score: int = 0):
 
         if _outcome_decision in ("MATCH CONFIRMED — FREIGHT ADDED", "INVOICE HAS ADDITIONAL COST"):
             _added_items_p = outcome.get("added_items") or []
-            added_name_list_p = _get_item_names(_added_items_p)
-            added_str_p = ", ".join(added_name_list_p) if added_name_list_p else "shipping/packing"
+            _ship_items_p = [
+                i for i in _added_items_p
+                if not any(kw in (i.get("description") or "").lower() for kw in ("vat", "tax"))
+            ]
+            _vat_items_p = [
+                i for i in _added_items_p
+                if any(kw in (i.get("description") or "").lower() for kw in ("vat", "tax"))
+            ]
+            _primary = _ship_items_p[0] if _ship_items_p else (_added_items_p[0] if _added_items_p else None)
+            if _primary:
+                _primary_label = _format_ancillary_label(_primary, cur, full=True)
+                if _vat_items_p:
+                    _charge_summary = f"an added {_primary_label}, plus associated VAT"
+                else:
+                    _charge_summary = f"an added {_primary_label}"
+            else:
+                _charge_summary = "added shipping/packing charges"
             why = (
                 f"The quoted parts, quantities and unit prices match, but the proforma includes "
-                f"added {added_str_p} not in the quote. "
+                f"{_charge_summary} not in the quote. "
                 f"Confirm the added charge before payment."
             )
             if confidence_label:
                 why = f"{why} Confidence: {confidence_label}."
             _p_actions = []
-            for _pi in _added_items_p[:3]:
-                _pdesc = (_pi.get("description") or "charge").strip()
-                _ptotal = _pi.get("line_total")
-                try:
-                    _pamt = float(_ptotal)
-                    _p_actions.append(f"Confirm the {cur} {_pamt:.2f} {_pdesc} charge was expected")
-                except (TypeError, ValueError):
-                    _p_actions.append(f"Confirm the {_pdesc} charge was expected")
+            if _primary:
+                _lbl = _format_ancillary_label(_primary, cur)
+                _p_actions.append(f"Confirm the {_lbl} was expected or accepted")
+            if _vat_items_p:
+                _p_actions.append("Confirm the VAT on the added charge is correct")
             if not _p_actions:
                 _p_actions.append("Confirm the added shipping/packing charge was expected")
-            _p_actions.append("Approve only once all added charges are accepted")
+            _p_actions.append("Approve only once the added charge is accepted")
             return _make_response(
                 decision="MATCH CONFIRMED — SHIPPING ADDED",
                 why=why,

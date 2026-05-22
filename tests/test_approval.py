@@ -200,8 +200,8 @@ class TestApprovalFreightAdded(unittest.TestCase):
     def test_action_mentions_freight_confirmation(self):
         r = self._response()
         self.assertTrue(
-            "freight" in r.lower() or "supplier" in r.lower(),
-            f"Expected freight or supplier in: {r}",
+            "freight" in r.lower() or "supplier" in r.lower() or "packing/shipping" in r.lower(),
+            f"Expected freight, supplier or packing/shipping in: {r}",
         )
 
     def test_not_approve_or_hold(self):
