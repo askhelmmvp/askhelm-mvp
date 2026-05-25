@@ -60,37 +60,55 @@ def _config_path() -> Path:
     return Path(STORAGE_DIR) / "vessel_config.json"
 
 
-def load_invoice_address() -> str:
-    """Returns the saved invoice address as a raw string. Falls back to the default."""
+def _load_from_config(key: str, default: str) -> str:
     path = _config_path()
     try:
         if path.exists():
             with open(path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-            addr = cfg.get("invoice_address", {}).get("raw", "").strip()
+            addr = cfg.get(key, {}).get("raw", "").strip()
             if addr:
                 return addr
     except Exception as exc:
-        logger.warning("invoice_address: failed to load vessel_config.json: %s", exc)
-    return _DEFAULT_ADDRESS_RAW
+        logger.warning("invoice_address: failed to load vessel_config.json key=%s: %s", key, exc)
+    return default
 
 
-def save_invoice_address(raw_text: str) -> None:
-    """Persist a new invoice address to vessel_config.json."""
+def _save_to_config(key: str, raw_text: str) -> None:
     path = _config_path()
     try:
         cfg = {}
         if path.exists():
             with open(path, "r", encoding="utf-8") as f:
                 cfg = json.load(f)
-        cfg["invoice_address"] = {"raw": raw_text.strip()}
+        cfg[key] = {"raw": raw_text.strip()}
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(cfg, f, indent=2)
-        logger.info("invoice_address: saved new address length=%d", len(raw_text))
+        logger.info("invoice_address: saved key=%s length=%d", key, len(raw_text))
     except Exception as exc:
-        logger.exception("invoice_address: failed to save address: %s", exc)
+        logger.exception("invoice_address: failed to save key=%s: %s", key, exc)
         raise
+
+
+def load_invoice_address() -> str:
+    """Returns the saved invoice/billing address. Falls back to the default."""
+    return _load_from_config("invoice_address", _DEFAULT_ADDRESS_RAW)
+
+
+def save_invoice_address(raw_text: str) -> None:
+    """Persist a new invoice/billing address to vessel_config.json."""
+    _save_to_config("invoice_address", raw_text)
+
+
+def load_delivery_address() -> str:
+    """Returns the saved delivery address. Falls back to the default."""
+    return _load_from_config("delivery_address", _DEFAULT_DELIVERY_RAW)
+
+
+def save_delivery_address(raw_text: str) -> None:
+    """Persist a new delivery address to vessel_config.json."""
+    _save_to_config("delivery_address", raw_text)
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +193,11 @@ def check_invoice_billing_address(doc_record: dict) -> dict:
 def check_invoice_delivery_address(doc_record: dict) -> dict:
     """
     Check whether the delivery/ship-to address on the invoice matches the saved
-    vessel/project details.  Uses a lenient keyword match (2+ key identifiers).
+    vessel/project delivery address.
+
+    For the built-in default (Oceanco/Alblasserdam) uses the original 2-of-5 key-token
+    approach for backward compatibility.  For any user-saved address, uses token overlap
+    with a lenient threshold (>= 0.35).
 
     Returns {checked, match}.
     checked=False when no delivery address was extracted — caller must not flag mismatch.
@@ -190,15 +212,23 @@ def check_invoice_delivery_address(doc_record: dict) -> dict:
         return {"checked": False, "match": True}
 
     full_text = " ".join(filter(None, [entity] + list(address_lines) + [country]))
-    normalised = _normalize(full_text)
-    tokens = set(normalised.split())
+    saved = load_delivery_address()
 
-    matched_keys = _DELIVERY_KEY_TOKENS & tokens
-    match = len(matched_keys) >= 2
-
-    logger.info(
-        "delivery_address_check=True matched_keys=%s delivery_match=%s",
-        matched_keys, match,
-    )
+    if saved == _DEFAULT_DELIVERY_RAW:
+        normalised = _normalize(full_text)
+        tokens = set(normalised.split())
+        matched_keys = _DELIVERY_KEY_TOKENS & tokens
+        match = len(matched_keys) >= 2
+        logger.info(
+            "delivery_address_check=True method=key_tokens matched_keys=%s delivery_match=%s",
+            matched_keys, match,
+        )
+    else:
+        score = _overlap_score(full_text, saved)
+        match = score >= 0.35
+        logger.info(
+            "delivery_address_check=True method=overlap score=%.2f delivery_match=%s",
+            score, match,
+        )
 
     return {"checked": True, "match": match}

@@ -74,6 +74,8 @@ from domain.invoice_address import (
     check_invoice_delivery_address,
     load_invoice_address,
     save_invoice_address,
+    load_delivery_address,
+    save_delivery_address,
     ADDRESS_MATCH_NOTE,
     ADDRESS_MISMATCH_NOTE,
     DELIVERY_MATCH_NOTE,
@@ -2044,6 +2046,21 @@ _UTILITY_INVOICE_KEYWORDS = frozenset({
     "water provision", "electricity", "metered", "meter reading",
     "connection fee", "power connection",
 })
+
+
+def _is_valid_address(text: str) -> bool:
+    """
+    Minimal address sanity check.  Accepts if:
+    - at least 2 non-empty lines, OR
+    - at least 15 characters and contains a digit or known country/postcode pattern.
+    """
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    if len(lines) >= 2:
+        return True
+    flat = text.strip()
+    if len(flat) >= 15 and re.search(r'\d', flat):
+        return True
+    return False
 
 
 def _is_invoice_self_assessment(text: str) -> bool:
@@ -5543,18 +5560,129 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         logger.info("equipment_reset: user=%s yacht=%s path=%s", _uid, _yid, get_equipment_memory_path(_yid))
         return _equipment_reset_response(), state
 
-    # Invoice address commands
-    if _tl == "show invoice address":
-        return f"SAVED INVOICE ADDRESS:\n\n{load_invoice_address()}", state
-    if _tl.startswith("set invoice address:"):
-        _new_addr = _t[len("set invoice address:"):].strip()
-        if not _new_addr:
-            return "Please include the new address after 'set invoice address:'", state
+    # ---------------------------------------------------------------------------
+    # Address management — pending state consumption
+    # Checked before classify_text so that multi-line address text (unknown intent)
+    # is never swallowed by other routing.
+    # ---------------------------------------------------------------------------
+    if state.get("pending_delivery_address_update"):
+        if _tl == "cancel":
+            state.pop("pending_delivery_address_update", None)
+            return (
+                "DECISION:\nADDRESS UPDATE CANCELLED\n\n"
+                "WHY:\nThe saved delivery address was not changed.",
+                state,
+            )
+        if not _is_valid_address(incoming):
+            return (
+                "That address looks incomplete. Please send the full delivery address "
+                "(at least two lines, or include a postcode or country).",
+                state,
+            )
+        state.pop("pending_delivery_address_update", None)
         try:
-            save_invoice_address(_new_addr)
-            return f"INVOICE ADDRESS UPDATED:\n\n{_new_addr}", state
+            save_delivery_address(incoming)
+        except Exception:
+            return "Failed to save delivery address. Please try again.", state
+        return (
+            "DECISION:\nDELIVERY ADDRESS UPDATED\n\n"
+            "WHY:\nFuture quote, invoice and proforma address checks will compare delivery "
+            "details against this saved address.\n\n"
+            f"SAVED DELIVERY ADDRESS:\n{incoming}\n\n"
+            "ACTIONS:\n"
+            "• Upload a quote or invoice to test the address check\n"
+            "• Say \"show saved addresses\" to review saved details",
+            state,
+        )
+
+    if state.get("pending_invoice_address_update"):
+        if _tl == "cancel":
+            state.pop("pending_invoice_address_update", None)
+            return (
+                "DECISION:\nADDRESS UPDATE CANCELLED\n\n"
+                "WHY:\nThe saved invoice address was not changed.",
+                state,
+            )
+        if not _is_valid_address(incoming):
+            return (
+                "That address looks incomplete. Please send the full invoice address "
+                "(at least two lines, or include a postcode or country).",
+                state,
+            )
+        state.pop("pending_invoice_address_update", None)
+        try:
+            save_invoice_address(incoming)
         except Exception:
             return "Failed to save invoice address. Please try again.", state
+        return (
+            "DECISION:\nINVOICE ADDRESS UPDATED\n\n"
+            "WHY:\nFuture invoice/proforma billing address checks will compare against this saved address.\n\n"
+            f"SAVED INVOICE ADDRESS:\n{incoming}\n\n"
+            "ACTIONS:\n"
+            "• Upload an invoice or proforma to test the address check\n"
+            "• Say \"show saved addresses\" to review saved details",
+            state,
+        )
+
+    # ---------------------------------------------------------------------------
+    # Address management — show / change commands
+    # ---------------------------------------------------------------------------
+    _ADDRESS_DELIVERY_CHANGE = frozenset({
+        "change delivery address", "update delivery address", "set delivery address",
+    })
+    _ADDRESS_INVOICE_CHANGE = frozenset({
+        "change invoice address", "update invoice address", "set invoice address",
+        "change billing address", "update billing address", "set billing address",
+    })
+
+    if _tl in _ADDRESS_DELIVERY_CHANGE:
+        state["pending_delivery_address_update"] = True
+        return (
+            "DECISION:\nREADY TO UPDATE DELIVERY ADDRESS\n\n"
+            "WHY:\nI can update the saved delivery address used for future address checks.\n\n"
+            "ACTIONS:\n"
+            "• Send the full delivery address in your next message\n"
+            "• Or say \"cancel\" to leave it unchanged",
+            state,
+        )
+
+    if _tl in _ADDRESS_INVOICE_CHANGE:
+        state["pending_invoice_address_update"] = True
+        return (
+            "DECISION:\nREADY TO UPDATE INVOICE ADDRESS\n\n"
+            "WHY:\nI can update the saved invoice/billing address used for future address checks.\n\n"
+            "ACTIONS:\n"
+            "• Send the full invoice address in your next message\n"
+            "• Or say \"cancel\" to leave it unchanged",
+            state,
+        )
+
+    if _tl in ("show delivery address",):
+        return (
+            "DECISION:\nSAVED DELIVERY ADDRESS\n\n"
+            f"DELIVERY ADDRESS:\n{load_delivery_address()}",
+            state,
+        )
+
+    if _tl in ("show invoice address", "show billing address"):
+        return (
+            "DECISION:\nSAVED INVOICE ADDRESS\n\n"
+            f"INVOICE ADDRESS:\n{load_invoice_address()}",
+            state,
+        )
+
+    if _tl == "show saved addresses":
+        _inv_addr = load_invoice_address()
+        _del_addr = load_delivery_address()
+        return (
+            "DECISION:\nSAVED ADDRESSES FOUND\n\n"
+            f"INVOICE ADDRESS:\n{_inv_addr}\n\n"
+            f"DELIVERY ADDRESS:\n{_del_addr}\n\n"
+            "ACTIONS:\n"
+            "• Say \"change invoice address\" to update billing details\n"
+            "• Say \"change delivery address\" to update delivery details",
+            state,
+        )
 
     intent = classify_text(incoming)
     last_ctx = state.get("last_context", {})
