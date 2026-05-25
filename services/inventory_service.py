@@ -51,15 +51,27 @@ _STOCK_BODY_KW = frozenset([
 # in a PDF, the document is a supplier quotation — not an inventory list — even if
 # it also contains item/quantity/part-number columns. One match is enough.
 _QUOTE_STRONG_INDICATORS = frozenset([
+    # Standard quotation headers
     "quotation",             # document header says QUOTATION
     "quote no",              # quote number field (also catches "quote no.")
     "quote number",          # long-form variant
+    "market benchmark quote",  # market benchmark / comparative quote format
+    "benchmark quote",       # shorter variant
+    # Supplier offer phrases
     "herewith we offer",     # classic Dutch/European supplier phrasing
     "we hereby offer",       # alternative offer phrasing
     "our quotation",
-    "total including vat",   # commercial invoice/quote total line
     "please find our quotation",
     "subject: quotation",
+    # Commercial totals — never appear on inventory lists
+    "total including vat",   # commercial invoice/quote total line
+    "total amount",          # final total field on a quote or invoice
+    "subtotal",              # line-level subtotal before tax
+    # Commercial address fields — invoices/quotes have these; inventory lists do not
+    "bill to",               # billing address header
+    "ship to",               # delivery address header
+    # Trade terms — commercial documents only
+    "incoterms",             # any Incoterms reference (DAP, CIP, FOB etc.)
 ])
 
 
