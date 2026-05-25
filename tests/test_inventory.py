@@ -1021,6 +1021,64 @@ class TestQuoteNotMisclassifiedAsInventory(unittest.TestCase):
         result = self._classify(text)
         self.assertIsNotNone(result)
 
+    def test_market_benchmark_quote_not_classified_as_stock(self):
+        """Market Benchmark Quote header must block inventory classification."""
+        text = (
+            "Market Benchmark Quote\n"
+            "Quote No: 15B-DEMO-2026\n"
+            "Bill To: BLUE OCEAN DEMO LTD\n"
+            "Ship To: DEMO YACHT SERVICES, Port Vauban, Antibes\n\n"
+            "Part No     Description                     Qty  Unit Price   Line Total\n"
+            "RAM-SEAL-KIT  Seal Kit for RAM-200            1    GBP 250.00   GBP 250.00\n"
+            "GS10-750N-SS  Groco Sea Strainer 3/4 in SS   1    GBP 220.00   GBP 220.00\n"
+            "DEL-ANTIBES   Delivery — DAP Antibes          1    GBP  38.50   GBP  38.50\n\n"
+            "Subtotal: GBP 508.50\n"
+            "VAT 0%:   GBP 0.00\n"
+            "Total Amount: GBP 508.50\n"
+            "Terms: Incoterms DAP Antibes\n"
+        )
+        self.assertIsNone(self._classify(text))
+
+    def test_benchmark_quote_keyword_alone_blocks_inventory(self):
+        """'benchmark quote' on its own is a strong enough commercial indicator."""
+        text = "Benchmark Quote\nPart Number  Qty  Unit Price\nRAM-001  1  GBP 250.00"
+        self.assertIsNone(self._classify(text))
+
+    def test_bill_to_keyword_blocks_inventory_classification(self):
+        """'bill to' address field blocks inventory classification."""
+        text = "Bill To: Acme Marine Ltd\nPart No  Description  Qty  Unit Price\nSEAL-1  Pump Seal  2  GBP 45.00"
+        self.assertIsNone(self._classify(text))
+
+    def test_ship_to_keyword_blocks_inventory_classification(self):
+        """'ship to' delivery field blocks inventory classification."""
+        text = "Ship To: Port Vauban, Antibes\nPart No  Description  Qty  Spare Part\nSEAL-1  Pump Seal  2"
+        self.assertIsNone(self._classify(text))
+
+    def test_incoterms_keyword_blocks_inventory_classification(self):
+        """'incoterms' in trade terms blocks inventory classification."""
+        text = "Part No  Qty  Spare\nSEAL-1  2\nTerms: Incoterms DAP Antibes"
+        self.assertIsNone(self._classify(text))
+
+    def test_subtotal_keyword_blocks_inventory_classification(self):
+        """'subtotal' commercial total line blocks inventory classification."""
+        text = "Part No  Qty  Spare\nSEAL-1  2\nSubtotal: GBP 508.50"
+        self.assertIsNone(self._classify(text))
+
+    def test_total_amount_keyword_blocks_inventory_classification(self):
+        """'total amount' blocks inventory classification."""
+        text = "Part No  Description  Qty\nSEAL-1  Spare Seal  2\nTotal Amount: GBP 508.50"
+        self.assertIsNone(self._classify(text))
+
+    def test_spare_parts_inventory_heading_still_triggers_with_new_indicators(self):
+        """Adding new quote indicators must not break real inventory heading detection."""
+        text = "H3 Spare Parts Inventory\nPart Number  Description  Qty\nMAN-123  Oil Filter  5"
+        self.assertIsNotNone(self._classify(text))
+
+    def test_stock_list_heading_still_triggers_with_new_indicators(self):
+        """Stock list heading must still classify as inventory after indicator additions."""
+        text = "Stock List\nPart Number  Description  Qty  Storage Location\nMAN-123  Oil Filter  5  ER Store"
+        self.assertIsNotNone(self._classify(text))
+
 
 class TestBarnacleQuoteComparison(unittest.TestCase):
     """IYS and SYS Barnacle Buster quotes must compare correctly on part/quantity/freight."""
