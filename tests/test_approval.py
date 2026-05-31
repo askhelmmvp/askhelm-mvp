@@ -1060,5 +1060,400 @@ class TestIncotermsApprovalClarification(unittest.TestCase):
         self.assertNotIn("APPROVE", r)
 
 
+# ---------------------------------------------------------------------------
+# ASK-37 — Demo 01 / 02 / 03 scenarios
+# ---------------------------------------------------------------------------
+
+def _demo01_quote():
+    return {
+        "doc_type": "quote",
+        "supplier_name": "Demo Tender Spares Ltd.",
+        "currency": "GBP",
+        "total": 500.00,
+        "line_items": [
+            {"description": "RAM-SEAL-KIT Seal Kit for RAM-200", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "GS10-750N-SS Groco Sea Strainer 3/4 in SS", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+        ],
+    }
+
+
+def _demo01_invoice():
+    """Invoice exactly matches the quote — clean APPROVE case."""
+    return {
+        "doc_type": "invoice",
+        "supplier_name": "Demo Tender Spares Ltd.",
+        "currency": "GBP",
+        "total": 500.00,
+        "line_items": [
+            {"description": "RAM-SEAL-KIT Seal Kit for RAM-200", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "GS10-750N-SS Groco Sea Strainer 3/4 in SS", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+        ],
+    }
+
+
+def _demo02_quote():
+    return {
+        "doc_type": "quote",
+        "supplier_name": "Demo Tender Spares Ltd.",
+        "currency": "GBP",
+        "total": 500.00,
+        "line_items": [
+            {"description": "RAM-SEAL-KIT Seal Kit for RAM-200", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "GS10-750N-SS Groco Sea Strainer 3/4 in SS", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+        ],
+    }
+
+
+def _demo02_invoice():
+    """Invoice matches quote but adds a delivery/freight charge — QUERY case."""
+    return {
+        "doc_type": "invoice",
+        "supplier_name": "Demo Tender Spares Ltd.",
+        "currency": "GBP",
+        "total": 610.00,
+        "line_items": [
+            {"description": "RAM-SEAL-KIT Seal Kit for RAM-200", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "GS10-750N-SS Groco Sea Strainer 3/4 in SS", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "Delivery charge DAP Antibes", "quantity": 1,
+             "unit_rate": 110.00, "line_total": 110.00},
+        ],
+    }
+
+
+def _demo03_quote():
+    return {
+        "doc_type": "quote",
+        "supplier_name": "Demo Tender Spares Ltd.",
+        "currency": "GBP",
+        "total": 508.50,
+        "line_items": [
+            {"description": "RAM-SEAL-KIT Seal Kit for RAM-200", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "GS10-750N-SS 750N stainless steel polished compression gas spring with clevis forks",
+             "quantity": 1, "unit_rate": 206.50, "line_total": 206.50},
+            {"description": "DEL-ANTIBES Delivery DAP Antibes", "quantity": 1,
+             "unit_rate": 52.00, "line_total": 52.00},
+        ],
+    }
+
+
+def _demo03_invoice():
+    """Invoice substitutes a different gas spring spec and increases delivery — HOLD case."""
+    return {
+        "doc_type": "invoice",
+        "supplier_name": "Demo Tender Spares Ltd.",
+        "currency": "GBP",
+        "total": 694.00,
+        "line_items": [
+            {"description": "RAM-SEAL-KIT Seal Kit for RAM-200", "quantity": 1,
+             "unit_rate": 250.00, "line_total": 250.00},
+            {"description": "GS10-1000N-ZP 1000N zinc-plated gas spring clevis forks SUBSTITUTE ITEM",
+             "quantity": 1, "unit_rate": 334.00, "line_total": 334.00},
+            {"description": "Delivery", "quantity": 1,
+             "unit_rate": 110.00, "line_total": 110.00},
+        ],
+        "delivery_address": {
+            "entity": "ANTIBES SERVICE DEPOT",
+            "address_lines": ["7 Rue de l'Industrie", "06600 Antibes"],
+            "country": "France",
+        },
+    }
+
+
+class TestDemo01CleanMatch(unittest.TestCase):
+    """Demo 01: identical quote and invoice → APPROVE / Low risk."""
+
+    def _response(self):
+        from whatsapp_app import _handle_approval
+        state = _state_with_comparison(_demo01_quote(), _demo01_invoice())
+        cd = state["sessions"][0]["last_comparison"]
+        return _handle_approval(state, cd)
+
+    def test_decision_is_approve(self):
+        self.assertIn("APPROVE", self._response())
+
+    def test_risk_is_low(self):
+        self.assertIn("Low", self._response())
+
+    def test_not_hold(self):
+        self.assertNotIn("HOLD", self._response())
+
+    def test_not_query(self):
+        self.assertNotIn("QUERY", self._response())
+
+
+class TestDemo02FreightOnly(unittest.TestCase):
+    """Demo 02: invoice adds freight only → QUERY / Medium risk."""
+
+    def _response(self):
+        from whatsapp_app import _handle_approval
+        state = _state_with_comparison(_demo02_quote(), _demo02_invoice())
+        cd = state["sessions"][0]["last_comparison"]
+        return _handle_approval(state, cd)
+
+    def test_decision_is_query(self):
+        self.assertIn("QUERY", self._response())
+
+    def test_risk_is_medium(self):
+        self.assertIn("Medium", self._response())
+
+    def test_not_hold(self):
+        self.assertNotIn("HOLD", self._response())
+
+
+class TestDemo03SubstitutionHold(unittest.TestCase):
+    """Demo 03: substitute item + price increase + delivery increase → HOLD / High risk."""
+
+    def _response(self):
+        from whatsapp_app import _handle_approval
+        state = _state_with_comparison(_demo03_quote(), _demo03_invoice())
+        cd = state["sessions"][0]["last_comparison"]
+        return _handle_approval(state, cd)
+
+    def test_decision_is_hold(self):
+        self.assertIn("HOLD", self._response())
+
+    def test_risk_is_high(self):
+        self.assertIn("High", self._response())
+
+    def test_not_approve(self):
+        self.assertNotIn("APPROVE", self._response())
+
+    def test_not_query(self):
+        self.assertNotIn("QUERY", self._response())
+
+    def test_why_mentions_substitute(self):
+        r = self._response()
+        self.assertTrue(
+            "substitute" in r.lower() or "substitut" in r.lower(),
+            f"Expected substitute in: {r[:400]}",
+        )
+
+    def test_why_mentions_specification_or_changed(self):
+        r = self._response()
+        self.assertTrue(
+            "specification" in r.lower() or "changed" in r.lower() or "mismatch" in r.lower(),
+            f"Expected spec/changed/mismatch in: {r[:400]}",
+        )
+
+    def test_actions_mention_do_not_approve(self):
+        r = self._response()
+        self.assertIn("Do not approve", r)
+
+    def test_actions_mention_specification(self):
+        r = self._response()
+        self.assertTrue(
+            "specification" in r.lower() or "spec" in r.lower(),
+            f"Expected spec reference in actions: {r[:400]}",
+        )
+
+
+class TestDemo03ComparisonResponse(unittest.TestCase):
+    """Demo 03 build_comparison_response returns HOLD (not FREIGHT ADDED or QUERY)."""
+
+    def _response(self):
+        from whatsapp_app import build_comparison_response
+        from domain.compare import compare_documents
+        q = _demo03_quote()
+        inv = _demo03_invoice()
+        comp = compare_documents(q, inv)
+        return build_comparison_response(q, inv, comp)
+
+    def test_decision_is_hold(self):
+        self.assertIn("HOLD", self._response())
+
+    def test_not_freight_added(self):
+        self.assertNotIn("FREIGHT ADDED", self._response())
+
+    def test_not_match_confirmed(self):
+        self.assertNotIn("MATCH CONFIRMED", self._response())
+
+    def test_why_mentions_substitute(self):
+        r = self._response()
+        self.assertTrue(
+            "substitute" in r.lower() or "changed" in r.lower(),
+            f"Expected substitute or changed in: {r[:400]}",
+        )
+
+
+class TestDemo03ApprovalFollowUp(unittest.TestCase):
+    """Approval follow-up after Demo 03 comparison stays HOLD."""
+
+    def _state_after_comparison(self):
+        from domain.compare import compare_documents
+        q = _demo03_quote()
+        inv = _demo03_invoice()
+        comp = compare_documents(q, inv)
+        cd = {"doc_a": q, "doc_b": inv, "comparison": comp}
+        s = _state_empty()
+        session = {
+            "session_id": "sess-demo03",
+            "session_type": "active",
+            "status": "active",
+            "document_ids": [],
+            "last_comparison": cd,
+        }
+        s["sessions"] = [session]
+        s["active_session_id"] = "sess-demo03"
+        return s
+
+    def _run(self, msg):
+        from whatsapp_app import _handle_text_message
+        return _handle_text_message(msg, self._state_after_comparison())
+
+    def test_can_i_approve_returns_hold(self):
+        r, _ = self._run("can I approve this?")
+        self.assertIn("HOLD", r)
+
+    def test_can_i_approve_risk_high(self):
+        r, _ = self._run("can I approve this?")
+        self.assertIn("High", r)
+
+    def test_ok_to_pay_returns_hold(self):
+        r, _ = self._run("ok to pay?")
+        self.assertIn("HOLD", r)
+
+    def test_ok_to_pay_risk_high(self):
+        r, _ = self._run("ok to pay?")
+        self.assertIn("High", r)
+
+    def test_approve_returns_hold(self):
+        r, _ = self._run("approve")
+        self.assertIn("HOLD", r)
+
+
+class TestSubstitutionDetection(unittest.TestCase):
+    """Unit tests for _has_substitution_language."""
+
+    def _check(self, desc):
+        from domain.compare import _has_substitution_language
+        return _has_substitution_language(desc)
+
+    def test_substitute_item_detected(self):
+        self.assertTrue(self._check("GS10-1000N-ZP 1000N zinc-plated gas spring SUBSTITUTE ITEM"))
+
+    def test_replacement_item_detected(self):
+        self.assertTrue(self._check("Pump seal replacement item ref GS10-750N"))
+
+    def test_alternative_item_detected(self):
+        self.assertTrue(self._check("Alternative item — zinc-plated version"))
+
+    def test_replaces_detected(self):
+        self.assertTrue(self._check("1000N spring — replaces GS10-750N-SS"))
+
+    def test_replaced_by_detected(self):
+        self.assertTrue(self._check("GS10-750N-SS replaced by GS10-1000N-ZP"))
+
+    def test_normal_description_not_flagged(self):
+        self.assertFalse(self._check("RAM-SEAL-KIT Seal Kit for RAM-200 Tender Engine"))
+
+    def test_freight_not_flagged(self):
+        self.assertFalse(self._check("Delivery charge DAP Antibes"))
+
+    def test_standard_gas_spring_not_flagged(self):
+        self.assertFalse(self._check("750N stainless steel polished compression gas spring with clevis forks"))
+
+
+class TestDemo02FreightNotHold(unittest.TestCase):
+    """Regression: Demo 02 (freight-only addition, no price mismatch) stays QUERY not HOLD."""
+
+    def test_comparison_response_is_query_not_hold(self):
+        from whatsapp_app import build_comparison_response
+        from domain.compare import compare_documents
+        q = _demo02_quote()
+        inv = _demo02_invoice()
+        comp = compare_documents(q, inv)
+        r = build_comparison_response(q, inv, comp)
+        self.assertIn("FREIGHT ADDED", r)
+        self.assertNotIn("HOLD", r)
+
+    def test_approval_response_is_query_not_hold(self):
+        from whatsapp_app import _handle_approval
+        state = _state_with_comparison(_demo02_quote(), _demo02_invoice())
+        cd = state["sessions"][0]["last_comparison"]
+        r = _handle_approval(state, cd)
+        self.assertIn("QUERY", r)
+        self.assertNotIn("HOLD", r)
+
+
+class TestDeliveryAddressEntityMismatch(unittest.TestCase):
+    """Delivery address with different entity in same city should not match."""
+
+    def test_different_entity_same_city_is_mismatch(self):
+        from domain.invoice_address import check_invoice_delivery_address, save_delivery_address
+        from unittest.mock import patch
+        import pathlib, tempfile
+        saved = (
+            "DEMO YACHT SERVICES\n12 Quai des Pecheurs\nPort Vauban\n06600 Antibes\nFrance"
+        )
+        with patch("domain.invoice_address._config_path") as mock_path:
+            tmp = pathlib.Path(tempfile.mktemp(suffix=".json"))
+            mock_path.return_value = tmp
+            save_delivery_address(saved)
+            doc = {
+                "delivery_address": {
+                    "entity": "ANTIBES SERVICE DEPOT",
+                    "address_lines": ["7 Rue de l'Industrie", "06600 Antibes"],
+                    "country": "France",
+                }
+            }
+            result = check_invoice_delivery_address(doc)
+        self.assertTrue(result["checked"])
+        self.assertFalse(result["match"])
+
+    def test_correct_entity_same_address_matches(self):
+        from domain.invoice_address import check_invoice_delivery_address, save_delivery_address
+        from unittest.mock import patch
+        import pathlib, tempfile
+        saved = (
+            "DEMO YACHT SERVICES\n12 Quai des Pecheurs\nPort Vauban\n06600 Antibes\nFrance"
+        )
+        with patch("domain.invoice_address._config_path") as mock_path:
+            tmp = pathlib.Path(tempfile.mktemp(suffix=".json"))
+            mock_path.return_value = tmp
+            save_delivery_address(saved)
+            doc = {
+                "delivery_address": {
+                    "entity": "DEMO YACHT SERVICES",
+                    "address_lines": ["12 Quai des Pecheurs", "Port Vauban", "06600 Antibes"],
+                    "country": "France",
+                }
+            }
+            result = check_invoice_delivery_address(doc)
+        self.assertTrue(result["checked"])
+        self.assertTrue(result["match"])
+
+    def test_no_entity_in_invoice_still_uses_overlap(self):
+        """If invoice omits entity name, entity check is skipped — only overlap matters."""
+        from domain.invoice_address import check_invoice_delivery_address, save_delivery_address
+        from unittest.mock import patch
+        import pathlib, tempfile
+        saved = (
+            "DEMO YACHT SERVICES\n12 Quai des Pecheurs\nPort Vauban\n06600 Antibes\nFrance"
+        )
+        with patch("domain.invoice_address._config_path") as mock_path:
+            tmp = pathlib.Path(tempfile.mktemp(suffix=".json"))
+            mock_path.return_value = tmp
+            save_delivery_address(saved)
+            doc = {
+                "delivery_address": {
+                    "entity": "",
+                    "address_lines": ["12 Quai des Pecheurs", "06600 Antibes"],
+                    "country": "France",
+                }
+            }
+            result = check_invoice_delivery_address(doc)
+        self.assertTrue(result["checked"])
+        self.assertTrue(result["match"])
+
+
 if __name__ == "__main__":
     unittest.main()

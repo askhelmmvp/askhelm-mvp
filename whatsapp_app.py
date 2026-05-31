@@ -611,6 +611,7 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
         "INVOICE QUANTITY MISMATCH",
         "INVOICE DOES NOT FULLY MATCH QUOTE",
         "MATCH CONFIRMED — COST INCREASE",
+        "INVOICE HAS SPECIFICATION MISMATCH",
     })
 
     if decision_code in _APPROVE_CODES:
@@ -694,6 +695,27 @@ def _build_invoice_approval_response(outcome: dict, comparison: dict) -> str:
                 "Do not approve payment",
                 "Ask the supplier to account for all quoted items",
                 "Request a revised invoice or written confirmation of omissions",
+            ]
+        elif decision_code == "INVOICE HAS SPECIFICATION MISMATCH":
+            _sub_items = comparison.get("substitution_items") or []
+            _price_misx = comparison.get("price_mismatches") or []
+            _anc = comparison.get("ancillary_items") or []
+            _sub_descs = [
+                (it.get("description") or "")[:60].strip() for it in _sub_items[:2]
+            ]
+            why = "The invoice contains substitute or changed items compared to the quote."
+            if _sub_descs:
+                why += f" Substitution detected: {'; '.join(_sub_descs)}."
+            if _price_misx:
+                why += " Unit prices have also changed on matched items."
+            if _anc:
+                why += " Delivery or ancillary charges have also changed."
+            why += " Do not approve until all substitutions and price changes are confirmed."
+            actions = [
+                "Do not approve payment yet",
+                "Confirm the correct specification before ordering",
+                "Query the delivery address and any delivery charge increase",
+                "Request a revised invoice or written approval for the substitution",
             ]
         else:  # COST INCREASE
             pct = abs(delta_percent or 0)
@@ -1344,10 +1366,15 @@ def _classify_comparison(
     if quote_to_invoice:
         _qty_mismatches = comparison.get("quantity_mismatches") or []
         _priced_non_anc = comparison.get("priced_non_ancillary_added_items") or []
+        _price_mismatches = comparison.get("price_mismatches") or []
+        _substitution_items = comparison.get("substitution_items") or []
         _lines_all_match = comparison.get("lines_all_match")
 
         if _qty_mismatches:
             decision = "INVOICE QUANTITY MISMATCH"
+        elif _substitution_items:
+            # Substitution/replacement detected — always HOLD regardless of other signals
+            decision = "INVOICE HAS SPECIFICATION MISMATCH"
         elif missing_items:
             decision = "INVOICE DOES NOT FULLY MATCH QUOTE"
         elif _priced_non_anc:
@@ -1355,7 +1382,14 @@ def _classify_comparison(
         elif delta is None or delta == 0:
             decision = "MATCH CONFIRMED — NO CHANGE"
         elif delta > 0:
-            if ancillary_only and ancillary_items:
+            # FREIGHT ADDED only when ancillary-only AND no matched item has a higher line total.
+            # A unit-rate reformulation (e.g. 4×100 → 1×400, same line total) is NOT a
+            # material cost increase and must not block FREIGHT ADDED.
+            _material_cost_increase = any(
+                float(m.get("invoice_total") or 0) > float(m.get("quote_total") or 0) + 0.005
+                for m in _price_mismatches
+            )
+            if ancillary_only and ancillary_items and not _material_cost_increase:
                 decision = "MATCH CONFIRMED — FREIGHT ADDED"
             else:
                 decision = "MATCH CONFIRMED — COST INCREASE"
@@ -1366,14 +1400,22 @@ def _classify_comparison(
     elif quote_to_proforma:
         _qty_mismatches = comparison.get("quantity_mismatches") or []
         _priced_non_anc = comparison.get("priced_non_ancillary_added_items") or []
+        _price_mismatches = comparison.get("price_mismatches") or []
+        _substitution_items = comparison.get("substitution_items") or []
         if _qty_mismatches:
             decision = "INVOICE QUANTITY MISMATCH"
+        elif _substitution_items:
+            decision = "INVOICE HAS SPECIFICATION MISMATCH"
         elif missing_items:
             decision = "INVOICE DOES NOT FULLY MATCH QUOTE"
         elif _priced_non_anc:
             decision = "INVOICE HAS ADDITIONAL COST"
         elif delta is not None and delta > 0:
-            if ancillary_only and ancillary_items:
+            _material_cost_increase_p = any(
+                float(m.get("invoice_total") or 0) > float(m.get("quote_total") or 0) + 0.005
+                for m in _price_mismatches
+            )
+            if ancillary_only and ancillary_items and not _material_cost_increase_p:
                 decision = "MATCH CONFIRMED — FREIGHT ADDED"
             else:
                 decision = "MATCH CONFIRMED — COST INCREASE"
@@ -1578,8 +1620,10 @@ def build_comparison_response(doc_a, doc_b, comparison, match_score: int = 0):
         )
 
     # Ancillary-only uplift: all added items are freight/delivery/etc., core scope unchanged.
+    # Only fires when _classify_comparison explicitly agreed on FREIGHT ADDED —
+    # prevents substitution/price-mismatch cases from being treated as freight-only.
     quote_to_invoice = outcome["comparison_type"] == "quote_vs_invoice"
-    if quote_to_invoice and delta is not None and delta > 0 and ancillary_items and ancillary_only:
+    if quote_to_invoice and outcome["decision"] == "MATCH CONFIRMED — FREIGHT ADDED":
         return _build_freight_response(
             supplier_b, ancillary_items, delta, delta_percent, currency_b,
             confidence_label=confidence_label,
@@ -1593,6 +1637,36 @@ def build_comparison_response(doc_a, doc_b, comparison, match_score: int = 0):
         _qty_mismatches = comparison.get("quantity_mismatches") or []
         _priced_non_anc = comparison.get("priced_non_ancillary_added_items") or []
         cur = currency_b or currency_a or BASE_CURRENCY
+
+        if _outcome_decision == "INVOICE HAS SPECIFICATION MISMATCH":
+            _sub_items = comparison.get("substitution_items") or []
+            _price_misx = comparison.get("price_mismatches") or []
+            _anc_items = comparison.get("ancillary_items") or []
+            _sub_descs = [
+                (it.get("description") or "")[:60].strip() for it in _sub_items[:2]
+            ]
+            why = "The invoice does not cleanly match the quote."
+            if _sub_descs:
+                why += f" Substitute or changed item detected: {'; '.join(_sub_descs)}."
+            if _price_misx:
+                why += " Unit prices have also changed on matched items."
+            if _anc_items:
+                _anc_labels = [_format_ancillary_label(i, cur) for i in _anc_items[:2]]
+                why += f" Delivery/ancillary charges have also increased ({', '.join(_anc_labels)})."
+            if delta is not None and delta > 0:
+                why += f" Total invoice is {cur} {abs(delta):,.2f} higher than the quote."
+            if confidence_label:
+                why = f"{why} Confidence: {confidence_label}."
+            return _make_response(
+                decision="HOLD",
+                why=why,
+                actions=[
+                    "Do not approve payment yet",
+                    "Confirm the correct specification before ordering",
+                    "Query the delivery address and any delivery charge increase",
+                    "Request a revised invoice or written approval for the substitution",
+                ],
+            )
 
         if _outcome_decision == "MATCH CONFIRMED — OK TO APPROVE":
             why = "The invoice matches the quoted line items, quantities and line totals."

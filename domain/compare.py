@@ -51,6 +51,25 @@ _ANCILLARY_KEYWORDS = {
 
 _FREIGHT_KEYWORDS = _ANCILLARY_KEYWORDS  # backward compatibility alias
 
+# Phrases that indicate a line item is a substitute or replacement for the quoted item.
+_SUBSTITUTE_KEYWORDS = frozenset([
+    "substitute item",
+    "substituted item",
+    "replacement item",
+    "alternative item",
+    "replaced by",
+    "replaces ",
+    "substitute for",
+    " substitute ",  # standalone word, space-padded to avoid "substituted"
+    "substitute\n",
+])
+
+
+def _has_substitution_language(desc: str) -> bool:
+    """True when a line item description signals it is a substitute for the quoted item."""
+    lower = " " + desc.lower() + " "  # pad to allow edge matching
+    return any(kw in lower for kw in _SUBSTITUTE_KEYWORDS)
+
 
 def _is_ancillary_item(desc: str) -> bool:
     lower = desc.lower()
@@ -282,6 +301,12 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         if not _is_ancillary_item(item.get("description", ""))
     ]
 
+    # Invoice items with explicit substitute/replacement language — added OR matched.
+    substitution_items = [
+        item for item in items_b
+        if item.get("description") and _has_substitution_language(item.get("description", ""))
+    ]
+
     # Line-level detail: bijective (1-to-1) greedy best-similarity matching.
     # Build scores for all (quote_idx, invoice_idx) candidate pairs.
     _pairs: list = []
@@ -371,4 +396,6 @@ def compare_documents(doc_a: dict, doc_b: dict) -> dict:
         "logistics_notes": logistics_notes,
         "priced_non_ancillary_added_items": priced_non_ancillary,
         "lines_all_match": lines_all_match,
+        # Substitution/replacement language detected in invoice items
+        "substitution_items": substitution_items,
     }
