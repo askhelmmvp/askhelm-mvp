@@ -486,6 +486,26 @@ _HOW_MANY_COMPLIANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_PROCUREMENT_QUERY_SUBSTRINGS = [
+    # Explicit reorder / ordering questions with a specific item in mind.
+    # Checked BEFORE _COMMERCIAL_FOLLOWUP_SUBSTRINGS so "should we order more AIK111571?"
+    # is handled by stock/procurement logic, not the document-context commercial handler.
+    "do we need to order",
+    "do i need to order",
+    "need to order more",
+    "should we order more",
+    "should i order more",
+    "should we buy more",
+    "should i buy more",
+    "should we reorder",
+    "should i reorder",
+    "are we low on ",
+    "do we have enough ",
+    "running low on ",
+    "do we need more ",
+    "do i need more ",
+]
+
 _SPARES_QUERY_SUBSTRINGS = [
     "show spares for ",
     "spares for ",
@@ -1056,7 +1076,7 @@ def classify_text(text: str) -> str:
       commercial_followup | compliance_question | market_check | reminder |
       show_handover_notes | show_open_actions |
       show_equipment | show_stock | stock_query | spares_query | equipment_query |
-      reset_equipment | greeting | unknown
+      procurement_query | reset_equipment | greeting | unknown
     """
     t = text.strip().lower()
     # Strip trailing punctuation for exact-match lookups so "what should i do?"
@@ -1117,6 +1137,10 @@ def classify_text(text: str) -> str:
                 return "approval_clarification"
         if t_core in _APPROVAL_CLARIFICATION_EXACT:
             return "approval_clarification"
+
+    for phrase in _PROCUREMENT_QUERY_SUBSTRINGS:
+        if phrase in t:
+            return "procurement_query"
 
     for phrase in _COMMERCIAL_FOLLOWUP_SUBSTRINGS:
         if phrase in t:

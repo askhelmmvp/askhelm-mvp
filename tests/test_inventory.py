@@ -2868,5 +2868,241 @@ class TestAIK111571LivePath(unittest.TestCase):
         self.assertIn("TD / Tech 2 / Fresh Water System Box 1", r)
 
 
+class TestProcurementIntentClassification(unittest.TestCase):
+    """ASK-12 follow-up: procurement phrases must route to procurement_query, not unknown."""
+
+    def _cls(self, q):
+        from domain.intent import classify_text
+        return classify_text(q)
+
+    def test_do_we_need_to_order_more(self):
+        self.assertEqual(self._cls("do we need to order more AIK111571?"), "procurement_query")
+
+    def test_should_we_order_more(self):
+        self.assertEqual(self._cls("should we order more AIK111571?"), "procurement_query")
+
+    def test_do_i_need_to_order(self):
+        self.assertEqual(self._cls("do i need to order H1532804?"), "procurement_query")
+
+    def test_should_i_buy_more(self):
+        self.assertEqual(self._cls("should i buy more impellers?"), "procurement_query")
+
+    def test_do_we_have_enough(self):
+        self.assertEqual(self._cls("do we have enough AIK111571?"), "procurement_query")
+
+    def test_are_we_low_on(self):
+        self.assertEqual(self._cls("are we low on impellers?"), "procurement_query")
+
+    def test_should_we_reorder(self):
+        self.assertEqual(self._cls("should we reorder H1532804?"), "procurement_query")
+
+    def test_need_to_order_more(self):
+        self.assertEqual(self._cls("need to order more filters"), "procurement_query")
+
+    def test_stock_query_unaffected(self):
+        self.assertEqual(self._cls("how many AIK111571 on board?"), "stock_query")
+
+    def test_do_we_have_unaffected(self):
+        self.assertEqual(self._cls("do we have AIK111571?"), "stock_query")
+
+    def test_commercial_followup_bare_order_unaffected(self):
+        # "should we order?" (bare, no "more") stays commercial_followup
+        self.assertEqual(self._cls("should we order?"), "commercial_followup")
+
+    def test_commercial_followup_proceed_unaffected(self):
+        self.assertEqual(self._cls("should we proceed?"), "commercial_followup")
+
+
+class TestProcurementQueryHandler(unittest.TestCase):
+    """ASK-12 follow-up: _handle_procurement_query response content."""
+
+    _EQUIPMENT = [
+        {"equipment_name": "Rudder Angle indicator", "system": "steering", "make": ""},
+    ]
+
+    _ITEMS = [
+        {
+            "description": "Impeller",
+            "part_number": "AIK111571",
+            "quantity_onboard": 8.0,
+            "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+            "make": "Jabsco",
+            "confidence": 0.9,
+        },
+        {
+            "description": "HEM Pump Impeller",
+            "part_number": "H1532804",
+            "quantity_onboard": None,
+            "storage_location": "Engine Room",
+            "make": "",
+            "confidence": 0.9,
+        },
+        {
+            "description": "Seal Kit",
+            "part_number": "H1532805",
+            "quantity_onboard": 1.0,
+            "min_quantity": 2.0,
+            "storage_location": "Engine Room",
+            "make": "",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+        inv_store.merge_equipment("", self._EQUIPMENT, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _proc(self, query):
+        from whatsapp_app import _handle_procurement_query
+        result, _ = _handle_procurement_query(query, {"user_id": ""})
+        return result
+
+    # Test 1 — exact part with quantity, no minimum
+    def test_aik111571_no_immediate_order(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertIn("NO IMMEDIATE ORDER REQUIRED", r)
+
+    def test_aik111571_quantity_shown(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertIn("8", r)
+
+    def test_aik111571_location_shown(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertIn("TD / Tech 2 / Fresh Water System Box 1", r)
+
+    def test_aik111571_no_document_not_understood(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+    def test_aik111571_no_rudder_angle(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertNotIn("Rudder Angle", r)
+
+    def test_aik111571_fresh_water_system_shown(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertIn("Fresh Water System", r)
+
+    def test_aik111571_risk_low(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertIn("RISK:", r)
+        self.assertIn("Low", r)
+
+    def test_aik111571_actions_present(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertIn("ACTIONS:", r)
+
+    def test_aik111571_stock_section(self):
+        r = self._proc("do we need to order more AIK111571?")
+        self.assertIn("STOCK:", r)
+
+    # Test 2 — reorder alias
+    def test_should_we_order_more_routes_same(self):
+        r = self._proc("should we order more AIK111571?")
+        self.assertIn("NO IMMEDIATE ORDER REQUIRED", r)
+
+    # Test 3 — "enough" wording
+    def test_do_we_have_enough_routes_same(self):
+        r = self._proc("do we have enough AIK111571?")
+        self.assertIn("NO IMMEDIATE ORDER REQUIRED", r)
+
+    # Test 4 — missing quantity
+    def test_h1532804_missing_qty_decision(self):
+        r = self._proc("should we order more H1532804?")
+        self.assertIn("CHECK STOCK BEFORE ORDERING", r)
+
+    def test_h1532804_missing_qty_why(self):
+        r = self._proc("should we order more H1532804?")
+        self.assertIn("quantity field is blank or not recorded", r)
+
+    def test_h1532804_no_blank_cross(self):
+        r = self._proc("should we order more H1532804?")
+        self.assertNotIn("You have  ×", r)
+
+    # Test 5 — no stock found
+    def test_unknown_part_not_found_decision(self):
+        r = self._proc("do we need to order more UNKNOWN123?")
+        self.assertIn("STOCK NOT FOUND", r)
+
+    def test_unknown_part_order_may_be_required(self):
+        r = self._proc("do we need to order more UNKNOWN123?")
+        self.assertIn("ORDER MAY BE REQUIRED", r)
+
+    def test_unknown_part_no_document_not_understood(self):
+        r = self._proc("do we need to order more UNKNOWN123?")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+    # Test 6 — quantity at or below minimum
+    def test_h1532805_below_min_reorder_recommended(self):
+        r = self._proc("do we need to order more H1532805?")
+        self.assertIn("REORDER RECOMMENDED", r)
+
+    def test_h1532805_below_min_risk_high(self):
+        r = self._proc("do we need to order more H1532805?")
+        self.assertIn("High", r)
+
+
+class TestProcurementViaDispatch(unittest.TestCase):
+    """End-to-end: WhatsApp dispatch must not return DOCUMENT NOT UNDERSTOOD
+    for procurement phrases, and must use stock memory for the answer."""
+
+    _ITEMS = [
+        {
+            "description": "Impeller",
+            "part_number": "AIK111571",
+            "quantity_onboard": 8.0,
+            "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+            "make": "Jabsco",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _dispatch(self, query):
+        from whatsapp_app import _handle_text_message
+        result, _ = _handle_text_message(query, {"user_id": ""})
+        return result
+
+    def test_dispatch_do_we_need_to_order(self):
+        r = self._dispatch("do we need to order more AIK111571?")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+        self.assertIn("NO IMMEDIATE ORDER REQUIRED", r)
+
+    def test_dispatch_should_we_order_more(self):
+        r = self._dispatch("should we order more AIK111571?")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+        self.assertIn("NO IMMEDIATE ORDER REQUIRED", r)
+
+    def test_existing_stock_query_unaffected(self):
+        r = self._dispatch("how many AIK111571 on board?")
+        self.assertIn("8 ONBOARD", r)
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+
 if __name__ == "__main__":
     unittest.main()
