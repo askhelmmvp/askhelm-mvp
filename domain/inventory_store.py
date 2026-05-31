@@ -648,11 +648,17 @@ def infer_stock_equipment_link(stock_item: dict, equipment_records: list) -> dic
             }
 
     # Phase 2 – manufacturer (make) match
+    # Both sides must be non-empty: eq_make="" is a substring of everything,
+    # so without the guard any stock item with a make would match every
+    # equipment record that has no make field.
     if item_make and len(item_make) > 2:
         matched = [
             eq for eq in equipment_records
-            if item_make in (eq.get("make") or "").lower()
-            or (eq.get("make") or "").lower() in item_make
+            if (eq.get("make") or "").strip()
+            and (
+                item_make in (eq.get("make") or "").lower()
+                or (eq.get("make") or "").lower() in item_make
+            )
         ]
         if matched:
             label = _eq_display(matched[0])

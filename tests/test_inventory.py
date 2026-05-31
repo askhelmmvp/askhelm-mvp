@@ -2767,5 +2767,106 @@ class TestFreshWaterSystemResponse(unittest.TestCase):
         self.assertIn("Specific equipment link uncertain", r)
 
 
+class TestPhase2EmptyMakeBug(unittest.TestCase):
+    """Regression: Phase 2 must not match equipment with no make.
+    Before the fix, (eq_make or '') in item_make evaluated to "" in "jabsco" → True,
+    causing every no-make equipment record to match any stock item with a make."""
+
+    _EQUIPMENT = [
+        # Has no make — must NOT match via Phase 2
+        {"equipment_name": "Rudder Angle indicator", "system": "steering", "make": ""},
+        # Has a real make — must still match
+        {"equipment_name": "MTU 16V4000 M73L", "system": "Main Engine", "make": "MTU"},
+    ]
+
+    def _infer(self, item):
+        from domain.inventory_store import infer_stock_equipment_link
+        return infer_stock_equipment_link(item, self._EQUIPMENT)
+
+    def test_item_make_does_not_match_empty_make_equipment(self):
+        # AIK111571-style: has a make, Rudder Angle has no make → must NOT match via Phase 2
+        result = self._infer({"description": "Impeller", "make": "Jabsco", "linked_equipment": ""})
+        self.assertNotEqual(result["confidence"], "likely")
+        self.assertNotIn("Rudder Angle", result.get("label", ""))
+
+    def test_item_make_matches_equipment_with_same_make(self):
+        # Legitimate make match still works
+        result = self._infer({"description": "Oil filter", "make": "MTU", "linked_equipment": ""})
+        self.assertEqual(result["confidence"], "likely")
+        self.assertIn("MTU", result["label"])
+
+    def test_item_with_no_make_skips_phase2(self):
+        # Item without make → Phase 2 not invoked → no make-based match
+        result = self._infer({"description": "Impeller", "make": "", "linked_equipment": ""})
+        self.assertNotIn("MTU", result.get("label", ""))
+
+
+class TestAIK111571LivePath(unittest.TestCase):
+    """Reproduces the live WhatsApp scenario: AIK111571 with a make field and
+    an equipment list that has Rudder Angle indicator with no make.
+    Exercises _handle_stock_query — the same path WhatsApp uses."""
+
+    _EQUIPMENT = [
+        {"equipment_name": "Rudder Angle indicator", "system": "steering", "make": ""},
+    ]
+
+    _ITEMS = [
+        {
+            "description": "Impeller",
+            "part_number": "AIK111571",
+            "quantity_onboard": 8.0,
+            "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+            "make": "Jabsco",          # non-empty make — was the trigger for the bug
+            "linked_equipment": "",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+        inv_store.merge_equipment("", self._EQUIPMENT, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _stock(self, query):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(query, {"user_id": ""})
+        return result
+
+    def test_quantity_correct(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("8 ONBOARD", r)
+
+    def test_rudder_angle_not_shown(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertNotIn("Rudder Angle", r)
+
+    def test_fresh_water_system_shown(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("Fresh Water System", r)
+
+    def test_equipment_system_header_shown(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("EQUIPMENT / SYSTEM:", r)
+
+    def test_specific_link_uncertain_shown(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("Specific equipment link uncertain", r)
+
+    def test_location_preserved(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("TD / Tech 2 / Fresh Water System Box 1", r)
+
+
 if __name__ == "__main__":
     unittest.main()
