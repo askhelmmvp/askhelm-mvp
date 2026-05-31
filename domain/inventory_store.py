@@ -552,6 +552,37 @@ def normalise_system_alias(query: str) -> list:
 # Stock-to-equipment link inference
 # ---------------------------------------------------------------------------
 
+_LOC_SYSTEM_RE = re.compile(r'([A-Za-z][A-Za-z ]+System)', re.IGNORECASE)
+_LOC_STOP = frozenset({"system", "room", "the", "a", "an", "and", "or", "of"})
+
+
+def _extract_system_from_location(location: str) -> str:
+    """Extract an 'X System' name from a storage location path.
+
+    Scans segments innermost-first so 'TD / Tech 2 / Fresh Water System Box 1'
+    returns 'Fresh Water System'.
+    """
+    if not location:
+        return ""
+    for segment in reversed(location.split("/")):
+        m = _LOC_SYSTEM_RE.search(segment.strip())
+        if m:
+            return m.group(1).strip()
+    return ""
+
+
+def _location_matches_equipment(system_name: str, eq: dict) -> bool:
+    """True when the key tokens of system_name all appear in the equipment's
+    system/equipment_name fields.  Requires at least two meaningful tokens so
+    that single-word systems (e.g. 'Bilge') don't produce false positives.
+    """
+    tokens = [t for t in system_name.lower().split() if t not in _LOC_STOP and len(t) > 2]
+    if len(tokens) < 2:
+        return False
+    eq_text = f"{(eq.get('system') or '')} {(eq.get('equipment_name') or '')}".lower()
+    return all(t in eq_text for t in tokens)
+
+
 def infer_stock_equipment_link(stock_item: dict, equipment_records: list) -> dict:
     """Infer which equipment record a stock item most likely belongs to.
 
@@ -630,6 +661,25 @@ def infer_stock_equipment_link(stock_item: dict, equipment_records: list) -> dic
                 "equipment": matched[:3],
                 "label": f"Likely linked to {label}" if label else "Likely linked to equipment",
             }
+
+    # Phase 2b – storage location contains a recognisable system name
+    storage_loc = (stock_item.get("storage_location") or "")
+    system_from_loc = _extract_system_from_location(storage_loc)
+    if system_from_loc:
+        for eq in equipment_records:
+            if _location_matches_equipment(system_from_loc, eq):
+                label = _eq_display(eq)
+                return {
+                    "confidence": "likely",
+                    "equipment": [eq],
+                    "label": f"Likely linked to {label}" if label else "",
+                }
+        # System is clear from location but no matching equipment record found
+        return {
+            "confidence": "location_system",
+            "equipment": [],
+            "label": f"Likely linked to {system_from_loc}. Specific equipment link uncertain.",
+        }
 
     # Phase 3 – system keyword in description/linked_equipment matches equipment system/name
     search_text = f"{item_desc} {item_linked}".strip()
