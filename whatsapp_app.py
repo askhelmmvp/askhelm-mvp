@@ -4254,6 +4254,128 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     return "\n".join(lines).strip(), state
 
 
+def _handle_procurement_query(query: str, state: dict) -> Tuple[str, dict]:
+    """Handle procurement/reorder intent: 'do we need to order more X?'"""
+    user_id = state.get("user_id", "")
+    subject = _extract_stock_search_term(query) or query
+    is_pn = " " not in subject.strip() and bool(_PART_NUMBER_LIKE_RE.search(subject.strip()))
+
+    exact = find_stock_by_part_number(user_id, subject) if is_pn else []
+    results = exact if exact else find_stock_by_query(user_id, subject)
+
+    if not results:
+        return _make_response(
+            decision="STOCK NOT FOUND — ORDER MAY BE REQUIRED",
+            why=(
+                f"No matching onboard stock record was found for '{subject}'. "
+                "Confirm the part number and planned requirement before ordering."
+            ),
+            actions=[
+                "Verify the part number",
+                "Check inventory list for similar parts",
+                "Confirm planned requirement before ordering",
+            ],
+        ), state
+
+    first = results[0]
+    pn    = first.get("part_number") or subject
+    desc  = first.get("description") or ""
+    qty   = _fmt_qty(first.get("quantity_onboard"))
+    loc   = first.get("storage_location") or ""
+    min_qty_raw = first.get("min_quantity")
+    min_qty: float | None = None
+    if min_qty_raw not in (None, "", "nan", "NaN"):
+        try:
+            min_qty = float(min_qty_raw)
+        except (ValueError, TypeError):
+            pass
+
+    desc_note = f" ({desc})" if desc and desc.lower() != pn.lower() else ""
+    lines: list = []
+
+    if not qty:
+        lines += ["DECISION:", "CHECK STOCK BEFORE ORDERING", ""]
+        lines += [
+            "WHY:",
+            f"{pn}{desc_note} is recorded onboard, but the quantity field is blank or not recorded.",
+            "",
+        ]
+        risk = "Unknown — quantity not recorded"
+        actions = [
+            "Check the physical stock before ordering",
+            "Record the quantity once confirmed",
+        ]
+    elif min_qty is not None:
+        qty_num = float(first.get("quantity_onboard") or 0)
+        if qty_num <= min_qty:
+            lines += ["DECISION:", "REORDER RECOMMENDED", ""]
+            lines += [
+                "WHY:",
+                f"Onboard stock ({qty}) is at or below the minimum quantity ({int(min_qty) if min_qty == int(min_qty) else min_qty}). Reorder to restore stock above the minimum.",
+                "",
+            ]
+            risk = "High — stock at or below minimum"
+            actions = [
+                "Reorder to restore stock above the minimum level",
+                "Check the physical stock before ordering",
+            ]
+        else:
+            lines += ["DECISION:", "NO IMMEDIATE ORDER REQUIRED", ""]
+            lines += [
+                "WHY:",
+                f"{pn}{desc_note} has {qty} onboard, above the minimum of {int(min_qty) if min_qty == int(min_qty) else min_qty}.",
+                "",
+            ]
+            risk = "Low"
+            actions = [
+                "Check the physical stock before relying on the count",
+                "Reorder only if stock will fall below the minimum after planned maintenance",
+            ]
+    else:
+        lines += ["DECISION:", "NO IMMEDIATE ORDER REQUIRED", ""]
+        lines += [
+            "WHY:",
+            (
+                f"{pn}{desc_note} is already recorded onboard with {qty} in stock. "
+                f"Unless there is a planned service, known failure trend, or minimum stock level "
+                f"above {qty}, there is no immediate need to order more."
+            ),
+            "",
+        ]
+        risk = "Low"
+        actions = [
+            "Check the physical stock before relying on the count",
+            "Reorder only if stock will fall below the required minimum after planned maintenance",
+        ]
+
+    # STOCK
+    lines += ["STOCK:"]
+    desc_s = f" — {desc}" if desc and desc.lower() != pn.lower() else ""
+    qty_s  = f" — Qty {qty}" if qty else ""
+    lines.append(f"• {pn}{desc_s}{qty_s}")
+    if loc:
+        lines.append(f"• Location: {loc}")
+    lines.append("")
+
+    # EQUIPMENT / SYSTEM
+    all_equip = get_all_equipment(user_id)
+    link_info = infer_stock_equipment_link(first, all_equip)
+    if link_info["confidence"] in ("exact", "likely") and link_info["label"]:
+        lines += ["EQUIPMENT:", link_info["label"], ""]
+    elif link_info["confidence"] == "location_system" and link_info["label"]:
+        lines += ["EQUIPMENT / SYSTEM:", link_info["label"], ""]
+    elif link_info["confidence"] == "low":
+        lines += ["EQUIPMENT:", "Equipment link uncertain.", ""]
+
+    # RISK
+    lines += ["RISK:", risk, ""]
+
+    # ACTIONS
+    lines += ["ACTIONS:"] + [f"• {a}" for a in actions]
+
+    return "\n".join(lines), state
+
+
 def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
     from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
@@ -6006,6 +6128,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "stock_query":
         return _handle_stock_query(incoming, state)
+
+    if intent == "procurement_query":
+        return _handle_procurement_query(incoming, state)
 
     if intent == "spares_query":
         return _handle_spares_query(incoming, state)
