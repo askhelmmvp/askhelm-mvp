@@ -225,10 +225,21 @@ def check_invoice_delivery_address(doc_record: dict) -> dict:
         )
     else:
         score = _overlap_score(full_text, saved)
-        match = score >= 0.35
+        # Entity name check: when the invoice contains an entity name (company name),
+        # it must have meaningful token overlap with the first line of the saved
+        # delivery address.  Prevents two different businesses in the same city from
+        # matching solely on shared postcode/town/country tokens.
+        entity_ok = True
+        if entity:
+            _saved_lines = [ln.strip() for ln in saved.splitlines() if ln.strip()]
+            _saved_entity = _saved_lines[0] if _saved_lines else ""
+            if _saved_entity and len(_tokens(_saved_entity)) >= 2:
+                entity_score = _overlap_score(entity, _saved_entity)
+                entity_ok = entity_score >= 0.3
+        match = score >= 0.35 and entity_ok
         logger.info(
-            "delivery_address_check=True method=overlap score=%.2f delivery_match=%s",
-            score, match,
+            "delivery_address_check=True method=overlap score=%.2f entity_ok=%s delivery_match=%s",
+            score, entity_ok, match,
         )
 
     return {"checked": True, "match": match}
