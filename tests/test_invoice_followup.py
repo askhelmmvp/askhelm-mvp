@@ -770,5 +770,268 @@ class TestSandfirdenInvoiceOnlyContext(unittest.TestCase):
         self.assertIn("utility", ctx.lower())
 
 
+# ---------------------------------------------------------------------------
+# ASK-39: quote follow-up stock check
+# ---------------------------------------------------------------------------
+
+import os
+import tempfile
+
+
+def _make_state(docs=None, user_id=""):
+    return {"user_id": user_id, "documents": docs or []}
+
+
+def _quote_doc(line_items, supplier="Test Supplier", doc_type="quote"):
+    return {"doc_type": doc_type, "supplier_name": supplier, "line_items": line_items}
+
+
+class TestQuoteStockCheckIntent(unittest.TestCase):
+    """ASK-39: quote follow-up phrases must route to quote_stock_check."""
+
+    def _cls(self, q):
+        from domain.intent import classify_text
+        return classify_text(q)
+
+    def test_do_we_already_have_these_onboard(self):
+        self.assertEqual(self._cls("do we already have these onboard?"), "quote_stock_check")
+
+    def test_do_we_have_these_in_stock(self):
+        self.assertEqual(self._cls("do we have these in stock?"), "quote_stock_check")
+
+    def test_are_these_already_onboard(self):
+        self.assertEqual(self._cls("are these already onboard?"), "quote_stock_check")
+
+    def test_check_these_against_stock(self):
+        self.assertEqual(self._cls("check these against stock"), "quote_stock_check")
+
+    def test_check_this_against_stock(self):
+        self.assertEqual(self._cls("check this against stock"), "quote_stock_check")
+
+    def test_do_we_need_to_order_these(self):
+        self.assertEqual(self._cls("do we need to order these?"), "quote_stock_check")
+
+    def test_are_these_items_onboard(self):
+        self.assertEqual(self._cls("are these items onboard?"), "quote_stock_check")
+
+    def test_specific_part_stock_query_unaffected(self):
+        self.assertEqual(self._cls("how many AIK111571 on board?"), "stock_query")
+
+    def test_specific_part_procurement_unaffected(self):
+        self.assertEqual(self._cls("do we need to order more AIK111571?"), "procurement_query")
+
+    def test_spares_query_unaffected(self):
+        self.assertEqual(self._cls("show HEM spares"), "spares_query")
+
+
+class TestQuoteStockCheckNoDocument(unittest.TestCase):
+    """ASK-39 test 1: no recent document → NO RECENT DOCUMENT."""
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _check(self, state):
+        from whatsapp_app import _handle_quote_stock_check
+        r, _ = _handle_quote_stock_check(state)
+        return r
+
+    def test_empty_state_gives_no_recent_document(self):
+        self.assertIn("NO RECENT DOCUMENT", self._check(_make_state()))
+
+    def test_no_document_not_understood(self):
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", self._check(_make_state()))
+
+    def test_helpful_action_included(self):
+        self.assertIn("Upload a quote", self._check(_make_state()))
+
+    def test_inventory_doc_not_used(self):
+        state = _make_state(docs=[{
+            "doc_type": "inventory",
+            "line_items": [{"description": "Impeller", "part_number": "AIK111571"}],
+        }])
+        self.assertIn("NO RECENT DOCUMENT", self._check(state))
+
+
+class TestQuoteStockCheckWithKnownItem(unittest.TestCase):
+    """ASK-39 test 2: quote containing a stocked part → STOCK CHECK COMPLETE."""
+
+    _ITEMS = [{
+        "description": "Impeller",
+        "part_number": "AIK111571",
+        "quantity_onboard": 8.0,
+        "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+        "make": "Jabsco",
+        "confidence": 0.9,
+    }]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _state_with_quote(self):
+        return _make_state(docs=[_quote_doc([
+            {"description": "Impeller", "part_number": "AIK111571", "quantity": 2},
+        ])])
+
+    def _check(self, state):
+        from whatsapp_app import _handle_quote_stock_check
+        r, _ = _handle_quote_stock_check(state)
+        return r
+
+    def test_decision_stock_check_complete(self):
+        self.assertIn("STOCK CHECK COMPLETE", self._check(self._state_with_quote()))
+
+    def test_stock_matches_section(self):
+        self.assertIn("STOCK MATCHES:", self._check(self._state_with_quote()))
+
+    def test_aik111571_in_matches(self):
+        self.assertIn("AIK111571", self._check(self._state_with_quote()))
+
+    def test_quantity_shown(self):
+        self.assertIn("Qty 8", self._check(self._state_with_quote()))
+
+    def test_location_shown(self):
+        self.assertIn("TD / Tech 2 / Fresh Water System Box 1", self._check(self._state_with_quote()))
+
+    def test_no_document_not_understood(self):
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", self._check(self._state_with_quote()))
+
+    def test_invoice_doc_type_also_works(self):
+        state = _make_state(docs=[_quote_doc(
+            [{"description": "Impeller", "part_number": "AIK111571"}], doc_type="invoice"
+        )])
+        self.assertIn("STOCK CHECK COMPLETE", self._check(state))
+
+
+class TestQuoteStockCheckMixedItems(unittest.TestCase):
+    """ASK-39 test 3: mixed quote — some matched, some not found."""
+
+    _ITEMS = [{
+        "description": "Impeller",
+        "part_number": "AIK111571",
+        "quantity_onboard": 8.0,
+        "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+        "make": "Jabsco",
+        "confidence": 0.9,
+    }]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _state(self):
+        return _make_state(docs=[_quote_doc([
+            {"description": "Impeller", "part_number": "AIK111571", "quantity": 2},
+            {"description": "Seal kit", "part_number": "UNKNOWN999", "quantity": 1},
+        ])])
+
+    def _check(self):
+        from whatsapp_app import _handle_quote_stock_check
+        r, _ = _handle_quote_stock_check(self._state())
+        return r
+
+    def test_matched_item_in_stock_matches(self):
+        r = self._check()
+        self.assertIn("STOCK MATCHES:", r)
+        self.assertIn("AIK111571", r)
+
+    def test_unknown_item_in_not_found(self):
+        r = self._check()
+        self.assertIn("NOT FOUND:", r)
+        self.assertIn("UNKNOWN999", r)
+
+    def test_no_hallucinated_qty_for_unmatched(self):
+        r = self._check()
+        lines = r.splitlines()
+        unknown_line = next((l for l in lines if "UNKNOWN999" in l), "")
+        self.assertNotIn("Qty", unknown_line)
+
+    def test_actions_present(self):
+        self.assertIn("ACTIONS:", self._check())
+
+
+class TestQuoteStockCheckDispatchRegression(unittest.TestCase):
+    """ASK-39 test 4+5: direct stock and spares queries still work."""
+
+    _ITEMS = [{
+        "description": "Impeller",
+        "part_number": "AIK111571",
+        "quantity_onboard": 8.0,
+        "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+        "make": "Jabsco",
+        "confidence": 0.9,
+    }]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _dispatch(self, query, state=None):
+        from whatsapp_app import _handle_text_message
+        r, _ = _handle_text_message(query, state or _make_state())
+        return r
+
+    def test_no_document_returns_no_recent_document(self):
+        r = self._dispatch("do we already have these onboard?")
+        self.assertIn("NO RECENT DOCUMENT", r)
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+    def test_with_quote_returns_stock_check_complete(self):
+        state = _make_state(docs=[_quote_doc([
+            {"description": "Impeller", "part_number": "AIK111571"},
+        ])])
+        r = self._dispatch("do we already have these onboard?", state)
+        self.assertIn("STOCK CHECK COMPLETE", r)
+
+    def test_direct_stock_query_regression(self):
+        r = self._dispatch("how many AIK111571 on board?")
+        self.assertIn("8 ONBOARD", r)
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+
 if __name__ == "__main__":
     unittest.main()

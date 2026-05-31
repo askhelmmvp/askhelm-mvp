@@ -4377,6 +4377,95 @@ def _handle_procurement_query(query: str, state: dict) -> Tuple[str, dict]:
     return "\n".join(lines), state
 
 
+def _handle_quote_stock_check(state: dict) -> Tuple[str, dict]:
+    """Check line items from the most recent uploaded quote/invoice against stock memory."""
+    user_id = state.get("user_id", "")
+
+    # Find the most recent document that has extractable line items
+    recent_doc = None
+    for doc in reversed(state.get("documents") or []):
+        dt = (doc.get("doc_type") or "").lower()
+        if dt in ("quote", "invoice", "proforma") and doc.get("line_items"):
+            recent_doc = doc
+            break
+
+    if not recent_doc:
+        return _make_response(
+            decision="NO RECENT DOCUMENT",
+            why="There is no recent quote or extracted document to check against stock.",
+            actions=[
+                "Upload a quote or invoice",
+                "Or ask about a specific part number",
+            ],
+        ), state
+
+    line_items = recent_doc.get("line_items") or []
+    matched: list = []
+    not_found: list = []
+
+    for item in line_items:
+        pn   = (item.get("part_number") or "").strip()
+        desc = (item.get("description") or "").strip()
+        if not pn and not desc:
+            continue
+
+        stock_results = []
+        # Exact part-number lookup first
+        if pn and _PART_NUMBER_LIKE_RE.search(pn):
+            stock_results = find_stock_by_part_number(user_id, pn)
+        # Fuzzy description fallback — require at least two meaningful words
+        if not stock_results and desc and len(desc.split()) >= 2:
+            stock_results = find_stock_by_query(user_id, desc)
+
+        label = pn or desc
+        if stock_results:
+            first = stock_results[0]
+            s_pn   = first.get("part_number") or ""
+            s_desc = first.get("description") or ""
+            s_qty  = _fmt_qty(first.get("quantity_onboard"))
+            s_loc  = first.get("storage_location") or ""
+            display = s_pn or s_desc or label
+            line = f"• {display}"
+            if s_desc and s_desc.lower() != display.lower():
+                line += f" — {s_desc}"
+            if s_qty:
+                line += f" — Qty {s_qty}"
+            if s_loc:
+                line += f" — {s_loc}"
+            matched.append(line)
+        else:
+            not_found.append(f"• {label}")
+
+    if not matched and not not_found:
+        return _make_response(
+            decision="NO LINE ITEMS",
+            why="The recent document has no extractable line items to check against stock.",
+            actions=["Upload a quote with identifiable line items"],
+        ), state
+
+    supplier = (recent_doc.get("supplier_name") or "").strip()
+    doc_type = (recent_doc.get("doc_type") or "document").strip()
+    doc_label = f"{doc_type} from {supplier}" if supplier else doc_type
+
+    lines: list = [
+        "DECISION:", "STOCK CHECK COMPLETE", "",
+        "WHY:",
+        f"AskHelm checked the {doc_label} line items against onboard stock.",
+        "",
+    ]
+    if matched:
+        lines += ["STOCK MATCHES:"] + matched + [""]
+    if not_found:
+        lines += ["NOT FOUND:"] + not_found + [""]
+    lines += [
+        "ACTIONS:",
+        "• Do not order matched items unless required for planned service or minimum stock",
+        "• Confirm unmatched items before ordering",
+        "• Check stock location before final approval",
+    ]
+    return "\n".join(lines), state
+
+
 def _handle_spares_query(query: str, state: dict) -> Tuple[str, dict]:
     user_id = state.get("user_id", "")
     from storage_paths import get_yacht_id_for_user as _gyid, get_stock_memory_path as _gsp
@@ -6132,6 +6221,9 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
 
     if intent == "procurement_query":
         return _handle_procurement_query(incoming, state)
+
+    if intent == "quote_stock_check":
+        return _handle_quote_stock_check(state)
 
     if intent == "spares_query":
         return _handle_spares_query(incoming, state)
