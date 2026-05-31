@@ -4178,7 +4178,7 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
         item_label = item_terms[0].upper()
         lines += ["DECISION:", f"{item_label} STOCK FOUND", ""]
     elif len(results) == 1 or (not fuzzy_only and is_pn):
-        lines += ["DECISION:", f"{qty} ONBOARD" if qty else "ONBOARD", ""]
+        lines += ["DECISION:", f"{qty} ONBOARD" if qty else "ONBOARD — QUANTITY NOT RECORDED", ""]
     else:
         lines += ["DECISION:", f"{len(results)} MATCH(ES) FOUND", ""]
 
@@ -4192,7 +4192,10 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     elif not fuzzy_only and is_pn and query_type != "general":
         desc_note = f" ({desc})" if desc and desc.lower() != pn.lower() else ""
         if query_type == "quantity":
-            why = f"You have {qty} × {pn}{desc_note} onboard."
+            if qty:
+                why = f"You have {qty} × {pn}{desc_note} onboard."
+            else:
+                why = f"{pn}{desc_note} is recorded in stock but the quantity field is blank or not recorded."
         elif query_type == "location":
             why = f"{pn}{desc_note} is stored in {loc or 'location not recorded'}."
         else:
@@ -4229,6 +4232,8 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     link_info = infer_stock_equipment_link(first, all_equip)
     if link_info["confidence"] in ("exact", "likely") and link_info["label"]:
         lines += ["EQUIPMENT:", link_info["label"], ""]
+    elif link_info["confidence"] == "low":
+        lines += ["EQUIPMENT:", "Equipment link uncertain.", ""]
 
     # LOCATION
     if loc:

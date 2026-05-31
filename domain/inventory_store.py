@@ -640,9 +640,9 @@ def infer_stock_equipment_link(stock_item: dict, equipment_records: list) -> dic
                 if candidate and len(candidate) > 3 and candidate in search_text:
                     label = _eq_display(eq)
                     return {
-                        "confidence": "likely",
+                        "confidence": "low",
                         "equipment": [eq],
-                        "label": f"Likely linked to {label}" if label else "",
+                        "label": f"Possibly linked to {label}" if label else "",
                     }
 
     return _none

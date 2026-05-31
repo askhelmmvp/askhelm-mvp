@@ -1277,12 +1277,12 @@ class TestInferStockEquipmentLink(unittest.TestCase):
         result = self._infer({"description": "Air Filter", "make": "MTU"})
         self.assertTrue(result["label"].startswith("Likely linked to"))
 
-    def test_likely_via_system_keyword_in_description(self):
+    def test_low_via_system_keyword_in_description(self):
         result = self._infer({
             "description": "Generator fuel filter",
             "make": "",
         })
-        self.assertEqual(result["confidence"], "likely")
+        self.assertEqual(result["confidence"], "low")
         self.assertIn("Generator", result["label"])
 
     def test_no_match_returns_none_confidence(self):
@@ -2381,6 +2381,193 @@ class TestDeckMalformedRowFiltering(unittest.TestCase):
         self.assertEqual(_fmt_qty(float("nan")), "")
         self.assertEqual(_fmt_qty(None), "")
         self.assertEqual(_fmt_qty(4.0), "4")
+
+
+class TestBlankQuantityFormatting(unittest.TestCase):
+    """ASK-38: blank/None quantity must never produce 'You have  × part'."""
+
+    _EQUIPMENT = []
+    _ITEMS = [
+        {
+            "description": "HEM Pump Impeller",
+            "part_number": "H1532804",
+            "quantity_onboard": None,
+            "storage_location": "Engine Room",
+            "confidence": 0.9,
+        },
+        {
+            "description": "HEM Pump Seal Kit",
+            "part_number": "H1532805",
+            "quantity_onboard": 2.0,
+            "storage_location": "Engine Room",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _stock(self, query):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(query, {"user_id": ""})
+        return result
+
+    def test_blank_qty_decision_says_quantity_not_recorded(self):
+        r = self._stock("how many H1532804 on board?")
+        self.assertIn("QUANTITY NOT RECORDED", r)
+
+    def test_blank_qty_decision_never_produces_empty_cross(self):
+        r = self._stock("how many H1532804 on board?")
+        self.assertNotIn("You have  ×", r)
+        self.assertNotIn("You have  x", r)
+
+    def test_blank_qty_why_says_quantity_not_recorded(self):
+        r = self._stock("how many H1532804 on board?")
+        self.assertIn("quantity field is blank or not recorded", r)
+
+    def test_known_qty_still_shows_number(self):
+        r = self._stock("how many H1532805 on board?")
+        self.assertIn("2 ONBOARD", r)
+        self.assertIn("You have 2 ×", r)
+
+
+class TestEquipmentLinkLowConfidence(unittest.TestCase):
+    """ASK-38: Phase 3 (system-keyword) matches produce 'low' confidence and
+    show 'Equipment link uncertain.' rather than a definitive equipment name."""
+
+    # "pump" appears in the description, triggering Phase 3 keyword match.
+    _EQUIPMENT = [
+        {
+            "equipment_name": "Rudder Angle Indicator",
+            "system": "steering",
+            "make": "",
+        },
+        {
+            "equipment_name": "HEM Bilge Pump",
+            "system": "pump",
+            "make": "HEM",
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _infer(self, item):
+        from domain.inventory_store import infer_stock_equipment_link
+        return infer_stock_equipment_link(item, self._EQUIPMENT)
+
+    def test_phase3_returns_low_confidence(self):
+        # "pump" is in "hem pump impeller" → Phase 3 fires
+        result = self._infer({"description": "hem pump impeller", "make": "", "linked_equipment": ""})
+        self.assertEqual(result["confidence"], "low")
+
+    def test_phase3_label_says_possibly_linked(self):
+        result = self._infer({"description": "hem pump impeller", "make": "", "linked_equipment": ""})
+        self.assertTrue(result["label"].startswith("Possibly linked to"))
+
+    def test_steering_keyword_absent_so_rudder_angle_not_matched(self):
+        # "steering" is NOT in "hem pump impeller" → Rudder Angle Indicator excluded
+        result = self._infer({"description": "hem pump impeller", "make": "", "linked_equipment": ""})
+        self.assertNotIn("Rudder Angle", result["label"])
+
+    def test_phase2_make_still_returns_likely(self):
+        # make="HEM" matches HEM Bilge Pump via Phase 2 → confidence stays "likely"
+        result = self._infer({"description": "hem pump impeller", "make": "HEM", "linked_equipment": ""})
+        self.assertEqual(result["confidence"], "likely")
+
+
+class TestHEMSparesFalseLink(unittest.TestCase):
+    """ASK-38: HEM pump parts must not show Rudder Angle indicator as equipment.
+    system='pump' appears in the descriptions so Phase 3 fires, but the match
+    is to HEM Bilge Pump (not Rudder Angle Indicator). Result shows 'uncertain'."""
+
+    _EQUIPMENT = [
+        {"equipment_name": "Rudder Angle Indicator", "system": "steering", "make": ""},
+        {"equipment_name": "HEM Bilge Pump", "system": "pump", "make": "HEM"},
+    ]
+
+    _ITEMS = [
+        {
+            "description": "HEM Pump Impeller",
+            "part_number": "H1532804",
+            "quantity_onboard": None,
+            "storage_location": "Engine Room",
+            "make": "",
+            "confidence": 0.9,
+        },
+        {
+            "description": "Impeller — general bilge pump",
+            "part_number": "AIK111571",
+            "quantity_onboard": 1.0,
+            "storage_location": "Engine Room",
+            "make": "",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+        inv_store.merge_equipment("", self._EQUIPMENT, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _stock(self, query):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(query, {"user_id": ""})
+        return result
+
+    def test_h1532804_does_not_show_rudder_angle(self):
+        r = self._stock("do we have H1532804?")
+        self.assertNotIn("Rudder Angle", r)
+
+    def test_aik111571_does_not_show_rudder_angle(self):
+        r = self._stock("do we have AIK111571?")
+        self.assertNotIn("Rudder Angle", r)
+
+    def test_h1532804_shows_equipment_link_uncertain(self):
+        r = self._stock("do we have H1532804?")
+        self.assertIn("Equipment link uncertain", r)
+
+    def test_aik111571_shows_equipment_link_uncertain(self):
+        r = self._stock("do we have AIK111571?")
+        self.assertIn("Equipment link uncertain", r)
+
+    def test_broad_impeller_search_does_not_show_rudder_angle(self):
+        r = self._stock("show impeller stock")
+        self.assertNotIn("Rudder Angle", r)
 
 
 if __name__ == "__main__":
