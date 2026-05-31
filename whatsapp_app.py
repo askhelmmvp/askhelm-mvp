@@ -4232,6 +4232,8 @@ def _handle_stock_query(query: str, state: dict) -> Tuple[str, dict]:
     link_info = infer_stock_equipment_link(first, all_equip)
     if link_info["confidence"] in ("exact", "likely") and link_info["label"]:
         lines += ["EQUIPMENT:", link_info["label"], ""]
+    elif link_info["confidence"] == "location_system" and link_info["label"]:
+        lines += ["EQUIPMENT / SYSTEM:", link_info["label"], ""]
     elif link_info["confidence"] == "low":
         lines += ["EQUIPMENT:", "Equipment link uncertain.", ""]
 

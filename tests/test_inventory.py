@@ -2570,5 +2570,202 @@ class TestHEMSparesFalseLink(unittest.TestCase):
         self.assertNotIn("Rudder Angle", r)
 
 
+class TestExtractSystemFromLocation(unittest.TestCase):
+    """Unit tests for _extract_system_from_location helper."""
+
+    def _extract(self, loc):
+        from domain.inventory_store import _extract_system_from_location
+        return _extract_system_from_location(loc)
+
+    def test_fresh_water_system(self):
+        self.assertEqual(self._extract("TD / Tech 2 / Fresh Water System Box 1"), "Fresh Water System")
+
+    def test_sea_water_cooling_system(self):
+        self.assertEqual(self._extract("ER / Sea Water Cooling System Cabinet"), "Sea Water Cooling System")
+
+    def test_hydraulic_system(self):
+        self.assertEqual(self._extract("Hydraulic System Locker"), "Hydraulic System")
+
+    def test_engine_room_returns_empty(self):
+        self.assertEqual(self._extract("Engine Room"), "")
+
+    def test_deck_store_returns_empty(self):
+        self.assertEqual(self._extract("Deck Store"), "")
+
+    def test_generator_room_returns_empty(self):
+        self.assertEqual(self._extract("LD / Generator Room / Filter Cabinet"), "")
+
+    def test_empty_returns_empty(self):
+        self.assertEqual(self._extract(""), "")
+
+    def test_innermost_segment_wins(self):
+        # Prefers the most specific (innermost) match
+        result = self._extract("Main Engine Room / Fresh Water System Bay")
+        self.assertEqual(result, "Fresh Water System")
+
+
+class TestLocationMatchesEquipment(unittest.TestCase):
+    """Unit tests for _location_matches_equipment helper."""
+
+    def _matches(self, system_name, eq):
+        from domain.inventory_store import _location_matches_equipment
+        return _location_matches_equipment(system_name, eq)
+
+    def test_exact_system_match(self):
+        eq = {"system": "Fresh Water System", "equipment_name": "Fresh Water Hydrophore Pump"}
+        self.assertTrue(self._matches("Fresh Water System", eq))
+
+    def test_equipment_name_contains_tokens(self):
+        eq = {"system": "", "equipment_name": "Fresh Water Hydrophore Pump"}
+        self.assertTrue(self._matches("Fresh Water System", eq))
+
+    def test_unrelated_equipment_no_match(self):
+        eq = {"system": "steering", "equipment_name": "Rudder Angle Indicator"}
+        self.assertFalse(self._matches("Fresh Water System", eq))
+
+    def test_single_token_system_requires_two_meaningful(self):
+        # "Bilge System" → tokens after filtering "system" = ["bilge"] (1 token) → False
+        eq = {"system": "bilge", "equipment_name": "Bilge Pump"}
+        self.assertFalse(self._matches("Bilge System", eq))
+
+    def test_single_adjective_system_no_match(self):
+        # "Hydraulic System" → 1 meaningful token after filtering "system" → conservative no-match;
+        # caller falls through to location_system confidence with label instead.
+        eq = {"system": "Hydraulic", "equipment_name": "Hydraulic Power Unit"}
+        self.assertFalse(self._matches("Hydraulic System", eq))
+
+
+class TestFreshWaterSystemLink(unittest.TestCase):
+    """ASK-38 follow-up: AIK111571-style items get system context from storage location."""
+
+    _EQUIPMENT_WITH_RECORD = [
+        {"equipment_name": "Fresh Water Hydrophore Pump", "system": "Fresh Water System", "make": ""},
+        {"equipment_name": "Rudder Angle Indicator", "system": "steering", "make": ""},
+    ]
+
+    _EQUIPMENT_WITHOUT_RECORD = [
+        {"equipment_name": "Rudder Angle Indicator", "system": "steering", "make": ""},
+    ]
+
+    _ITEM = {
+        "description": "Impeller",
+        "part_number": "AIK111571",
+        "quantity_onboard": 8.0,
+        "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+        "make": "",
+        "confidence": 0.9,
+    }
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _infer(self, equipment):
+        from domain.inventory_store import infer_stock_equipment_link
+        return infer_stock_equipment_link(self._ITEM, equipment)
+
+    def test_with_matching_equipment_returns_likely(self):
+        result = self._infer(self._EQUIPMENT_WITH_RECORD)
+        self.assertEqual(result["confidence"], "likely")
+
+    def test_with_matching_equipment_label_contains_pump(self):
+        result = self._infer(self._EQUIPMENT_WITH_RECORD)
+        self.assertIn("Fresh Water Hydrophore Pump", result["label"])
+
+    def test_with_matching_equipment_rudder_not_in_label(self):
+        result = self._infer(self._EQUIPMENT_WITH_RECORD)
+        self.assertNotIn("Rudder Angle", result["label"])
+
+    def test_without_matching_equipment_returns_location_system(self):
+        result = self._infer(self._EQUIPMENT_WITHOUT_RECORD)
+        self.assertEqual(result["confidence"], "location_system")
+
+    def test_without_matching_equipment_label_contains_fresh_water_system(self):
+        result = self._infer(self._EQUIPMENT_WITHOUT_RECORD)
+        self.assertIn("Fresh Water System", result["label"])
+
+    def test_without_matching_equipment_label_says_uncertain(self):
+        result = self._infer(self._EQUIPMENT_WITHOUT_RECORD)
+        self.assertIn("Specific equipment link uncertain", result["label"])
+
+    def test_without_matching_equipment_rudder_not_in_label(self):
+        result = self._infer(self._EQUIPMENT_WITHOUT_RECORD)
+        self.assertNotIn("Rudder Angle", result["label"])
+
+
+class TestFreshWaterSystemResponse(unittest.TestCase):
+    """ASK-38 follow-up: response formatting for location_system confidence."""
+
+    _EQUIPMENT = [
+        {"equipment_name": "Rudder Angle Indicator", "system": "steering", "make": ""},
+    ]
+
+    _ITEMS = [
+        {
+            "description": "Impeller",
+            "part_number": "AIK111571",
+            "quantity_onboard": 8.0,
+            "storage_location": "TD / Tech 2 / Fresh Water System Box 1",
+            "make": "",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+        inv_store.merge_equipment("", self._EQUIPMENT, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _stock(self, query):
+        from whatsapp_app import _handle_stock_query
+        result, _ = _handle_stock_query(query, {"user_id": ""})
+        return result
+
+    def test_quantity_correct(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("8 ONBOARD", r)
+
+    def test_location_present(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("TD / Tech 2 / Fresh Water System Box 1", r)
+
+    def test_rudder_angle_not_shown(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertNotIn("Rudder Angle", r)
+
+    def test_fresh_water_system_context_shown(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("Fresh Water System", r)
+
+    def test_equipment_system_header_used(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("EQUIPMENT / SYSTEM:", r)
+
+    def test_specific_link_uncertain_shown(self):
+        r = self._stock("how many AIK111571 on board?")
+        self.assertIn("Specific equipment link uncertain", r)
+
+
 if __name__ == "__main__":
     unittest.main()
