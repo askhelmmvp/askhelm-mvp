@@ -486,6 +486,26 @@ _HOW_MANY_COMPLIANCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+_QUOTE_STOCK_CHECK_SUBSTRINGS = [
+    # Follow-up questions referring to items from a recently uploaded document.
+    # Checked BEFORE _PROCUREMENT_QUERY_SUBSTRINGS and _STOCK_QUERY_SUBSTRINGS
+    # so "do we have these in stock?" / "do we need to order these?" resolve to
+    # the document-context stock check rather than a direct lookup.
+    "do we already have these",
+    "do we have these in stock",
+    "are these already onboard",
+    "check these against stock",
+    "check this against stock",
+    "do we need to order these",
+    "do we already carry these",
+    "are these parts in stores",
+    "do we have these parts",
+    "are these items onboard",
+    "are these onboard",
+    "have we got these",
+    "do we stock these",
+]
+
 _PROCUREMENT_QUERY_SUBSTRINGS = [
     # Explicit reorder / ordering questions with a specific item in mind.
     # Checked BEFORE _COMMERCIAL_FOLLOWUP_SUBSTRINGS so "should we order more AIK111571?"
@@ -1076,7 +1096,7 @@ def classify_text(text: str) -> str:
       commercial_followup | compliance_question | market_check | reminder |
       show_handover_notes | show_open_actions |
       show_equipment | show_stock | stock_query | spares_query | equipment_query |
-      procurement_query | reset_equipment | greeting | unknown
+      procurement_query | quote_stock_check | reset_equipment | greeting | unknown
     """
     t = text.strip().lower()
     # Strip trailing punctuation for exact-match lookups so "what should i do?"
@@ -1137,6 +1157,10 @@ def classify_text(text: str) -> str:
                 return "approval_clarification"
         if t_core in _APPROVAL_CLARIFICATION_EXACT:
             return "approval_clarification"
+
+    for phrase in _QUOTE_STOCK_CHECK_SUBSTRINGS:
+        if phrase in t:
+            return "quote_stock_check"
 
     for phrase in _PROCUREMENT_QUERY_SUBSTRINGS:
         if phrase in t:
