@@ -467,6 +467,9 @@ _STOCK_QUERY_SUBSTRINGS = [
     "where do we keep ",
     "where can i find",
     "which equipment does this belong to",
+    # Explicit search commands — "search stock for valves", "search inventory for gaskets"
+    "search stock for ",
+    "search inventory for ",
     # Broad quantity query — placed after equipment-noun checks so
     # equipment_query wins for "how many stabilisers do we have?"
     # NOTE: the bare "how many " match is guarded in classify_text by
@@ -483,6 +486,15 @@ _HOW_MANY_COMPLIANCE_RE = re.compile(
     r'\b(?:times|solas|marpol|ism\s+code|'
     r'battery\s+power|emergency\s+power|central\s+power|'
     r'fire\s+doors?|control\s+system|test\s+frequency)\b',
+    re.IGNORECASE,
+)
+
+# "show valve stock", "list pump stock", "find gasket inventory" — explicit stock
+# search commands where a subject word sits between the verb and the stock/inventory
+# keyword. Requires at least one word between verb and keyword so that "show stock"
+# and "show deck stock" (both handled by _FOLLOW_UPS) never match here.
+_STOCK_SEARCH_COMMAND_RE = re.compile(
+    r'^(?:show|list|find)\s+\S.*\s+(?:stock|inventory)$',
     re.IGNORECASE,
 )
 
@@ -1200,6 +1212,12 @@ def classify_text(text: str) -> str:
     for phrase in _EQUIPMENT_QUERY_SUBSTRINGS:
         if phrase in t:
             return "equipment_query"
+
+    # "show valve stock", "list pump stock" — explicit stock-search commands.
+    # Checked before _is_equipment_memory_query so "show pump stock" is not
+    # intercepted by the equipment-identity prefix pattern.
+    if _STOCK_SEARCH_COMMAND_RE.match(t):
+        return "stock_query"
 
     # Natural-language equipment question: equipment noun + question word.
     # Checked before _STOCK_QUERY_SUBSTRINGS so "how many stabilisers do we have?"
