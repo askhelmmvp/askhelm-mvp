@@ -3712,6 +3712,8 @@ _STOCK_QUERY_PREFIXES = [
     "what is the stock of ", "stock of ",
     "where can i find ", "where is this ",
     "which equipment does this belong to ",
+    "search stock for ", "search inventory for ",
+    "show ", "list ", "find ",
     "how many ",
 ]
 
@@ -3743,6 +3745,12 @@ def _extract_stock_search_term(query: str) -> str:
     term = _extract_subject_from_query(query, _STOCK_QUERY_PREFIXES)
     q_norm = query.lower().strip().rstrip("?!").strip()
     if term.lower().strip() != q_norm:
+        # Strip trailing " stock" / " inventory" keyword left after prefix removal.
+        # e.g. "show valve stock" → prefix "show " stripped → "valve stock" → "valve"
+        for sfx in (" stock", " inventory"):
+            if term.lower().endswith(sfx):
+                term = term[: -len(sfx)].strip()
+                break
         # Further strip boilerplate words trailing after the prefix
         # e.g. "wetsuits do we have" → "wetsuits"; "Sikaflex 295 onboard" → "Sikaflex 295"
         term_clean = _strip_query_noise(term) or term

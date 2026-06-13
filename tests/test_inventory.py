@@ -3104,5 +3104,134 @@ class TestProcurementViaDispatch(unittest.TestCase):
         self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
 
 
+# ---------------------------------------------------------------------------
+# ASK-40: "show valve stock" → stock_query (generic show/list/find X stock)
+# ---------------------------------------------------------------------------
+
+class TestGenericStockSearchIntent(unittest.TestCase):
+    """classify_text must route 'show X stock' patterns to stock_query."""
+
+    def _classify(self, text):
+        from domain.intent import classify_text
+        return classify_text(text)
+
+    # --- new patterns that should route to stock_query ---
+
+    def test_show_valve_stock(self):
+        self.assertEqual(self._classify("show valve stock"), "stock_query")
+
+    def test_show_pump_stock(self):
+        self.assertEqual(self._classify("show pump stock"), "stock_query")
+
+    def test_list_gasket_stock(self):
+        self.assertEqual(self._classify("list gasket stock"), "stock_query")
+
+    def test_find_filter_stock(self):
+        self.assertEqual(self._classify("find filter stock"), "stock_query")
+
+    def test_show_seal_inventory(self):
+        self.assertEqual(self._classify("show seal inventory"), "stock_query")
+
+    def test_list_bearing_inventory(self):
+        self.assertEqual(self._classify("list bearing inventory"), "stock_query")
+
+    def test_show_valve_stock_uppercase(self):
+        self.assertEqual(self._classify("Show Valve Stock"), "stock_query")
+
+    def test_search_stock_for_valves(self):
+        # "stock for " is already in _SPARES_QUERY_SUBSTRINGS, so this routes to
+        # spares_query — both handlers perform an inventory search, result is correct.
+        self.assertIn(self._classify("search stock for valves"), ("stock_query", "spares_query"))
+
+    def test_search_inventory_for_gaskets(self):
+        self.assertEqual(self._classify("search inventory for gaskets"), "stock_query")
+
+    # --- existing intents must not regress ---
+
+    def test_show_stock_still_show_stock(self):
+        self.assertEqual(self._classify("show stock"), "show_stock")
+
+    def test_show_inventory_still_show_stock(self):
+        self.assertEqual(self._classify("show inventory"), "show_stock")
+
+    def test_show_deck_stock_still_show_deck_stock(self):
+        self.assertEqual(self._classify("show deck stock"), "show_deck_stock")
+
+    def test_show_hem_spares_still_spares_query(self):
+        self.assertEqual(self._classify("show HEM spares"), "spares_query")
+
+    def test_how_many_onboard_still_stock_query(self):
+        self.assertEqual(self._classify("how many AIK111571 on board?"), "stock_query")
+
+
+class TestGenericStockSearchResponse(unittest.TestCase):
+    """End-to-end: 'show valve stock' must not return DOCUMENT NOT UNDERSTOOD."""
+
+    _ITEMS = [
+        {
+            "description": "Sea water valve",
+            "part_number": "SWV-001",
+            "quantity_onboard": 3.0,
+            "storage_location": "Engine Room / Spares Box",
+            "make": "",
+            "confidence": 0.9,
+        },
+        {
+            "description": "Ball valve 25mm",
+            "part_number": "BV-025",
+            "quantity_onboard": 2.0,
+            "storage_location": "Engine Room / Spares Box",
+            "make": "",
+            "confidence": 0.9,
+        },
+    ]
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp()
+        os.environ["DATA_DIR"] = self.tmpdir
+        import importlib, storage_paths, domain.inventory_store as inv_store
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+        inv_store.merge_stock("", self._ITEMS, "test.csv")
+
+    def tearDown(self):
+        os.environ.pop("DATA_DIR", None)
+        import shutil, importlib, storage_paths, domain.inventory_store as inv_store
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+        importlib.reload(storage_paths)
+        importlib.reload(inv_store)
+
+    def _dispatch(self, query):
+        from whatsapp_app import _handle_text_message
+        result, _ = _handle_text_message(query, {"user_id": ""})
+        return result
+
+    def test_show_valve_stock_not_document_not_understood(self):
+        r = self._dispatch("show valve stock")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+    def test_show_valve_stock_finds_valves(self):
+        r = self._dispatch("show valve stock")
+        self.assertIn("valve", r.lower())
+
+    def test_list_valve_stock(self):
+        r = self._dispatch("list valve stock")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+        self.assertIn("valve", r.lower())
+
+    def test_search_stock_for_valves(self):
+        r = self._dispatch("search stock for valves")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+        self.assertIn("valve", r.lower())
+
+    def test_show_stock_still_works(self):
+        r = self._dispatch("show stock")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+    def test_how_many_onboard_still_works(self):
+        r = self._dispatch("how many AIK111571 on board?")
+        self.assertNotIn("DOCUMENT NOT UNDERSTOOD", r)
+
+
 if __name__ == "__main__":
     unittest.main()
