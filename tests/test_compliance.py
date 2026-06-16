@@ -1555,5 +1555,257 @@ class TestShowRegulationsResponseBuilder(unittest.TestCase):
         self.assertIn("REGULATIONS:", response)
 
 
+class TestNamedRegulationDetection(unittest.TestCase):
+    """_detect_named_regulation must match specific regulation names."""
+
+    def _detect(self, text):
+        from domain.compliance_engine import _detect_named_regulation
+        return _detect_named_regulation(text)
+
+    def test_solas_detected(self):
+        self.assertEqual(self._detect("what is in SOLAS?"), "SOLAS")
+
+    def test_solas_case_insensitive(self):
+        self.assertEqual(self._detect("what does solas say about bulkheads"), "SOLAS")
+
+    def test_marpol_annex_vi_detected(self):
+        self.assertEqual(
+            self._detect("what are the NOx regulations in MARPOL Annex VI?"),
+            "MARPOL Annex VI"
+        )
+
+    def test_marpol_annex_i_detected(self):
+        self.assertEqual(
+            self._detect("what does MARPOL Annex I say about bilge?"),
+            "MARPOL Annex I"
+        )
+
+    def test_ism_code_detected(self):
+        self.assertEqual(self._detect("what is ISM code chapter 10?"), "ISM Code")
+
+    def test_marpol_alone_not_detected(self):
+        # "marpol tier iii" without an annex number must NOT trigger general guidance
+        self.assertIsNone(self._detect("marpol tier iii"))
+
+    def test_marpol_tier_iii_not_detected(self):
+        self.assertIsNone(self._detect("does tier iii apply in norwegian sea"))
+
+    def test_obscure_query_not_detected(self):
+        self.assertIsNone(self._detect("something completely obscure"))
+
+    def test_marpol_annex_v_not_confused_with_vi(self):
+        # "annex v" without "i" suffix must match Annex V, not Annex VI
+        result = self._detect("what does MARPOL Annex V say about garbage?")
+        self.assertEqual(result, "MARPOL Annex V")
+
+
+class TestGeneralGuidanceFallback(unittest.TestCase):
+    """When retrieval fails for a named regulation, use general guidance, not NOT_COVERED."""
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_solas_triggers_general_guidance_when_no_chunks(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = [
+            {"source": "SOLAS Consolidated Edition 2018", "chunks": 50, "content_sample": ""}
+        ]
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — SOLAS — SOURCE LOADED, SECTION NOT FOUND\n\n"
+            "WHY:\nSOLAS covers international ship safety requirements.\n\n"
+            "GENERAL GUIDANCE:\n• Fire protection in SOLAS Chapter II-2\n\n"
+            "SOURCE:\nSOLAS is loaded, but the exact section was not found.\n\n"
+            "ACTIONS:\n• Ask about a specific SOLAS chapter"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what is in SOLAS?")
+
+        self.assertIn("DECISION:", result)
+        self.assertIn("GENERAL GUIDANCE", result)
+        mock_guidance.assert_called_once()
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_marpol_annex_vi_triggers_general_guidance(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = [
+            {"source": "MARPOL Annex VI", "chunks": 20, "content_sample": ""}
+        ]
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI — SOURCE LOADED, SECTION NOT FOUND\n\n"
+            "WHY:\nMARPOL Annex VI controls NOx and SOx air emissions from ships.\n\n"
+            "GENERAL GUIDANCE:\n• NOx limits depend on engine installation date\n\n"
+            "SOURCE:\nMARPOL Annex VI is loaded, but the exact section was not found.\n\n"
+            "ACTIONS:\n• Check MARPOL Annex VI Regulation 13 for NOx"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what are the NOx regulations in MARPOL Annex VI?")
+
+        self.assertIn("DECISION:", result)
+        self.assertIn("GENERAL GUIDANCE", result)
+        mock_guidance.assert_called_once()
+
+    @patch("domain.compliance_engine._get_retriever")
+    def test_obscure_query_still_returns_not_covered(self, mock_retriever_getter):
+        """Queries without a known regulation name still use NOT_COVERED_FALLBACK."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("something completely obscure and unmatched")
+
+        self.assertIn("Not explicitly covered", result)
+
+    @patch("domain.compliance_engine._get_retriever")
+    def test_marpol_alone_no_annex_returns_not_covered(self, mock_retriever_getter):
+        """'marpol tier iii' without an annex number must NOT trigger general guidance."""
+        mock_retriever_getter.side_effect = RuntimeError("index corrupt")
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("marpol tier iii")
+
+        self.assertIn("DECISION:", result)
+        self.assertIn("Not explicitly covered", result)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_strong_retrieval_wins_over_general_guidance(
+        self, mock_llm, mock_retriever_getter
+    ):
+        """When retrieval scores >= 0.15 and LLM returns a good answer, use it — no general guidance."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "ISM Code Ch 10", "content": "Maintenance required.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Yes.\nWHY: ISM Code Ch 10 requires maintenance.\n"
+            "SOURCE: ISM Code 2018 — Chapter 10\nACTIONS: • Maintain equipment"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what is ISM code chapter 10?")
+
+        self.assertNotIn("GENERAL GUIDANCE", result)
+        self.assertIn("DECISION:", result)
+        mock_llm.assert_called_once()
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_general_guidance_uses_not_loaded_when_source_absent(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        """When SOLAS is named but not loaded, general guidance shows 'not loaded' disclaimer."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = [
+            {"source": "ISM Code 2018", "chunks": 12, "content_sample": ""}
+        ]  # SOLAS is NOT in loaded sources
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — SOLAS — SOURCE NOT LOADED\n\n"
+            "WHY:\nSOLAS sets international ship safety standards.\n\n"
+            "GENERAL GUIDANCE:\n• SOLAS covers fire, lifesaving, navigation\n\n"
+            "SOURCE:\nSOLAS is not currently loaded.\n\n"
+            "ACTIONS:\n• Upload SOLAS to get verified answers"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what does SOLAS say about fire dampers?")
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        # Verify is_loaded=False was passed
+        call_args = mock_guidance.call_args
+        self.assertEqual(call_args[0][2], False)  # is_loaded
+
+
+class TestAnswerComplianceGeneralGuidance(unittest.TestCase):
+    """answer_compliance_general_guidance must produce correctly labeled general guidance."""
+
+    @patch("services.anthropic_service.client")
+    def test_loaded_source_label_in_system_prompt(self, mock_client):
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=(
+            "DECISION:\nGENERAL GUIDANCE — SOLAS — SOURCE LOADED, SECTION NOT FOUND\n\n"
+            "WHY:\nSOLAS covers fire protection requirements.\n\n"
+            "GENERAL GUIDANCE:\n• A-60 divisions are fire-rated structural divisions\n\n"
+            "SOURCE:\nSOLAS is loaded, but the exact section was not found.\n\n"
+            "ACTIONS:\n• Check SOLAS Chapter II-2"
+        ))]
+        mock_client.messages.create.return_value = mock_response
+
+        from services.anthropic_service import answer_compliance_general_guidance
+        result = answer_compliance_general_guidance(
+            "what does SOLAS say about A60 bulkheads?", "SOLAS", is_loaded=True
+        )
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        call_kwargs = mock_client.messages.create.call_args[1]
+        system_text = call_kwargs["system"][0]["text"]
+        self.assertIn("could not locate the exact section", system_text)
+        self.assertIn("SOURCE LOADED, SECTION NOT FOUND", system_text)
+
+    @patch("services.anthropic_service.client")
+    def test_not_loaded_label_in_system_prompt(self, mock_client):
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=(
+            "DECISION:\nGENERAL GUIDANCE — SOLAS — SOURCE NOT LOADED\n\n"
+            "WHY:\nSOLAS sets international safety standards.\n\n"
+            "GENERAL GUIDANCE:\n• Fire protection rules in SOLAS II-2\n\n"
+            "SOURCE:\nSOLAS is not currently loaded.\n\n"
+            "ACTIONS:\n• Upload SOLAS PDF"
+        ))]
+        mock_client.messages.create.return_value = mock_response
+
+        from services.anthropic_service import answer_compliance_general_guidance
+        result = answer_compliance_general_guidance(
+            "what does SOLAS say about A60 bulkheads?", "SOLAS", is_loaded=False
+        )
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        call_kwargs = mock_client.messages.create.call_args[1]
+        system_text = call_kwargs["system"][0]["text"]
+        self.assertIn("not currently loaded", system_text)
+        self.assertIn("SOURCE NOT LOADED", system_text)
+
+    @patch("services.anthropic_service.client")
+    def test_uses_sonnet_model(self, mock_client):
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="DECISION:\nGENERAL GUIDANCE\n\nWHY:\nTest.")]
+        mock_client.messages.create.return_value = mock_response
+
+        from services.anthropic_service import answer_compliance_general_guidance
+        answer_compliance_general_guidance("test question", "SOLAS", is_loaded=False)
+
+        call_kwargs = mock_client.messages.create.call_args[1]
+        self.assertEqual(call_kwargs["model"], "claude-sonnet-4-6")
+
+    @patch("services.anthropic_service.client")
+    def test_max_tokens_adequate_for_guidance(self, mock_client):
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text="DECISION:\nGENERAL GUIDANCE\n\nWHY:\nTest.")]
+        mock_client.messages.create.return_value = mock_response
+
+        from services.anthropic_service import answer_compliance_general_guidance
+        answer_compliance_general_guidance("test question", "MARPOL Annex VI", is_loaded=True)
+
+        call_kwargs = mock_client.messages.create.call_args[1]
+        # General guidance needs more tokens than strict source answer (400)
+        self.assertGreaterEqual(call_kwargs["max_tokens"], 400)
+
+
 if __name__ == "__main__":
     unittest.main()
