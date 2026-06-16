@@ -26,10 +26,24 @@ _NAMED_REGULATIONS = [
     ("MARPOL Annex IV", re.compile(r'\bmarpol\s+annex\s+iv\b', re.I)),
     ("MARPOL Annex V",  re.compile(r'\bmarpol\s+annex\s+v\b(?!i)', re.I)),
     ("MARPOL Annex I",  re.compile(r'\bmarpol\s+annex\s+(?:i|1)\b(?!v)', re.I)),
-    ("ISM Code",        re.compile(r'\bism\s+code\b', re.I)),
+    ("ISM Code",        re.compile(r'\b(?:ism\s+code|ism\s+(?:say|says|chapter|maintenance|require|requires|audit))\b', re.I)),
     ("SOLAS",           re.compile(r'\bsolas\b', re.I)),
-    ("Large Yacht Code", re.compile(r'\b(?:lyc\s+code|large\s+yacht\s+code|lyx\s+code)\b', re.I)),
+    ("Large Yacht Code", re.compile(r'\b(?:lyc\s+code|lyc|large\s+yacht\s+code|lyx\s+code|yacht\s+code)\b', re.I)),
+    # Topic-inference entries — infer regulation from well-known terms when explicit name is absent.
+    ("MARPOL Annex VI", re.compile(
+        r'\b(?:tier\s+(?:i{1,3}|[123])|eiapp|nox\s+eca|neca|fuel\s+sulphur|'
+        r'sulphur\s+(?:cap|limit|content|requirement)|emission\s+control\s+area|'
+        r'eca\s+(?:requirement|requirements|rule|rules|standard|limit|sulphur|fuel)|'
+        r'engine\s+air\s+pollution)\b', re.I,
+    )),
 ]
+
+# Matches "what does X say about..." / "what do X require..." — regulation source inquiries.
+# Used to prevent the operational playbook from hijacking compliance source questions.
+_REGULATION_SOURCE_INQUIRY_RE = re.compile(
+    r'\bwhat (?:does|do)\b.{0,80}\b(?:say|says|require|requires|about|state|contain|cover)\b',
+    re.I,
+)
 
 # Alternative search terms tried when the original query scores below threshold.
 _REGULATION_EXPANSIONS = {
@@ -44,6 +58,9 @@ _REGULATION_EXPANSIONS = {
         "MARPOL Annex VI NOx diesel engine Tier regulation 13",
         "MARPOL Annex VI sulphur SOx ECA emission control area regulation 14",
         "MARPOL Annex VI IAPP certificate fuel oil record BDN",
+        "MARPOL Annex VI Tier III NOx emission standard NECA",
+        "MARPOL Annex VI EIAPP certificate engine air pollution prevention",
+        "MARPOL Annex VI ECA emission control area sulphur fuel requirement",
     ],
     "MARPOL Annex I": [
         "MARPOL Annex I oily water separator OWS OCM bilge discharge",
@@ -58,10 +75,12 @@ _REGULATION_EXPANSIONS = {
     "ISM Code": [
         "ISM Code maintenance ship equipment non-conformity corrective action",
         "ISM Code company responsibilities DPA audit SMS",
+        "ISM Code chapter 10 maintenance planned maintenance system",
     ],
     "Large Yacht Code": [
         "Large Yacht Code safety requirements fire equipment",
         "yacht code construction stability lifesaving",
+        "Large Yacht Code fire pump fire main pressure requirements",
     ],
 }
 
@@ -119,6 +138,9 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
     from services.anthropic_service import answer_compliance_question, NOT_COVERED_FALLBACK
     from services.compliance_profile import get_selected_regulations
 
+    # Detect named regulation early — needed for playbook guard and expansion queries.
+    reg_name = _detect_named_regulation(question)
+
     # 1. Try document retrieval (global + yacht-specific).
     selected = []
     try:
@@ -145,7 +167,6 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
         )
 
     # 3. Named regulation detected — try expanded queries when original retrieval is weak.
-    reg_name = _detect_named_regulation(question)
     if reg_name and top_score < _DOC_CONFIDENCE_THRESHOLD:
         for expansion in _REGULATION_EXPANSIONS.get(reg_name, []):
             try:
@@ -162,14 +183,16 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
                     return _cap_compliance_answer(doc_answer)
                 break  # one successful retrieval attempt is enough
 
-    # 4. Operational playbook fallback.
-    playbook_answer = playbook_lookup(question)
-    if playbook_answer:
-        logger.debug(
-            "compliance_engine: playbook fallback — top_score=%.4f question=%r",
-            top_score, question[:60],
-        )
-        return _cap_compliance_answer(playbook_answer)
+    # 4. Operational playbook fallback — skipped for regulation source inquiries to prevent
+    # canned operational responses hijacking "what does X say about Y?" questions.
+    if not (reg_name and _REGULATION_SOURCE_INQUIRY_RE.search(question)):
+        playbook_answer = playbook_lookup(question)
+        if playbook_answer:
+            logger.debug(
+                "compliance_engine: playbook fallback — top_score=%.4f question=%r",
+                top_score, question[:60],
+            )
+            return _cap_compliance_answer(playbook_answer)
 
     # 5. Weak document match but no playbook → use best available chunks (if not yet tried).
     if chunks and not _doc_tried:
