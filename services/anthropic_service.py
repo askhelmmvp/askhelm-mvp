@@ -224,3 +224,75 @@ def answer_compliance_followup_question(topic: str, chunks: List[Dict[str, Any]]
     log_llm_call("compliance_followup", response, "claude-sonnet-4-6")
 
     return response.content[0].text.strip()
+
+
+def answer_compliance_general_guidance(
+    question: str,
+    regulation_name: str,
+    is_loaded: bool,
+) -> str:
+    """
+    Give cautious general maritime guidance when the exact regulation section
+    could not be retrieved. Clearly labels the response as general guidance.
+    """
+    if is_loaded:
+        source_line = (
+            f"{regulation_name} is loaded, but AskHelm could not locate the exact "
+            f"section in the current index. Verify against {regulation_name} before "
+            "relying on this answer."
+        )
+        decision_suffix = f"{regulation_name.upper()} — SOURCE LOADED, SECTION NOT FOUND"
+    else:
+        source_line = (
+            f"{regulation_name} is not currently loaded in the compliance database. "
+            "This is general guidance only — verify against the relevant regulation "
+            "before relying on it."
+        )
+        decision_suffix = f"{regulation_name.upper()} — SOURCE NOT LOADED"
+
+    response = client.messages.create(
+        model="claude-sonnet-4-6",
+        max_tokens=500,
+        system=[{"type": "text", "cache_control": {"type": "ephemeral"}, "text": (
+            f"You are a maritime compliance advisor. The user is asking about {regulation_name}.\n"
+            "The exact regulation text could not be retrieved from the loaded index.\n"
+            "Provide CAUTIOUS GENERAL GUIDANCE using maritime convention knowledge.\n"
+            "\n"
+            "RULES:\n"
+            "1. Give accurate, practical general guidance — but be clearly cautious.\n"
+            "2. Do NOT state specific article numbers or regulation numbers unless you are highly confident they are correct for this regulation.\n"
+            "3. Never present this as a definitive or verified answer — always recommend verifying the source.\n"
+            "4. Maximum 4 bullet points in GENERAL GUIDANCE and 4 in ACTIONS.\n"
+            "5. Keep WHY to 2-4 lines maximum.\n"
+            "\n"
+            "Respond in this EXACT format — nothing before or after:\n"
+            "DECISION:\n"
+            f"GENERAL GUIDANCE — {decision_suffix}\n"
+            "\n"
+            "WHY:\n"
+            "<2-4 lines of accurate general maritime guidance on this specific topic>\n"
+            "\n"
+            "GENERAL GUIDANCE:\n"
+            "• <key point 1 — cautious and practical>\n"
+            "• <key point 2>\n"
+            "• <key point 3 — only if relevant>\n"
+            "• <key point 4 — only if relevant>\n"
+            "\n"
+            "SOURCE:\n"
+            f"{source_line}\n"
+            "\n"
+            "ACTIONS:\n"
+            "• <action 1 — what to verify or check in the regulation>\n"
+            "• <action 2>\n"
+            "• <action 3 — only if needed>\n"
+            "• <action 4 — only if needed>"
+        )}],
+        messages=[
+            {
+                "role": "user",
+                "content": question,
+            }
+        ],
+    )
+    log_llm_call("compliance_general_guidance", response, "claude-sonnet-4-6")
+    return response.content[0].text.strip()
