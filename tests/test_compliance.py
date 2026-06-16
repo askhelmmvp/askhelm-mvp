@@ -203,7 +203,7 @@ class TestComplianceEngine(unittest.TestCase):
         mock_retriever_getter.side_effect = RuntimeError("index corrupt")
 
         from domain.compliance_engine import answer_compliance_query
-        result = answer_compliance_query("marpol tier iii")
+        result = answer_compliance_query("ballast water treatment schedule")
 
         self.assertIn("DECISION:", result)
         self.assertIn("Not explicitly covered", result)
@@ -1584,11 +1584,11 @@ class TestNamedRegulationDetection(unittest.TestCase):
         self.assertEqual(self._detect("what is ISM code chapter 10?"), "ISM Code")
 
     def test_marpol_alone_not_detected(self):
-        # "marpol tier iii" without an annex number must NOT trigger general guidance
-        self.assertIsNone(self._detect("marpol tier iii"))
+        # bare "marpol" with no annex or topic-inference term must not match
+        self.assertIsNone(self._detect("marpol discharge requirements"))
 
-    def test_marpol_tier_iii_not_detected(self):
-        self.assertIsNone(self._detect("does tier iii apply in norwegian sea"))
+    def test_tier_iii_detected_as_marpol_annex_vi(self):
+        self.assertEqual(self._detect("does tier iii apply in norwegian sea"), "MARPOL Annex VI")
 
     def test_obscure_query_not_detected(self):
         self.assertIsNone(self._detect("something completely obscure"))
@@ -1669,12 +1669,12 @@ class TestGeneralGuidanceFallback(unittest.TestCase):
         self.assertIn("Not explicitly covered", result)
 
     @patch("domain.compliance_engine._get_retriever")
-    def test_marpol_alone_no_annex_returns_not_covered(self, mock_retriever_getter):
-        """'marpol tier iii' without an annex number must NOT trigger general guidance."""
+    def test_bare_marpol_returns_not_covered(self, mock_retriever_getter):
+        """bare 'marpol' with no annex or topic-inference term must not trigger general guidance."""
         mock_retriever_getter.side_effect = RuntimeError("index corrupt")
 
         from domain.compliance_engine import answer_compliance_query
-        result = answer_compliance_query("marpol tier iii")
+        result = answer_compliance_query("marpol discharge requirements")
 
         self.assertIn("DECISION:", result)
         self.assertIn("Not explicitly covered", result)
@@ -1805,6 +1805,241 @@ class TestAnswerComplianceGeneralGuidance(unittest.TestCase):
         call_kwargs = mock_client.messages.create.call_args[1]
         # General guidance needs more tokens than strict source answer (400)
         self.assertGreaterEqual(call_kwargs["max_tokens"], 400)
+
+
+class TestTopicInference(unittest.TestCase):
+    """_detect_named_regulation must infer regulation from well-known topic terms."""
+
+    def _detect(self, text):
+        from domain.compliance_engine import _detect_named_regulation
+        return _detect_named_regulation(text)
+
+    def test_tier_iii_infers_marpol_annex_vi(self):
+        self.assertEqual(self._detect("when does Tier III apply?"), "MARPOL Annex VI")
+
+    def test_tier_3_infers_marpol_annex_vi(self):
+        self.assertEqual(self._detect("do we need Tier 3 engines?"), "MARPOL Annex VI")
+
+    def test_eiapp_infers_marpol_annex_vi(self):
+        self.assertEqual(self._detect("what is an EIAPP certificate?"), "MARPOL Annex VI")
+
+    def test_eca_requirements_infer_marpol_annex_vi(self):
+        self.assertEqual(self._detect("what are ECA requirements?"), "MARPOL Annex VI")
+
+    def test_fuel_sulphur_infers_marpol_annex_vi(self):
+        self.assertEqual(self._detect("what fuel sulphur limits apply?"), "MARPOL Annex VI")
+
+    def test_sulphur_limit_infers_marpol_annex_vi(self):
+        self.assertEqual(self._detect("what is the sulphur limit in the Baltic?"), "MARPOL Annex VI")
+
+    def test_emission_control_area_infers_marpol_annex_vi(self):
+        self.assertEqual(self._detect("what is an emission control area?"), "MARPOL Annex VI")
+
+    def test_ism_say_infers_ism_code(self):
+        self.assertEqual(self._detect("what does ISM say about maintenance?"), "ISM Code")
+
+    def test_ism_maintenance_infers_ism_code(self):
+        self.assertEqual(self._detect("ISM maintenance requirements"), "ISM Code")
+
+    def test_yacht_code_infers_large_yacht_code(self):
+        self.assertEqual(self._detect("what does the yacht code say about fire pumps?"), "Large Yacht Code")
+
+    def test_lyc_alone_infers_large_yacht_code(self):
+        self.assertEqual(self._detect("does LYC require a fire pump test?"), "Large Yacht Code")
+
+    def test_bare_marpol_no_inference(self):
+        self.assertIsNone(self._detect("marpol discharge requirements"))
+
+    def test_unrelated_query_no_inference(self):
+        self.assertIsNone(self._detect("what time does the captain need to log the position?"))
+
+    def test_explicit_marpol_annex_vi_still_detected(self):
+        self.assertEqual(self._detect("MARPOL Annex VI NOx limits"), "MARPOL Annex VI")
+
+    def test_ism_code_explicit_still_detected(self):
+        self.assertEqual(self._detect("what is ISM code chapter 10?"), "ISM Code")
+
+
+class TestPlaybookGuard(unittest.TestCase):
+    """Regulation source inquiries must skip the operational playbook."""
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_yacht_code_fire_pump_skips_playbook(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        """'what does the yacht code say about fire pumps?' must NOT return overdue playbook response."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — LARGE YACHT CODE — SOURCE NOT LOADED\n\n"
+            "WHY:\nThe Large Yacht Code requires fire pumps to meet pressure standards.\n\n"
+            "GENERAL GUIDANCE:\n• Fire pump capacity is defined in the LYC\n\n"
+            "SOURCE:\nLarge Yacht Code is not currently loaded.\n\n"
+            "ACTIONS:\n• Upload the Large Yacht Code for verified answers"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what does the yacht code say about fire pumps?")
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        self.assertNotIn("ACTION REQUIRED", result)
+        self.assertNotIn("DO NOT LEAVE OVERDUE", result)
+        mock_guidance.assert_called_once()
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_ism_say_maintenance_skips_playbook(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        """'what does ISM say about maintenance?' must route to guidance, not playbook."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — ISM CODE — SOURCE NOT LOADED\n\n"
+            "WHY:\nISM Code Chapter 10 covers maintenance and testing.\n\n"
+            "GENERAL GUIDANCE:\n• Planned maintenance system required\n\n"
+            "SOURCE:\nISM Code is not currently loaded.\n\n"
+            "ACTIONS:\n• Upload ISM Code for verified answers"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what does ISM say about maintenance?")
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        mock_guidance.assert_called_once()
+
+    def test_source_inquiry_re_matches_what_does_say(self):
+        from domain.compliance_engine import _REGULATION_SOURCE_INQUIRY_RE
+        self.assertTrue(_REGULATION_SOURCE_INQUIRY_RE.search(
+            "what does the yacht code say about fire pumps?"
+        ))
+
+    def test_source_inquiry_re_matches_what_does_require(self):
+        from domain.compliance_engine import _REGULATION_SOURCE_INQUIRY_RE
+        self.assertTrue(_REGULATION_SOURCE_INQUIRY_RE.search(
+            "what does ISM require for maintenance?"
+        ))
+
+    def test_source_inquiry_re_does_not_match_operational_query(self):
+        from domain.compliance_engine import _REGULATION_SOURCE_INQUIRY_RE
+        self.assertFalse(_REGULATION_SOURCE_INQUIRY_RE.search(
+            "is the fire pump test overdue?"
+        ))
+
+    def test_source_inquiry_re_matches_what_does_cover(self):
+        from domain.compliance_engine import _REGULATION_SOURCE_INQUIRY_RE
+        self.assertTrue(_REGULATION_SOURCE_INQUIRY_RE.search(
+            "what does SOLAS cover for fire detection?"
+        ))
+
+
+class TestTopicInferenceEndToEnd(unittest.TestCase):
+    """Topic-inferred regulations must reach general guidance when retrieval fails."""
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_tier_iii_reaches_general_guidance(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI — SOURCE NOT LOADED\n\n"
+            "WHY:\nTier III NOx standards apply in designated NECAs.\n\n"
+            "GENERAL GUIDANCE:\n• Tier III applies in Norwegian ECA and North American ECA\n\n"
+            "SOURCE:\nMARPOL Annex VI is not currently loaded.\n\n"
+            "ACTIONS:\n• Upload MARPOL Annex VI for verified answers"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("when does Tier III apply?")
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        self.assertNotIn("Not explicitly covered", result)
+        mock_guidance.assert_called_once()
+        self.assertEqual(mock_guidance.call_args[0][1], "MARPOL Annex VI")
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_eiapp_reaches_general_guidance(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI — SOURCE NOT LOADED\n\n"
+            "WHY:\nEIAPP certifies engine air pollution prevention compliance.\n\n"
+            "GENERAL GUIDANCE:\n• All diesel engines above 130 kW require an EIAPP certificate\n\n"
+            "SOURCE:\nMARPOL Annex VI is not currently loaded.\n\n"
+            "ACTIONS:\n• Verify with flag state for exact requirements"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what is an EIAPP certificate?")
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        mock_guidance.assert_called_once()
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_eca_requirements_reaches_guidance(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI — SOURCE NOT LOADED\n\n"
+            "WHY:\nECA requirements limit sulphur to 0.1% m/m.\n\n"
+            "GENERAL GUIDANCE:\n• Use low-sulphur fuel or scrubber in ECAs\n\n"
+            "SOURCE:\nMARPOL Annex VI is not currently loaded.\n\n"
+            "ACTIONS:\n• Check current ECA boundaries before entering"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what are ECA requirements?")
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        mock_guidance.assert_called_once()
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    def test_fuel_sulphur_limits_reaches_guidance(
+        self, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI — SOURCE NOT LOADED\n\n"
+            "WHY:\nGlobal sulphur cap is 0.5% m/m; ECA limit is 0.1% m/m.\n\n"
+            "GENERAL GUIDANCE:\n• Verify bunker certificates match zone requirements\n\n"
+            "SOURCE:\nMARPOL Annex VI is not currently loaded.\n\n"
+            "ACTIONS:\n• Upload MARPOL Annex VI for verified answers"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("what fuel sulphur limits apply?")
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        mock_guidance.assert_called_once()
 
 
 if __name__ == "__main__":
