@@ -30,10 +30,11 @@ _NAMED_REGULATIONS = [
     ("SOLAS",           re.compile(r'\bsolas\b', re.I)),
     ("Large Yacht Code", re.compile(r'\b(?:lyc\s+code|lyc|large\s+yacht\s+code|lyx\s+code|yacht\s+code)\b', re.I)),
     # Topic-inference entries — infer regulation from well-known terms when explicit name is absent.
+    # Handles both American (sulfur) and British (sulphur) spellings via sul(?:f|ph)ur.
     ("MARPOL Annex VI", re.compile(
-        r'\b(?:tier\s+(?:i{1,3}|[123])|eiapp|nox\s+eca|neca|fuel\s+sulphur|'
-        r'sulphur\s+(?:cap|limit|content|requirement)|emission\s+control\s+area|'
-        r'eca\s+(?:requirement|requirements|rule|rules|standard|limit|sulphur|fuel)|'
+        r'\b(?:tier\s+(?:i{1,3}|[123])|eiapp|nox\s+eca|neca|fuel\s+sul(?:f|ph)ur|'
+        r'sul(?:f|ph)ur\s+(?:cap|limit|content|requirement)|emission\s+control\s+area|'
+        r'eca\s+(?:requirement|requirements|rule|rules|standard|limit|sul(?:f|ph)ur|fuel)|'
         r'engine\s+air\s+pollution)\b', re.I,
     )),
 ]
@@ -85,6 +86,46 @@ _REGULATION_EXPANSIONS = {
 }
 
 
+# Deterministic routing: topic-specific retrieval queries tried FIRST when the question
+# contains well-known subject terms, before falling back to general expansion list.
+# Each entry: (pattern, regulation_name, retrieval_query).
+_TOPIC_DIRECT_QUERIES = [
+    (re.compile(
+        r'\b(?:fuel\s+sul(?:f|ph)ur|sul(?:f|ph)ur\s+(?:limits?|caps?)|sox|'
+        r'eca\s+fuel|emission\s+control\s+area\s+fuel|fuel\s+oil\s+sul(?:f|ph)ur)\b', re.I,
+    ), "MARPOL Annex VI",
+     "MARPOL Annex VI sulphur SOx ECA emission control area regulation 14 fuel oil"),
+    (re.compile(
+        r'\b(?:nox|tier\s+(?:i{1,3}|[123])|eiapp|iapp|nox\s+technical\s+code|'
+        r'diesel\s+engine\s+emission|neca)\b', re.I,
+    ), "MARPOL Annex VI",
+     "MARPOL Annex VI NOx Tier III EIAPP diesel engine regulation 13 NECA"),
+    (re.compile(
+        r'\b(?:a[-\s]?60|a[-\s]?class\s+division|bulkhead\s+fire\s+rating|'
+        r'structural\s+fire\s+protection|fire[-\s]?rated\s+bulkhead)\b', re.I,
+    ), "SOLAS",
+     "SOLAS structural fire protection A-60 A-class division fire rating bulkhead"),
+    (re.compile(
+        r'\b(?:fire\s+dampers?|ventilation\s+damper|fire\s+flap|fire\s+ventilation\s+closure)\b',
+        re.I,
+    ), "SOLAS",
+     "SOLAS fire dampers ventilation closure fire safety"),
+]
+
+
+def _get_expansion_queries(reg_name: str, question: str) -> list:
+    """Return expansion queries: topic-specific direct queries first, then general."""
+    direct = [q for pat, reg, q in _TOPIC_DIRECT_QUERIES if reg == reg_name and pat.search(question)]
+    general = _REGULATION_EXPANSIONS.get(reg_name, [])
+    seen: set = set()
+    result = []
+    for q in direct + general:
+        if q not in seen:
+            seen.add(q)
+            result.append(q)
+    return result
+
+
 def _detect_named_regulation(question: str):
     """Return display name for the first known regulation found in question, or None."""
     t = question.lower()
@@ -133,15 +174,21 @@ def reset_retriever():
     logger.info("compliance_engine: retriever reset — will reload on next query")
 
 
-def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
+def answer_compliance_query(
+    question: str, yacht_id: str = "h3", role_context: str = ""
+) -> str:
     from domain.operational_playbook import lookup as playbook_lookup
     from services.anthropic_service import answer_compliance_question, NOT_COVERED_FALLBACK
     from services.compliance_profile import get_selected_regulations
 
+    # Role context is kept out of the retrieval query — prepending it degrades TF-IDF scores.
+    # It is passed to the LLM to influence answer tone only.
+    _llm_q = f"{role_context}\n\n{question}" if role_context else question
+
     # Detect named regulation early — needed for playbook guard and expansion queries.
     reg_name = _detect_named_regulation(question)
 
-    # 1. Try document retrieval (global + yacht-specific).
+    # 1. Try document retrieval with the raw question only (not role-prefixed).
     selected = []
     try:
         selected = get_selected_regulations(yacht_id)
@@ -158,7 +205,7 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
             "compliance_engine: document answer — chunks=%d top_score=%.4f source=%r",
             len(chunks), top_score, chunks[0].get("source_reference", "")[:60],
         )
-        doc_answer = answer_compliance_question(question, chunks)
+        doc_answer = answer_compliance_question(_llm_q, chunks)
         if not doc_answer.startswith("DECISION: Not explicitly covered"):
             return _cap_compliance_answer(doc_answer)
         logger.debug(
@@ -167,21 +214,28 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
         )
 
     # 3. Named regulation detected — try expanded queries when original retrieval is weak.
+    # Topic-specific direct queries run first (deterministic routing per _TOPIC_DIRECT_QUERIES).
+    # Tracks the best expansion hit so step 5 can use it if all LLM calls return NOT_COVERED.
+    _best_exp_chunks: list = []
+    _best_exp_score = 0.0
     if reg_name and top_score < _DOC_CONFIDENCE_THRESHOLD:
-        for expansion in _REGULATION_EXPANSIONS.get(reg_name, []):
+        for expansion in _get_expansion_queries(reg_name, question):
             try:
                 exp_chunks, exp_score = _try_retrieval(expansion, yacht_id, selected)
             except Exception:
                 continue
             if exp_score >= _DOC_CONFIDENCE_THRESHOLD:
+                if exp_score > _best_exp_score:
+                    _best_exp_chunks = exp_chunks
+                    _best_exp_score = exp_score
                 logger.info(
                     "compliance_engine: expansion hit — reg=%r expansion=%r score=%.4f",
                     reg_name, expansion[:50], exp_score,
                 )
-                doc_answer = answer_compliance_question(question, exp_chunks)
+                doc_answer = answer_compliance_question(_llm_q, exp_chunks)
                 if not doc_answer.startswith("DECISION: Not explicitly covered"):
                     return _cap_compliance_answer(doc_answer)
-                break  # one successful retrieval attempt is enough
+                # Continue — try ALL expansions, not just the first strong hit.
 
     # 4. Operational playbook fallback — skipped for regulation source inquiries to prevent
     # canned operational responses hijacking "what does X say about Y?" questions.
@@ -194,13 +248,16 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
             )
             return _cap_compliance_answer(playbook_answer)
 
-    # 5. Weak document match but no playbook → use best available chunks (if not yet tried).
-    if chunks and not _doc_tried:
+    # 5. Weak document match but no playbook — use best available chunks (if not yet tried).
+    # Prefer best expansion chunks over weak initial retrieval chunks.
+    _fallback_chunks = _best_exp_chunks if _best_exp_chunks else chunks
+    if _fallback_chunks and not _doc_tried:
         logger.info(
-            "compliance_engine: low-confidence document answer — chunks=%d top_score=%.4f",
-            len(chunks), top_score,
+            "compliance_engine: low-confidence document answer — "
+            "chunks=%d top_score=%.4f best_exp_score=%.4f",
+            len(_fallback_chunks), top_score, _best_exp_score,
         )
-        doc_answer = answer_compliance_question(question, chunks)
+        doc_answer = answer_compliance_question(_llm_q, _fallback_chunks)
         if not doc_answer.startswith("DECISION: Not explicitly covered"):
             return _cap_compliance_answer(doc_answer)
 
@@ -211,10 +268,10 @@ def answer_compliance_query(question: str, yacht_id: str = "h3") -> str:
         loaded_names = [s["source"] for s in list_sources()]
         is_loaded = any(reg_name.lower() in s.lower() for s in loaded_names)
         logger.info(
-            "compliance_engine: general guidance fallback — reg=%r is_loaded=%s",
-            reg_name, is_loaded,
+            "compliance_engine: general guidance fallback — reg=%r is_loaded=%s best_exp_score=%.4f",
+            reg_name, is_loaded, _best_exp_score,
         )
-        guidance = answer_compliance_general_guidance(question, reg_name, is_loaded)
+        guidance = answer_compliance_general_guidance(_llm_q, reg_name, is_loaded)
         return _cap_compliance_answer(guidance)
 
     # 7. Nothing matched.

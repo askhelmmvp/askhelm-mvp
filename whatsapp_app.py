@@ -6144,10 +6144,10 @@ def _handle_text_message(incoming: str, state: dict, phone: str = "") -> Tuple[s
         from storage_paths import get_yacht_id_for_user
         _yid = get_yacht_id_for_user(state.get("user_id", ""))
         _role = get_user_role(state)
-        _compliance_q = incoming
-        if _role and _role in _ROLE_COMPLIANCE_HINT:
-            _compliance_q = f"{_ROLE_COMPLIANCE_HINT[_role]}\n\n{incoming}"
-        answer = answer_compliance_query(_compliance_q, yacht_id=_yid)
+        # Role context is passed separately — it must NOT be concatenated into the
+        # retrieval query because that degrades TF-IDF scores (ASK-42).
+        _role_ctx = _ROLE_COMPLIANCE_HINT.get(_role, "") if _role else ""
+        answer = answer_compliance_query(incoming, yacht_id=_yid, role_context=_role_ctx)
         state["last_context"] = {"type": "compliance", "topic": incoming}
         return answer, state
 
