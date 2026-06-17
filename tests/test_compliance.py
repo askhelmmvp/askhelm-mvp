@@ -2042,5 +2042,308 @@ class TestTopicInferenceEndToEnd(unittest.TestCase):
         mock_guidance.assert_called_once()
 
 
+class TestRoleContextIsolation(unittest.TestCase):
+    """Role context must not contaminate document retrieval queries (ASK-42)."""
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_role_context_does_not_reach_retriever(self, mock_llm, mock_retriever_getter):
+        """retriever.search_with_yacht must receive the raw question, not a role-prefixed string."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "MARPOL Annex VI Reg 13", "content": "NOx Tier III limits.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Yes.\nWHY: MARPOL VI Reg 13.\nSOURCE: MARPOL VI Reg 13\nACTIONS: • Check engine"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query(
+            "what are the NOx regulations?",
+            yacht_id="h3",
+            role_context="USER ROLE: Captain. Emphasise risk, compliance exposure, decision confidence.",
+        )
+
+        retriever_query = mock_retriever.search_with_yacht.call_args[0][0]
+        self.assertEqual(retriever_query, "what are the NOx regulations?")
+        self.assertNotIn("USER ROLE", retriever_query)
+        self.assertNotIn("Captain", retriever_query)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_role_context_reaches_llm_question(self, mock_llm, mock_retriever_getter):
+        """Role context must reach the LLM question but not the retriever query."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "MARPOL Annex VI Reg 13", "content": "NOx limits.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Yes.\nWHY: MARPOL VI.\nSOURCE: Reg 13\nACTIONS: • Act"
+        )
+
+        role_ctx = "USER ROLE: Captain. Emphasise risk."
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query(
+            "what are the NOx regulations?",
+            yacht_id="h3",
+            role_context=role_ctx,
+        )
+
+        # Retriever: raw question.
+        retriever_query = mock_retriever.search_with_yacht.call_args[0][0]
+        self.assertNotIn("USER ROLE", retriever_query)
+
+        # LLM: role-enhanced question.
+        llm_question = mock_llm.call_args[0][0]
+        self.assertIn("USER ROLE", llm_question)
+        self.assertIn("what are the NOx regulations?", llm_question)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_no_role_context_uses_raw_question_for_both(self, mock_llm, mock_retriever_getter):
+        """When no role_context is given, retriever and LLM both receive raw question."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "MARPOL VI Reg 13", "content": "NOx.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Yes.\nWHY: Reg 13.\nSOURCE: Reg 13\nACTIONS: • Act"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query("what are the NOx regulations?")
+
+        retriever_query = mock_retriever.search_with_yacht.call_args[0][0]
+        llm_question = mock_llm.call_args[0][0]
+        self.assertEqual(retriever_query, "what are the NOx regulations?")
+        self.assertEqual(llm_question, "what are the NOx regulations?")
+
+    @patch("whatsapp_app.answer_compliance_query")
+    def test_whatsapp_handler_passes_raw_question_and_role_separately(self, mock_acq):
+        """WhatsApp handler must NOT pre-concatenate role into the query string."""
+        mock_acq.return_value = (
+            "DECISION: Yes.\nWHY: Test.\nSOURCE: Test\nACTIONS: • Act"
+        )
+
+        state = {
+            "sessions": [], "documents": [], "active_session_id": None, "user_id": "",
+            "role": "captain",  # role stored the way domain/user_role.py sets it
+        }
+
+        from whatsapp_app import _handle_text_message
+        _handle_text_message("what are the NOx regulations?", state)
+
+        mock_acq.assert_called_once()
+        call_args = mock_acq.call_args
+        called_question = call_args[0][0]
+        self.assertEqual(called_question, "what are the NOx regulations?")
+        self.assertNotIn("USER ROLE", called_question)
+        # role_context kwarg must carry the captain hint
+        called_role_ctx = call_args[1].get("role_context", "")
+        self.assertIn("Captain", called_role_ctx)
+
+
+class TestDeterministicRouting(unittest.TestCase):
+    """_get_expansion_queries must put topic-specific direct queries first."""
+
+    def _expansions(self, reg_name, question):
+        from domain.compliance_engine import _get_expansion_queries
+        return _get_expansion_queries(reg_name, question)
+
+    def test_nox_question_gets_nox_direct_query_first(self):
+        queries = self._expansions("MARPOL Annex VI", "what are the NOx regulations?")
+        self.assertGreater(len(queries), 0)
+        self.assertIn("NOx", queries[0])
+        self.assertIn("Tier III", queries[0])
+
+    def test_tier_iii_question_gets_nox_direct_query_first(self):
+        queries = self._expansions("MARPOL Annex VI", "when does Tier III apply?")
+        self.assertIn("NOx", queries[0])
+        self.assertIn("NECA", queries[0])
+
+    def test_eiapp_question_gets_nox_direct_query_first(self):
+        queries = self._expansions("MARPOL Annex VI", "what is an EIAPP certificate?")
+        self.assertIn("EIAPP", queries[0])
+
+    def test_fuel_sulphur_question_gets_sulphur_direct_query_first(self):
+        queries = self._expansions("MARPOL Annex VI", "what fuel sulphur limits apply?")
+        self.assertGreater(len(queries), 0)
+        self.assertIn("sulphur", queries[0].lower())
+        self.assertIn("ECA", queries[0])
+
+    def test_sox_question_gets_sulphur_direct_query_first(self):
+        queries = self._expansions("MARPOL Annex VI", "what are SOx limits?")
+        self.assertIn("SOx", queries[0])
+
+    def test_a60_question_gets_a60_direct_query_first(self):
+        queries = self._expansions("SOLAS", "what does SOLAS say about A60 bulkheads?")
+        self.assertGreater(len(queries), 0)
+        self.assertIn("A-60", queries[0])
+        self.assertIn("structural fire protection", queries[0])
+
+    def test_fire_damper_question_gets_fire_damper_query_first(self):
+        queries = self._expansions("SOLAS", "what are the regulations on fire dampers in SOLAS?")
+        self.assertGreater(len(queries), 0)
+        self.assertIn("fire damper", queries[0].lower())
+
+    def test_generic_marpol_vi_question_uses_general_expansions(self):
+        queries = self._expansions("MARPOL Annex VI", "what is MARPOL Annex VI about?")
+        from domain.compliance_engine import _REGULATION_EXPANSIONS
+        # No direct query matches — must use general expansion list
+        self.assertIn(queries[0], _REGULATION_EXPANSIONS["MARPOL Annex VI"])
+
+    def test_general_expansions_always_included_after_direct(self):
+        """Direct queries are prepended; general expansion list always follows."""
+        queries = self._expansions("MARPOL Annex VI", "when does Tier III apply?")
+        from domain.compliance_engine import _REGULATION_EXPANSIONS
+        for g in _REGULATION_EXPANSIONS["MARPOL Annex VI"]:
+            self.assertIn(g, queries)
+
+    def test_no_duplicate_queries(self):
+        """Deduplication must remove any repeated entries."""
+        queries = self._expansions("MARPOL Annex VI", "MARPOL Annex VI NOx Tier III question")
+        self.assertEqual(len(queries), len(set(queries)))
+
+    def test_wrong_regulation_direct_query_not_included(self):
+        """A60 direct query must not appear in MARPOL Annex VI expansions."""
+        queries = self._expansions("MARPOL Annex VI", "what does SOLAS say about A60 bulkheads?")
+        for q in queries:
+            self.assertNotIn("A-60", q)
+
+    def test_american_spelling_sulfur_matches_direct_query(self):
+        queries = self._expansions("MARPOL Annex VI", "what are the fuel sulfur limits?")
+        self.assertGreater(len(queries), 0)
+        self.assertIn("sulphur", queries[0].lower())
+
+
+class TestExpansionConfidence(unittest.TestCase):
+    """Expansion loop must try all strong hits, not abort on first LLM NOT_COVERED."""
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_all_expansions_tried_after_first_llm_not_covered(self, mock_llm, mock_retriever_getter):
+        """When first strong expansion returns NOT_COVERED, later expansions must still be tried."""
+        mock_retriever = MagicMock()
+
+        call_count = [0]
+
+        def search_side_effect(query, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return []  # initial retrieval: weak
+            # All expansion queries return strong chunks
+            return [{"source_reference": "MARPOL VI Reg 13", "content": "NOx limits.", "score": 0.5}]
+
+        mock_retriever.search_with_yacht.side_effect = search_side_effect
+        mock_retriever_getter.return_value = mock_retriever
+
+        llm_call_count = [0]
+
+        def llm_side_effect(question, chunks):
+            llm_call_count[0] += 1
+            if llm_call_count[0] < 3:
+                return (
+                    "DECISION: Not explicitly covered in the loaded documents.\n"
+                    "WHY: Not in excerpts.\nSOURCE: No matching loaded source\n"
+                    "ACTIONS: • Refer to regulation"
+                )
+            return (
+                "DECISION: NOx Tier III applies in NECAs.\nWHY: MARPOL VI Reg 13.\n"
+                "SOURCE: MARPOL VI Reg 13\nACTIONS: • Check engine build date"
+            )
+
+        mock_llm.side_effect = llm_side_effect
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("when does Tier III apply?")
+
+        # Eventually finds a good answer from a later expansion
+        self.assertIn("DECISION:", result)
+        self.assertNotIn("Not explicitly covered", result)
+        # Must have called LLM at least twice — no early break
+        self.assertGreaterEqual(llm_call_count[0], 2)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_best_expansion_chunks_used_in_fallback_step(self, mock_llm, mock_retriever_getter):
+        """If expansion finds strong chunks but ALL LLM calls return NOT_COVERED, step 5 uses best chunks."""
+        mock_retriever = MagicMock()
+
+        call_count = [0]
+
+        def search_side_effect(query, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return []  # initial retrieval: empty
+            # First strong expansion hit
+            if call_count[0] == 2:
+                return [{"source_reference": "MARPOL VI Reg 13", "content": "NOx.", "score": 0.6}]
+            return []  # remaining expansions: empty
+
+        mock_retriever.search_with_yacht.side_effect = search_side_effect
+        mock_retriever_getter.return_value = mock_retriever
+
+        llm_call_count = [0]
+
+        def llm_side_effect(question, chunks):
+            llm_call_count[0] += 1
+            if llm_call_count[0] == 1:
+                # Step 3 expansion: NOT_COVERED
+                return (
+                    "DECISION: Not explicitly covered in the loaded documents.\n"
+                    "WHY: Not in excerpts.\nSOURCE: No matching loaded source\n"
+                    "ACTIONS: • Refer to regulation"
+                )
+            # Step 5 fallback retry: good answer
+            return (
+                "DECISION: NOx Tier III applies.\nWHY: MARPOL VI Reg 13.\n"
+                "SOURCE: MARPOL VI Reg 13\nACTIONS: • Verify engine date"
+            )
+
+        mock_llm.side_effect = llm_side_effect
+
+        from domain.compliance_engine import answer_compliance_query
+        result = answer_compliance_query("when does Tier III apply?")
+
+        # Must eventually use best expansion chunks and return a real answer
+        self.assertIn("DECISION:", result)
+        # LLM must have been called twice (step 3 + step 5)
+        self.assertEqual(llm_call_count[0], 2)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_role_contaminated_query_no_longer_breaks_retrieval(self, mock_llm, mock_retriever_getter):
+        """Simulates the pre-fix bug: role-contaminated query scores poorly but engine recovers."""
+        mock_retriever = MagicMock()
+
+        def search_side_effect(query, **kwargs):
+            # Raw question scores well; role-contaminated would score poorly
+            if "USER ROLE" in query:
+                return []  # simulate old broken behaviour
+            return [
+                {"source_reference": "MARPOL VI Reg 13", "content": "NOx Tier III.", "score": 0.5}
+            ]
+
+        mock_retriever.search_with_yacht.side_effect = search_side_effect
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Yes.\nWHY: MARPOL VI Reg 13.\nSOURCE: Reg 13\nACTIONS: • Act"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        # Even when role_context is provided, retrieval uses raw question
+        result = answer_compliance_query(
+            "what are the NOx regulations?",
+            role_context="USER ROLE: Captain. Emphasise risk.",
+        )
+
+        self.assertIn("DECISION:", result)
+        self.assertNotIn("Not explicitly covered", result)
+
+
 if __name__ == "__main__":
     unittest.main()

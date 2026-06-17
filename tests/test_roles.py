@@ -404,12 +404,14 @@ class TestApprovalRoleAdaptation(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestComplianceRoleHint(unittest.TestCase):
+    """Role context must reach the compliance engine via role_context kwarg, not the query string."""
 
-    def test_captain_role_hint_sent_to_compliance_engine(self):
+    def test_captain_role_hint_sent_as_role_context(self):
         captured = {}
 
-        def mock_compliance(question, yacht_id="h3"):
+        def mock_compliance(question, yacht_id="h3", role_context=""):
             captured["question"] = question
+            captured["role_context"] = role_context
             return "DECISION:\nCOMPLIANCE CHECK\n\nWHY:\nMARPOL applies.\n\nACTIONS:\n• Check log"
 
         with patch("whatsapp_app.answer_compliance_query", side_effect=mock_compliance):
@@ -419,14 +421,17 @@ class TestComplianceRoleHint(unittest.TestCase):
                 _state(role="captain"),
                 "whatsapp:+44123456789",
             )
-        q = captured.get("question", "")
-        self.assertIn("Captain", q)
+        # Role hint must be in role_context, NOT in the query string.
+        self.assertNotIn("Captain", captured.get("question", ""))
+        self.assertIn("Captain", captured.get("role_context", ""))
+        self.assertEqual(captured["question"], "what does MARPOL say about oil discharge?")
 
-    def test_deck_officer_role_hint_sent_to_compliance_engine(self):
+    def test_deck_officer_role_hint_sent_as_role_context(self):
         captured = {}
 
-        def mock_compliance(question, yacht_id="h3"):
+        def mock_compliance(question, yacht_id="h3", role_context=""):
             captured["question"] = question
+            captured["role_context"] = role_context
             return "DECISION:\nCOMPLIANCE CHECK\n\nWHY:\nStandard applies.\n\nACTIONS:\n• Log"
 
         with patch("whatsapp_app.answer_compliance_query", side_effect=mock_compliance):
@@ -436,14 +441,15 @@ class TestComplianceRoleHint(unittest.TestCase):
                 _state(role="deck_officer"),
                 "whatsapp:+44123456789",
             )
-        q = captured.get("question", "")
-        self.assertIn("Deck Officer", q)
+        self.assertNotIn("Deck Officer", captured.get("question", ""))
+        self.assertIn("Deck Officer", captured.get("role_context", ""))
 
     def test_no_role_no_hint_added(self):
         captured = {}
 
-        def mock_compliance(question, yacht_id="h3"):
+        def mock_compliance(question, yacht_id="h3", role_context=""):
             captured["question"] = question
+            captured["role_context"] = role_context
             return "DECISION:\nCOMPLIANCE CHECK\n\nWHY:\nApplies.\n\nACTIONS:\n• Check"
 
         with patch("whatsapp_app.answer_compliance_query", side_effect=mock_compliance):
@@ -453,8 +459,8 @@ class TestComplianceRoleHint(unittest.TestCase):
                 _state(),
                 "whatsapp:+44123456789",
             )
-        q = captured.get("question", "")
-        self.assertNotIn("USER ROLE", q)
+        self.assertNotIn("USER ROLE", captured.get("question", ""))
+        self.assertEqual(captured.get("role_context", ""), "")
 
 
 # ---------------------------------------------------------------------------
