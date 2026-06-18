@@ -889,7 +889,8 @@ _COMPLIANCE_SUBSTRINGS = [
 # Word-boundary patterns: used for short terms that would false-positive
 # as substrings of common words (e.g. "eca" inside "because").
 _COMPLIANCE_WORD_PATTERNS = [
-    r"\beca\b",       # Emission Control Area abbreviation
+    r"\becas?\b",     # Emission Control Area abbreviation (singular/plural)
+    r"\bnecas?\b",    # NOx Emission Control Area (singular/plural)
     r"\bnox\b",       # Nitrogen oxides
     r"\blyx\b",       # alternate LYC abbreviation
 ]
@@ -1234,7 +1235,10 @@ def classify_text(text: str) -> str:
     # explicit compliance keywords (e.g. "where are we allowed to discharge?").
     _where_is_compliance = (
         ("where is " in t or "where are " in t or "where do we keep " in t)
-        and any(c in t for c in _COMPLIANCE_SUBSTRINGS)
+        and (
+            any(c in t for c in _COMPLIANCE_SUBSTRINGS)
+            or any(re.search(p, t) for p in _COMPLIANCE_WORD_PATTERNS)
+        )
     )
     for phrase in _STOCK_QUERY_SUBSTRINGS:
         if phrase in t:
