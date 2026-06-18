@@ -116,7 +116,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
 
     response = client.messages.create(
         model="claude-sonnet-4-6",
-        max_tokens=400,
+        max_tokens=350,
         system=[{"type": "text", "cache_control": {"type": "ephemeral"}, "text": (
             "You are answering maritime compliance questions using ONLY the regulation excerpts provided.\n"
             "\n"
@@ -126,7 +126,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
             "3. Do NOT mention any convention, regulation, requirement, or authority not stated in the excerpts.\n"
             "4. Do NOT supplement, extend, or add information beyond what is explicitly in the excerpts.\n"
             "5. If the excerpts do not directly answer the question, copy the FALLBACK below verbatim — nothing else.\n"
-            "6. DECISION must be one short line. WHY must be 2-4 lines maximum. ACTIONS maximum 4 bullets.\n"
+            "6. DECISION must be one short line. WHY must be 2-3 sentences maximum. ACTIONS maximum 3 bullets.\n"
             "\n"
             "FALLBACK — copy this exactly if the excerpts do not answer the question:\n"
             "DECISION: Not explicitly covered in the loaded documents.\n"
@@ -139,7 +139,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
             "<short statement — yes/no/what is required, one line only>\n"
             "\n"
             "WHY:\n"
-            "<2-4 short lines — from the excerpts only, no external knowledge>\n"
+            "<2-3 sentences — from the excerpts only, no external knowledge>\n"
             "\n"
             "SOURCE:\n"
             "<regulation name — section/chapter from the excerpt header>\n"
@@ -147,8 +147,7 @@ def answer_compliance_question(question: str, chunks: List[Dict[str, Any]]) -> s
             "ACTIONS:\n"
             "• <action 1 — from excerpts only>\n"
             "• <action 2 — from excerpts only>\n"
-            "• <action 3 — only if needed>\n"
-            "• <action 4 — only if needed>"
+            "• <action 3 — only if needed>"
         )}],
         messages=[
             {
