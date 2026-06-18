@@ -2677,5 +2677,38 @@ class TestConfidenceLabels(unittest.TestCase):
         self.assertFalse(kwargs.get("had_strong_hit"), "had_strong_hit must be False when no expansion scored above threshold")
 
 
+class TestWhereIsComplianceRouting(unittest.TestCase):
+    """ASK-45: 'where are/is' + compliance term must route to compliance, not stock_query."""
+
+    def _cls(self, text):
+        return classify_text(text)
+
+    # --- compliance routing for "where" questions ---
+    def test_where_are_necas_is_compliance(self):
+        self.assertEqual(self._cls("where are the NECAs?"), COMPLIANCE)
+
+    def test_where_are_ecas_is_compliance(self):
+        self.assertEqual(self._cls("where are the ECAs?"), COMPLIANCE)
+
+    def test_where_are_secas_is_compliance(self):
+        self.assertEqual(self._cls("where are the SECAs?"), COMPLIANCE)
+
+    def test_where_does_tier_iii_apply_is_compliance(self):
+        self.assertEqual(self._cls("where does Tier III apply?"), COMPLIANCE)
+
+    def test_where_do_sulphur_limits_apply_is_compliance(self):
+        self.assertEqual(self._cls("where do sulphur limits apply?"), COMPLIANCE)
+
+    # --- inventory regressions — must NOT route to compliance ---
+    def test_where_are_ratchet_straps_is_inventory(self):
+        self.assertEqual(self._cls("where are the ratchet straps?"), "stock_query")
+
+    def test_where_is_teak_oil_is_inventory(self):
+        self.assertEqual(self._cls("where is the teak oil?"), "stock_query")
+
+    def test_where_is_part_number_is_inventory(self):
+        self.assertEqual(self._cls("where is AIK111571?"), "stock_query")
+
+
 if __name__ == "__main__":
     unittest.main()
