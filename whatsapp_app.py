@@ -1,4 +1,5 @@
 import copy
+import datetime
 import os
 import re
 import json
@@ -163,6 +164,11 @@ start_reminder_scheduler()
 TWILIO_ACCOUNT_SID = os.environ.get("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = os.environ.get("TWILIO_AUTH_TOKEN")
 TWILIO_FROM_NUMBER = os.environ.get("TWILIO_FROM_NUMBER")
+
+# In-memory tracking of inbound MessageSids currently being processed.
+# Prevents duplicate replies when Twilio retries a webhook while a reply is in-flight.
+_inbound_seen: set = set()
+_inbound_seen_lock = threading.Lock()
 
 BASE_CURRENCY = "EUR"
 
@@ -3155,21 +3161,29 @@ def _is_operational_note(extracted: dict) -> bool:
     return not (has_total or has_subtotal or has_priced_items)
 
 
-def _send_whatsapp_message(to_phone: str, body: str) -> None:
-    """Send a proactive WhatsApp message via Twilio REST API."""
+def _send_whatsapp_message(
+    to_phone: str, body: str, inbound_message_sid: str = ""
+) -> Optional[str]:
+    """Send a WhatsApp message via Twilio REST API. Returns outbound MessageSid or None."""
     if not (TWILIO_FROM_NUMBER and TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN):
-        logger.warning("Image upload: proactive send skipped — TWILIO_FROM_NUMBER or credentials not set")
-        return
+        logger.warning("outbound_whatsapp: send skipped — Twilio credentials not set")
+        return None
     try:
         client = TwilioRestClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-        client.messages.create(from_=TWILIO_FROM_NUMBER, to=to_phone, body=body)
+        msg = client.messages.create(from_=TWILIO_FROM_NUMBER, to=to_phone, body=body)
+        outbound_sid = getattr(msg, "sid", "unknown")
         logger.info(
-            "outbound_whatsapp: method=REST to=%s body_length=%d body_empty=%s "
-            "reply_body_preview=%r",
-            to_phone, len(body), not body.strip(), body[:500],
+            "outbound_whatsapp: method=twilio_api inbound_message_sid=%s "
+            "outbound_message_sid=%s to=%s body_length=%d status=sent",
+            inbound_message_sid or "n/a", outbound_sid, to_phone, len(body),
         )
+        return outbound_sid
     except Exception as exc:
-        logger.exception("Image upload: proactive send failed: %s", exc)
+        logger.exception(
+            "outbound_whatsapp: send failed inbound_message_sid=%s to=%s error=%s",
+            inbound_message_sid or "n/a", to_phone, exc,
+        )
+        return None
 
 
 def _process_image_background(file_path: str, state: dict, user_id: str, phone: str) -> None:
@@ -3204,6 +3218,40 @@ def _process_images_background(file_paths: list, state: dict, user_id: str, phon
         answer = _image_received_response()
     body = f"⚓ AskHelm \n\n{answer}"
     _send_whatsapp_message(phone, body)
+
+
+def _process_text_background(
+    incoming: str,
+    state: dict,
+    user_id: str,
+    phone: str,
+    inbound_message_sid: str,
+) -> None:
+    """Background thread entry point for text messages (ASK-43).
+    Runs the full AskHelm handler outside the webhook response path and
+    delivers the reply via Twilio REST API."""
+    t0 = time.time()
+    try:
+        answer, updated_state = _handle_text_message(incoming, state, phone=phone)
+        save_user_state(user_id, updated_state)
+        if answer is not None:
+            body = f"⚓ AskHelm \n\n{answer}"
+            chunks = _split_whatsapp_body(body)
+            for chunk in chunks:
+                _send_whatsapp_message(phone, chunk, inbound_message_sid=inbound_message_sid)
+        duration_ms = int((time.time() - t0) * 1000)
+        logger.info(
+            "processing_complete: inbound_message_sid=%s duration_ms=%d",
+            inbound_message_sid, duration_ms,
+        )
+    except Exception as exc:
+        logger.exception(
+            "processing_failed: inbound_message_sid=%s error=%s",
+            inbound_message_sid, exc,
+        )
+    finally:
+        with _inbound_seen_lock:
+            _inbound_seen.discard(inbound_message_sid)
 
 
 def _invoice_pending_fallback(user_id: str, phone: str, fingerprint: str) -> None:
@@ -6389,8 +6437,29 @@ def health():
 @app.route("/whatsapp", methods=["POST"])
 def whatsapp_reply():
     phone = request.form.get("From", "unknown")
+    inbound_message_sid = request.form.get("MessageSid", "")
+    incoming = request.form.get("Body", "").strip()
+    num_media = int(request.form.get("NumMedia") or 0)
     user_id = user_id_from_phone(phone)
     state = load_user_state(user_id)
+
+    logger.info(
+        "inbound_whatsapp: message_sid=%s from=%s body_preview=%r has_media=%s "
+        "media_count=%d received_at=%s",
+        inbound_message_sid, phone, incoming[:80], num_media > 0, num_media,
+        datetime.datetime.now(datetime.UTC).isoformat(),
+    )
+
+    # Duplicate protection — skip processing if this MessageSid is already in-flight.
+    if inbound_message_sid:
+        with _inbound_seen_lock:
+            if inbound_message_sid in _inbound_seen:
+                logger.warning(
+                    "duplicate_inbound: message_sid=%s from=%s — already in-flight, skipping",
+                    inbound_message_sid, phone,
+                )
+                return str(MessagingResponse()), 200, {"Content-Type": "text/xml"}
+            _inbound_seen.add(inbound_message_sid)
 
     # Safety-net: always defined so every code path produces a visible reply.
     answer = _make_response(
@@ -6398,15 +6467,11 @@ def whatsapp_reply():
         why="An unexpected error occurred. Please try again.",
         actions=["Retry your message or upload"],
     )
-    # For image uploads the background thread saves state; skip the main-thread save.
+    # For image/background replies the background thread saves state; skip the main-thread save.
     save_state = True
-    _was_media = False  # True when request contained media; reply goes via REST not TwiML
+    _was_media = num_media > 0
 
     try:
-        incoming = request.form.get("Body", "").strip()
-        num_media = int(request.form.get("NumMedia") or 0)
-        _was_media = num_media > 0
-
         if num_media > 0:
             logger.info("Inbound media: media_count=%d", num_media)
             _send_whatsapp_message(phone, _DOCUMENT_RECEIVED_ACK)
@@ -6584,10 +6649,25 @@ def whatsapp_reply():
             if image_started and not pdf_answers and not _any_silent:
                 save_state = False
         else:
-            answer, state = _handle_text_message(incoming, state, phone=phone)
+            # Text message — dispatch to background thread so webhook returns immediately.
+            intent = classify_text(incoming)
+            logger.info(
+                "processing_start: inbound_message_sid=%s intent=%s",
+                inbound_message_sid, intent,
+            )
+            threading.Thread(
+                target=_process_text_background,
+                args=(incoming, copy.deepcopy(state), user_id, phone, inbound_message_sid),
+                daemon=True,
+            ).start()
+            save_state = False
+            answer = None
 
     except Exception as e:
         logger.exception("Error processing request for user %s", user_id)
+        # Remove from in-flight set so a retry can be processed.
+        with _inbound_seen_lock:
+            _inbound_seen.discard(inbound_message_sid)
         answer = _make_response(
             decision="FILE ERROR",
             why=f"AskHelm could not process the uploaded file: {e}",
@@ -6603,32 +6683,16 @@ def whatsapp_reply():
 
     resp = MessagingResponse()
     if answer is not None:
+        # Only media answers reach here; text answers are sent via background thread.
         body = f"⚓ AskHelm \n\n{answer}"
         chunks = _split_whatsapp_body(body)
-        if _was_media:
-            # Document/media replies go via REST so Twilio webhook can return 200 quickly.
-            for _i, _chunk in enumerate(chunks):
-                logger.info(
-                    "outbound_whatsapp: method=REST chunk=%d/%d to=%s body_length=%d "
-                    "body_empty=%s user=%s reply_body_preview=%r",
-                    _i + 1, len(chunks), phone, len(_chunk), not _chunk.strip(), user_id, _chunk[:500],
-                )
-                _send_whatsapp_message(phone, _chunk)
-            # Return empty TwiML — REST calls above deliver the actual reply.
-        else:
-            for _i, _chunk in enumerate(chunks):
-                logger.info(
-                    "outbound_whatsapp: method=TwiML chunk=%d/%d to=%s body_length=%d "
-                    "body_empty=%s save_state=%s user=%s reply_body_preview=%r",
-                    _i + 1, len(chunks), phone, len(_chunk), not _chunk.strip(), save_state, user_id, _chunk[:500],
-                )
-                resp.message(_chunk)
-    else:
-        logger.info(
-            "outbound_whatsapp: method=TwiML to=%s body_empty=True deferred=True "
-            "save_state=%s user=%s",
-            phone, save_state, user_id,
-        )
+        for _i, _chunk in enumerate(chunks):
+            logger.info(
+                "outbound_whatsapp: method=REST chunk=%d/%d to=%s body_length=%d "
+                "body_empty=%s user=%s reply_body_preview=%r",
+                _i + 1, len(chunks), phone, len(_chunk), not _chunk.strip(), user_id, _chunk[:500],
+            )
+            _send_whatsapp_message(phone, _chunk)
     return str(resp), 200, {"Content-Type": "text/xml"}
 
 
