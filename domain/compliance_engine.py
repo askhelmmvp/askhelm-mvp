@@ -49,6 +49,8 @@ _REGULATION_SOURCE_INQUIRY_RE = re.compile(
 # Alternative search terms tried when the original query scores below threshold.
 _REGULATION_EXPANSIONS = {
     "SOLAS": [
+        "SOLAS Chapter II-2 structural fire protection A-60 A-class divisions fire rated bulkhead",
+        "SOLAS Chapter II-2 fire dampers ventilation closures fire flaps fire safety",
         "SOLAS fire safety structural fire protection divisions",
         "SOLAS lifesaving appliances equipment liferaft lifeboat",
         "SOLAS construction ship safety stability",
@@ -104,12 +106,12 @@ _TOPIC_DIRECT_QUERIES = [
         r'\b(?:a[-\s]?60|a[-\s]?class\s+division|bulkhead\s+fire\s+rating|'
         r'structural\s+fire\s+protection|fire[-\s]?rated\s+bulkhead)\b', re.I,
     ), "SOLAS",
-     "SOLAS structural fire protection A-60 A-class division fire rating bulkhead"),
+     "SOLAS Chapter II-2 structural fire protection A-60 A-class divisions fire rating bulkhead"),
     (re.compile(
         r'\b(?:fire\s+dampers?|ventilation\s+damper|fire\s+flap|fire\s+ventilation\s+closure)\b',
         re.I,
     ), "SOLAS",
-     "SOLAS fire dampers ventilation closure fire safety"),
+     "SOLAS Chapter II-2 fire dampers ventilation closures fire flaps fire safety"),
 ]
 
 
@@ -192,10 +194,16 @@ def answer_compliance_query(
     selected = []
     try:
         selected = get_selected_regulations(yacht_id)
-        chunks, top_score = _try_retrieval(question, yacht_id, selected)
+        # Include the detected regulation in the search even if absent from the yacht's
+        # profile — a user asking explicitly about SOLAS must not have SOLAS filtered out.
+        _retrieval_selected = list(selected)
+        if reg_name and not any(reg_name.lower() in s.lower() for s in _retrieval_selected):
+            _retrieval_selected.append(reg_name)
+        chunks, top_score = _try_retrieval(question, yacht_id, _retrieval_selected)
     except Exception as exc:
         logger.exception("compliance_engine: retriever failed: %s", exc)
         chunks, top_score = [], 0.0
+        _retrieval_selected = list(selected)
 
     # 2. High-confidence document match → try source answer.
     _doc_tried = False
@@ -221,7 +229,7 @@ def answer_compliance_query(
     if reg_name and top_score < _DOC_CONFIDENCE_THRESHOLD:
         for expansion in _get_expansion_queries(reg_name, question):
             try:
-                exp_chunks, exp_score = _try_retrieval(expansion, yacht_id, selected)
+                exp_chunks, exp_score = _try_retrieval(expansion, yacht_id, _retrieval_selected)
             except Exception:
                 continue
             if exp_score >= _DOC_CONFIDENCE_THRESHOLD:
@@ -267,11 +275,15 @@ def answer_compliance_query(
         from services.compliance_ingest import list_sources
         loaded_names = [s["source"] for s in list_sources()]
         is_loaded = any(reg_name.lower() in s.lower() for s in loaded_names)
+        had_strong_hit = _best_exp_score >= _DOC_CONFIDENCE_THRESHOLD
         logger.info(
-            "compliance_engine: general guidance fallback — reg=%r is_loaded=%s best_exp_score=%.4f",
-            reg_name, is_loaded, _best_exp_score,
+            "compliance_engine: general guidance fallback — reg=%r is_loaded=%s "
+            "best_exp_score=%.4f had_strong_hit=%s",
+            reg_name, is_loaded, _best_exp_score, had_strong_hit,
         )
-        guidance = answer_compliance_general_guidance(_llm_q, reg_name, is_loaded)
+        guidance = answer_compliance_general_guidance(
+            _llm_q, reg_name, is_loaded, had_strong_hit=had_strong_hit
+        )
         return _cap_compliance_answer(guidance)
 
     # 7. Nothing matched.
