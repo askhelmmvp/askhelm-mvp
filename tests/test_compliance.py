@@ -1736,7 +1736,8 @@ class TestAnswerComplianceGeneralGuidance(unittest.TestCase):
     """answer_compliance_general_guidance must produce correctly labeled general guidance."""
 
     @patch("services.anthropic_service.client")
-    def test_loaded_source_label_in_system_prompt(self, mock_client):
+    def test_loaded_source_with_strong_hit_label(self, mock_client):
+        """had_strong_hit=True → system prompt says section was searched but not found."""
         mock_response = MagicMock()
         mock_response.content = [MagicMock(text=(
             "DECISION:\nGENERAL GUIDANCE — SOLAS — SOURCE LOADED, SECTION NOT FOUND\n\n"
@@ -1749,7 +1750,8 @@ class TestAnswerComplianceGeneralGuidance(unittest.TestCase):
 
         from services.anthropic_service import answer_compliance_general_guidance
         result = answer_compliance_general_guidance(
-            "what does SOLAS say about A60 bulkheads?", "SOLAS", is_loaded=True
+            "what does SOLAS say about A60 bulkheads?", "SOLAS",
+            is_loaded=True, had_strong_hit=True,
         )
 
         self.assertIn("GENERAL GUIDANCE", result)
@@ -1757,6 +1759,31 @@ class TestAnswerComplianceGeneralGuidance(unittest.TestCase):
         system_text = call_kwargs["system"][0]["text"]
         self.assertIn("could not locate the exact section", system_text)
         self.assertIn("SOURCE LOADED, SECTION NOT FOUND", system_text)
+
+    @patch("services.anthropic_service.client")
+    def test_loaded_source_no_strong_hit_label_is_general_guidance(self, mock_client):
+        """had_strong_hit=False (default) → no 'SECTION NOT FOUND' label — source is loaded but not searched."""
+        mock_response = MagicMock()
+        mock_response.content = [MagicMock(text=(
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI\n\n"
+            "WHY:\nGlobal sulphur cap is 0.5% m/m.\n\n"
+            "GENERAL GUIDANCE:\n• Verify bunker certificates match zone requirements\n\n"
+            "SOURCE:\nMARPOL Annex VI is loaded. Confirm the specific section before relying on it.\n\n"
+            "ACTIONS:\n• Check bunker delivery notes"
+        ))]
+        mock_client.messages.create.return_value = mock_response
+
+        from services.anthropic_service import answer_compliance_general_guidance
+        result = answer_compliance_general_guidance(
+            "what fuel sulphur limits apply?", "MARPOL Annex VI",
+            is_loaded=True, had_strong_hit=False,
+        )
+
+        self.assertIn("GENERAL GUIDANCE", result)
+        call_kwargs = mock_client.messages.create.call_args[1]
+        system_text = call_kwargs["system"][0]["text"]
+        self.assertNotIn("SOURCE LOADED, SECTION NOT FOUND", system_text)
+        self.assertIn("MARPOL ANNEX VI", system_text)
 
     @patch("services.anthropic_service.client")
     def test_not_loaded_label_in_system_prompt(self, mock_client):
@@ -2343,6 +2370,148 @@ class TestExpansionConfidence(unittest.TestCase):
 
         self.assertIn("DECISION:", result)
         self.assertNotIn("Not explicitly covered", result)
+
+
+class TestSolasSourceSelection(unittest.TestCase):
+    """SOLAS must be included in retrieval when user explicitly asks about it."""
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    @patch("services.compliance_profile.get_selected_regulations")
+    def test_solas_added_to_retrieval_when_not_in_profile(
+        self, mock_get_selected, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        """When yacht profile has no SOLAS but user asks about SOLAS, SOLAS must be added."""
+        mock_get_selected.return_value = ["Large Yacht Code LYC", "ISM code"]
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = "DECISION:\nGENERAL GUIDANCE — SOLAS — SOURCE NOT LOADED\n\nWHY:\nSOLAS."
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query("does SOLAS require A-60 bulkheads?")
+
+        # All retrieval calls must include SOLAS in selected_regulations
+        for call in mock_retriever.search_with_yacht.call_args_list:
+            selected = call[1].get("selected_regulations") or []
+            self.assertTrue(
+                any("SOLAS" in s for s in selected),
+                f"SOLAS missing from selected_regulations in call: {call}",
+            )
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    @patch("services.compliance_profile.get_selected_regulations")
+    def test_marpol_added_to_retrieval_when_not_in_profile(
+        self, mock_get_selected, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        """When yacht profile has no MARPOL but user asks about ECA, MARPOL Annex VI is added."""
+        mock_get_selected.return_value = ["ISM code"]
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = []
+        mock_guidance.return_value = "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI — SOURCE NOT LOADED\n\nWHY:\nECA."
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query("what are ECA requirements?")
+
+        for call in mock_retriever.search_with_yacht.call_args_list:
+            selected = call[1].get("selected_regulations") or []
+            self.assertTrue(
+                any("MARPOL" in s for s in selected),
+                f"MARPOL missing from selected_regulations in call: {call}",
+            )
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    @patch("services.compliance_profile.get_selected_regulations")
+    def test_regulation_already_in_profile_not_duplicated(
+        self, mock_get_selected, mock_llm, mock_retriever_getter
+    ):
+        """If the regulation is already in the yacht profile it must not be appended twice."""
+        mock_get_selected.return_value = ["ISM code", "SOLAS"]
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "SOLAS Ch II-2", "content": "A-60 divisions.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Yes, A-60 required.\nWHY: SOLAS Ch II-2.\n"
+            "SOURCE: SOLAS Ch II-2\nACTIONS: • Verify rating"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query("does SOLAS require A-60 bulkheads?")
+
+        first_call = mock_retriever.search_with_yacht.call_args_list[0]
+        selected = first_call[1].get("selected_regulations") or []
+        self.assertEqual(selected.count("SOLAS"), 1)
+
+
+class TestConfidenceLabels(unittest.TestCase):
+    """General guidance labels must accurately reflect whether strong retrieval hits were found."""
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    @patch("services.compliance_profile.get_selected_regulations")
+    def test_had_strong_hit_true_when_expansion_score_above_threshold(
+        self, mock_get_selected, mock_sources, mock_guidance, mock_llm, mock_retriever_getter
+    ):
+        """When expansion score ≥ threshold but LLM returns NOT_COVERED, had_strong_hit=True."""
+        mock_get_selected.return_value = []
+        call_count = [0]
+
+        def search_side_effect(query, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return []  # initial retrieval: empty
+            return [{"source_reference": "SOLAS Ch II-2", "content": "A-60.", "score": 0.4}]
+
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.side_effect = search_side_effect
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = [{"source": "SOLAS"}]
+        mock_llm.return_value = (
+            "DECISION: Not explicitly covered in the loaded documents.\n"
+            "WHY: Not in excerpts.\nSOURCE: No matching loaded source\n"
+            "ACTIONS: • Refer to regulation"
+        )
+        mock_guidance.return_value = "DECISION:\nGENERAL GUIDANCE — SOLAS — SOURCE LOADED, SECTION NOT FOUND"
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query("does SOLAS require A-60 bulkheads?")
+
+        self.assertTrue(mock_guidance.called)
+        _, kwargs = mock_guidance.call_args
+        self.assertTrue(kwargs.get("had_strong_hit"), "had_strong_hit must be True when best_exp_score ≥ threshold")
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    @patch("services.compliance_ingest.list_sources")
+    @patch("services.compliance_profile.get_selected_regulations")
+    def test_had_strong_hit_false_when_no_expansion_scored(
+        self, mock_get_selected, mock_sources, mock_guidance, mock_retriever_getter
+    ):
+        """When no expansion scored above threshold, had_strong_hit=False."""
+        mock_get_selected.return_value = []
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []  # all retrievals empty
+        mock_retriever_getter.return_value = mock_retriever
+        mock_sources.return_value = [{"source": "MARPOL Annex VI"}]
+        mock_guidance.return_value = "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI"
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query("what fuel sulphur limits apply?")
+
+        self.assertTrue(mock_guidance.called)
+        _, kwargs = mock_guidance.call_args
+        self.assertFalse(kwargs.get("had_strong_hit"), "had_strong_hit must be False when no expansion scored above threshold")
 
 
 if __name__ == "__main__":

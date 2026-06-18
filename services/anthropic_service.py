@@ -230,18 +230,30 @@ def answer_compliance_general_guidance(
     question: str,
     regulation_name: str,
     is_loaded: bool,
+    had_strong_hit: bool = False,
 ) -> str:
     """
     Give cautious general maritime guidance when the exact regulation section
     could not be retrieved. Clearly labels the response as general guidance.
     """
     if is_loaded:
-        source_line = (
-            f"{regulation_name} is loaded, but AskHelm could not locate the exact "
-            f"section in the current index. Verify against {regulation_name} before "
-            "relying on this answer."
-        )
-        decision_suffix = f"{regulation_name.upper()} — SOURCE LOADED, SECTION NOT FOUND"
+        if had_strong_hit:
+            # Strong retrieval hits existed but the LLM said NOT_COVERED — the section
+            # was genuinely searched and not found in the loaded index.
+            source_line = (
+                f"{regulation_name} is loaded, but AskHelm could not locate the exact "
+                f"section in the current index. Verify against {regulation_name} before "
+                "relying on this answer."
+            )
+            decision_suffix = f"{regulation_name.upper()} — SOURCE LOADED, SECTION NOT FOUND"
+        else:
+            # Source is loaded but retrieval never scored above threshold — this is
+            # general knowledge guidance, not a confirmed section search failure.
+            source_line = (
+                f"{regulation_name} is loaded in the compliance database. "
+                "This is general guidance — confirm the specific section before relying on it."
+            )
+            decision_suffix = f"{regulation_name.upper()}"
     else:
         source_line = (
             f"{regulation_name} is not currently loaded in the compliance database. "
