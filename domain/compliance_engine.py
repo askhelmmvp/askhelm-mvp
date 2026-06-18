@@ -1,9 +1,27 @@
+import hashlib
 import logging
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
 _retriever = None
+
+# 24-hour in-process compliance response cache.
+# Key: md5 of (yacht_id, role_context_prefix, normalised_question, sorted_selected_regs).
+# Value: (answer, expires_at_unix).
+# Cleared by reset_retriever() so an index rebuild also invalidates cached answers.
+_compliance_cache: dict = {}
+_CACHE_TTL = 86400  # seconds
+
+
+def _make_cache_key(
+    question: str, yacht_id: str, role_context: str, selected: list
+) -> str:
+    normalized = " ".join(question.lower().split())
+    reg_key = ",".join(sorted(str(s) for s in selected))
+    raw = f"{yacht_id}|{role_context[:50] if role_context else ''}|{normalized}|{reg_key}"
+    return hashlib.md5(raw.encode()).hexdigest()
 
 # Minimum retrieval score to use a document answer directly.
 # Queries scoring below this fall back to the operational playbook (which gives
@@ -32,7 +50,7 @@ _NAMED_REGULATIONS = [
     # Topic-inference entries — infer regulation from well-known terms when explicit name is absent.
     # Handles both American (sulfur) and British (sulphur) spellings via sul(?:f|ph)ur.
     ("MARPOL Annex VI", re.compile(
-        r'\b(?:tier\s+(?:i{1,3}|[123])|eiapp|nox\s+eca|neca|fuel\s+sul(?:f|ph)ur|'
+        r'\b(?:tier\s+(?:i{1,3}|[123])|eiapp|nox|neca|fuel\s+sul(?:f|ph)ur|'
         r'sul(?:f|ph)ur\s+(?:cap|limit|content|requirement)|emission\s+control\s+area|'
         r'eca\s+(?:requirement|requirements|rule|rules|standard|limit|sul(?:f|ph)ur|fuel)|'
         r'engine\s+air\s+pollution)\b', re.I,
@@ -116,16 +134,14 @@ _TOPIC_DIRECT_QUERIES = [
 
 
 def _get_expansion_queries(reg_name: str, question: str) -> list:
-    """Return expansion queries: topic-specific direct queries first, then general."""
+    """Return expansion queries.
+    When a direct-topic match exists, return only those queries so that A60 / fire-damper
+    questions do not trigger unrelated SOLAS lifesaving/navigation/radio searches.
+    When no direct match, fall back to the full general expansion list."""
     direct = [q for pat, reg, q in _TOPIC_DIRECT_QUERIES if reg == reg_name and pat.search(question)]
-    general = _REGULATION_EXPANSIONS.get(reg_name, [])
-    seen: set = set()
-    result = []
-    for q in direct + general:
-        if q not in seen:
-            seen.add(q)
-            result.append(q)
-    return result
+    if direct:
+        return direct
+    return _REGULATION_EXPANSIONS.get(reg_name, [])
 
 
 def _detect_named_regulation(question: str):
@@ -170,10 +186,12 @@ def _get_retriever():
 
 
 def reset_retriever():
-    """Force the retriever singleton to reload on next use (call after index rebuild)."""
+    """Force the retriever singleton to reload on next use (call after index rebuild).
+    Also clears the compliance response cache so stale answers are not served."""
     global _retriever
     _retriever = None
-    logger.info("compliance_engine: retriever reset — will reload on next query")
+    _compliance_cache.clear()
+    logger.info("compliance_engine: retriever reset + cache cleared — will reload on next query")
 
 
 def answer_compliance_query(
@@ -190,22 +208,39 @@ def answer_compliance_query(
     # Detect named regulation early — needed for playbook guard and expansion queries.
     reg_name = _detect_named_regulation(question)
 
-    # 1. Try document retrieval with the raw question only (not role-prefixed).
+    # Load profile first — needed for cache key and retrieval filter.
     selected = []
     try:
         selected = get_selected_regulations(yacht_id)
-        # Include the detected regulation in the search even if absent from the yacht's
-        # profile — a user asking explicitly about SOLAS must not have SOLAS filtered out.
-        _retrieval_selected = list(selected)
-        if reg_name and not any(reg_name.lower() in s.lower() for s in _retrieval_selected):
-            _retrieval_selected.append(reg_name)
+    except Exception as exc:
+        logger.exception("compliance_engine: failed to load selected regulations: %s", exc)
+
+    # Cache check — skip expensive retrieval + LLM for repeated identical queries.
+    _cache_k = _make_cache_key(question, yacht_id, role_context, selected)
+    _cached = _compliance_cache.get(_cache_k)
+    if _cached and time.time() < _cached[1]:
+        logger.debug("compliance_engine: cache hit — key=%s", _cache_k[:8])
+        return _cached[0]
+
+    def _done(answer: str) -> str:
+        """Cache and return a compliance answer."""
+        _compliance_cache[_cache_k] = (answer, time.time() + _CACHE_TTL)
+        return answer
+
+    # Include detected regulation in retrieval even if absent from the yacht's
+    # profile — a user asking explicitly about SOLAS must not have SOLAS filtered out.
+    _retrieval_selected = list(selected)
+    if reg_name and not any(reg_name.lower() in s.lower() for s in _retrieval_selected):
+        _retrieval_selected.append(reg_name)
+
+    # 1. Try document retrieval with the raw question only (not role-prefixed).
+    chunks, top_score = [], 0.0
+    try:
         chunks, top_score = _try_retrieval(question, yacht_id, _retrieval_selected)
     except Exception as exc:
         logger.exception("compliance_engine: retriever failed: %s", exc)
-        chunks, top_score = [], 0.0
-        _retrieval_selected = list(selected)
 
-    # 2. High-confidence document match → try source answer.
+    # 2. High-confidence document match → one LLM call.
     _doc_tried = False
     if chunks and top_score >= _DOC_CONFIDENCE_THRESHOLD:
         _doc_tried = True
@@ -215,15 +250,15 @@ def answer_compliance_query(
         )
         doc_answer = answer_compliance_question(_llm_q, chunks)
         if not doc_answer.startswith("DECISION: Not explicitly covered"):
-            return _cap_compliance_answer(doc_answer)
+            return _done(_cap_compliance_answer(doc_answer))
         logger.debug(
             "compliance_engine: document returned NOT_COVERED despite score=%.4f — trying expansion",
             top_score,
         )
 
-    # 3. Named regulation detected — try expanded queries when original retrieval is weak.
-    # Topic-specific direct queries run first (deterministic routing per _TOPIC_DIRECT_QUERIES).
-    # Tracks the best expansion hit so step 5 can use it if all LLM calls return NOT_COVERED.
+    # 3. Named regulation — collect ALL expansion scores (TF-IDF only), then ONE LLM call.
+    # _get_expansion_queries returns only direct-routed queries when a topic match exists,
+    # so A60/fire-damper questions do not trigger unrelated SOLAS lifesaving/navigation searches.
     _best_exp_chunks: list = []
     _best_exp_score = 0.0
     if reg_name and top_score < _DOC_CONFIDENCE_THRESHOLD:
@@ -232,18 +267,18 @@ def answer_compliance_query(
                 exp_chunks, exp_score = _try_retrieval(expansion, yacht_id, _retrieval_selected)
             except Exception:
                 continue
-            if exp_score >= _DOC_CONFIDENCE_THRESHOLD:
-                if exp_score > _best_exp_score:
-                    _best_exp_chunks = exp_chunks
-                    _best_exp_score = exp_score
+            if exp_score >= _DOC_CONFIDENCE_THRESHOLD and exp_score > _best_exp_score:
+                _best_exp_chunks = exp_chunks
+                _best_exp_score = exp_score
                 logger.info(
                     "compliance_engine: expansion hit — reg=%r expansion=%r score=%.4f",
                     reg_name, expansion[:50], exp_score,
                 )
-                doc_answer = answer_compliance_question(_llm_q, exp_chunks)
-                if not doc_answer.startswith("DECISION: Not explicitly covered"):
-                    return _cap_compliance_answer(doc_answer)
-                # Continue — try ALL expansions, not just the first strong hit.
+        # One final Anthropic call with the highest-scoring expansion chunks.
+        if _best_exp_chunks:
+            doc_answer = answer_compliance_question(_llm_q, _best_exp_chunks)
+            if not doc_answer.startswith("DECISION: Not explicitly covered"):
+                return _done(_cap_compliance_answer(doc_answer))
 
     # 4. Operational playbook fallback — skipped for regulation source inquiries to prevent
     # canned operational responses hijacking "what does X say about Y?" questions.
@@ -254,20 +289,17 @@ def answer_compliance_query(
                 "compliance_engine: playbook fallback — top_score=%.4f question=%r",
                 top_score, question[:60],
             )
-            return _cap_compliance_answer(playbook_answer)
+            return _done(_cap_compliance_answer(playbook_answer))
 
-    # 5. Weak document match but no playbook — use best available chunks (if not yet tried).
-    # Prefer best expansion chunks over weak initial retrieval chunks.
-    _fallback_chunks = _best_exp_chunks if _best_exp_chunks else chunks
-    if _fallback_chunks and not _doc_tried:
+    # 5. Weak initial chunks only — no expansion succeeded; try initial low-confidence results.
+    if chunks and not _doc_tried and not _best_exp_chunks:
         logger.info(
-            "compliance_engine: low-confidence document answer — "
-            "chunks=%d top_score=%.4f best_exp_score=%.4f",
-            len(_fallback_chunks), top_score, _best_exp_score,
+            "compliance_engine: low-confidence document answer — chunks=%d top_score=%.4f",
+            len(chunks), top_score,
         )
-        doc_answer = answer_compliance_question(_llm_q, _fallback_chunks)
+        doc_answer = answer_compliance_question(_llm_q, chunks)
         if not doc_answer.startswith("DECISION: Not explicitly covered"):
-            return _cap_compliance_answer(doc_answer)
+            return _done(_cap_compliance_answer(doc_answer))
 
     # 6. Named regulation but retrieval failed → general guidance fallback.
     if reg_name:
@@ -284,7 +316,7 @@ def answer_compliance_query(
         guidance = answer_compliance_general_guidance(
             _llm_q, reg_name, is_loaded, had_strong_hit=had_strong_hit
         )
-        return _cap_compliance_answer(guidance)
+        return _done(_cap_compliance_answer(guidance))
 
     # 7. Nothing matched.
     logger.warning("compliance_engine: no coverage — question=%r", question[:80])

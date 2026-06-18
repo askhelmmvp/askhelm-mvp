@@ -907,12 +907,12 @@ class TestComplianceAnswerLength(unittest.TestCase):
         result = answer_compliance_followup("maintenance requirements")
         self.assertLessEqual(len(result), 1175)
 
-    def test_prompt_max_tokens_is_400(self):
-        """LLM token budget for compliance answers must not exceed 400."""
+    def test_prompt_max_tokens_is_concise(self):
+        """LLM token budget for compliance answers — concise WhatsApp format (350 max)."""
         import inspect
         import services.anthropic_service as svc
         src = inspect.getsource(svc.answer_compliance_question)
-        self.assertIn("max_tokens=400", src)
+        self.assertIn("max_tokens=350", src)
 
 
 class TestDocumentClassification(unittest.TestCase):
@@ -1880,6 +1880,9 @@ class TestTopicInference(unittest.TestCase):
     def test_unrelated_query_no_inference(self):
         self.assertIsNone(self._detect("what time does the captain need to log the position?"))
 
+    def test_bare_nox_infers_marpol_annex_vi(self):
+        self.assertEqual(self._detect("what are the NOx regulations?"), "MARPOL Annex VI")
+
     def test_explicit_marpol_annex_vi_still_detected(self):
         self.assertEqual(self._detect("MARPOL Annex VI NOx limits"), "MARPOL Annex VI")
 
@@ -2223,12 +2226,14 @@ class TestDeterministicRouting(unittest.TestCase):
         # No direct query matches — must use general expansion list
         self.assertIn(queries[0], _REGULATION_EXPANSIONS["MARPOL Annex VI"])
 
-    def test_general_expansions_always_included_after_direct(self):
-        """Direct queries are prepended; general expansion list always follows."""
+    def test_direct_match_skips_general_expansions(self):
+        """When a direct-topic query matches, general expansions must be excluded so broad
+        unrelated SOLAS/MARPOL searches are avoided for well-known topics."""
         queries = self._expansions("MARPOL Annex VI", "when does Tier III apply?")
         from domain.compliance_engine import _REGULATION_EXPANSIONS
+        # Direct query matches — general list must NOT be appended
         for g in _REGULATION_EXPANSIONS["MARPOL Annex VI"]:
-            self.assertIn(g, queries)
+            self.assertNotIn(g, queries, f"General expansion {g!r} should not appear when direct query matches")
 
     def test_no_duplicate_queries(self):
         """Deduplication must remove any repeated entries."""
@@ -2248,98 +2253,76 @@ class TestDeterministicRouting(unittest.TestCase):
 
 
 class TestExpansionConfidence(unittest.TestCase):
-    """Expansion loop must try all strong hits, not abort on first LLM NOT_COVERED."""
+    """Expansion loop collects best TF-IDF hit then makes ONE LLM call."""
 
     @patch("domain.compliance_engine._get_retriever")
     @patch("services.anthropic_service.answer_compliance_question")
-    def test_all_expansions_tried_after_first_llm_not_covered(self, mock_llm, mock_retriever_getter):
-        """When first strong expansion returns NOT_COVERED, later expansions must still be tried."""
+    def test_all_tfidf_expansions_tried_with_single_llm_call(self, mock_llm, mock_retriever_getter):
+        """All expansion TF-IDF queries are run to find the best score; only ONE LLM call is made."""
         mock_retriever = MagicMock()
 
-        call_count = [0]
+        retrieval_call_count = [0]
 
         def search_side_effect(query, **kwargs):
-            call_count[0] += 1
-            if call_count[0] == 1:
+            retrieval_call_count[0] += 1
+            if retrieval_call_count[0] == 1:
                 return []  # initial retrieval: weak
             # All expansion queries return strong chunks
             return [{"source_reference": "MARPOL VI Reg 13", "content": "NOx limits.", "score": 0.5}]
 
         mock_retriever.search_with_yacht.side_effect = search_side_effect
         mock_retriever_getter.return_value = mock_retriever
-
-        llm_call_count = [0]
-
-        def llm_side_effect(question, chunks):
-            llm_call_count[0] += 1
-            if llm_call_count[0] < 3:
-                return (
-                    "DECISION: Not explicitly covered in the loaded documents.\n"
-                    "WHY: Not in excerpts.\nSOURCE: No matching loaded source\n"
-                    "ACTIONS: • Refer to regulation"
-                )
-            return (
-                "DECISION: NOx Tier III applies in NECAs.\nWHY: MARPOL VI Reg 13.\n"
-                "SOURCE: MARPOL VI Reg 13\nACTIONS: • Check engine build date"
-            )
-
-        mock_llm.side_effect = llm_side_effect
+        mock_llm.return_value = (
+            "DECISION: NOx Tier III applies in NECAs.\nWHY: MARPOL VI Reg 13.\n"
+            "SOURCE: MARPOL VI Reg 13\nACTIONS: • Check engine build date"
+        )
 
         from domain.compliance_engine import answer_compliance_query
         result = answer_compliance_query("when does Tier III apply?")
 
-        # Eventually finds a good answer from a later expansion
         self.assertIn("DECISION:", result)
         self.assertNotIn("Not explicitly covered", result)
-        # Must have called LLM at least twice — no early break
-        self.assertGreaterEqual(llm_call_count[0], 2)
+        # All TF-IDF expansion calls fired (initial + N expansions)
+        self.assertGreater(retrieval_call_count[0], 1)
+        # Exactly ONE LLM call regardless of how many expansions scored above threshold
+        self.assertEqual(mock_llm.call_count, 1)
 
     @patch("domain.compliance_engine._get_retriever")
     @patch("services.anthropic_service.answer_compliance_question")
-    def test_best_expansion_chunks_used_in_fallback_step(self, mock_llm, mock_retriever_getter):
-        """If expansion finds strong chunks but ALL LLM calls return NOT_COVERED, step 5 uses best chunks."""
+    def test_best_scoring_expansion_used_for_llm_call(self, mock_llm, mock_retriever_getter):
+        """When multiple general expansions score above threshold, the LLM receives the highest-scoring chunks.
+        Uses a non-direct-routed MARPOL VI question so the full general expansion list is tried."""
         mock_retriever = MagicMock()
 
         call_count = [0]
+        high_score_chunks = [{"source_reference": "MARPOL VI Reg 3", "content": "fuel oil record.", "score": 0.7}]
+        low_score_chunks = [{"source_reference": "MARPOL VI Reg 2", "content": "definitions.", "score": 0.3}]
 
         def search_side_effect(query, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                return []  # initial retrieval: empty
-            # First strong expansion hit
+                return []  # initial retrieval: weak
             if call_count[0] == 2:
-                return [{"source_reference": "MARPOL VI Reg 13", "content": "NOx.", "score": 0.6}]
-            return []  # remaining expansions: empty
+                return low_score_chunks  # first expansion: lower score
+            if call_count[0] == 3:
+                return high_score_chunks  # second expansion: higher score wins
+            return []  # remaining expansions: nothing
 
         mock_retriever.search_with_yacht.side_effect = search_side_effect
         mock_retriever_getter.return_value = mock_retriever
-
-        llm_call_count = [0]
-
-        def llm_side_effect(question, chunks):
-            llm_call_count[0] += 1
-            if llm_call_count[0] == 1:
-                # Step 3 expansion: NOT_COVERED
-                return (
-                    "DECISION: Not explicitly covered in the loaded documents.\n"
-                    "WHY: Not in excerpts.\nSOURCE: No matching loaded source\n"
-                    "ACTIONS: • Refer to regulation"
-                )
-            # Step 5 fallback retry: good answer
-            return (
-                "DECISION: NOx Tier III applies.\nWHY: MARPOL VI Reg 13.\n"
-                "SOURCE: MARPOL VI Reg 13\nACTIONS: • Verify engine date"
-            )
-
-        mock_llm.side_effect = llm_side_effect
+        mock_llm.return_value = (
+            "DECISION: Fuel oil record book required.\nWHY: MARPOL VI Reg 3.\n"
+            "SOURCE: MARPOL VI Reg 3\nACTIONS: • Maintain ORB"
+        )
 
         from domain.compliance_engine import answer_compliance_query
-        result = answer_compliance_query("when does Tier III apply?")
+        # No direct-query match for "fuel oil record books" → general expansion list (6 queries)
+        answer_compliance_query("what does MARPOL Annex VI say about fuel oil record books?")
 
-        # Must eventually use best expansion chunks and return a real answer
-        self.assertIn("DECISION:", result)
-        # LLM must have been called twice (step 3 + step 5)
-        self.assertEqual(llm_call_count[0], 2)
+        # LLM must have been called exactly once with the highest-scoring chunks
+        self.assertEqual(mock_llm.call_count, 1)
+        called_chunks = mock_llm.call_args[0][1]
+        self.assertEqual(called_chunks, high_score_chunks)
 
     @patch("domain.compliance_engine._get_retriever")
     @patch("services.anthropic_service.answer_compliance_question")
@@ -2370,6 +2353,186 @@ class TestExpansionConfidence(unittest.TestCase):
 
         self.assertIn("DECISION:", result)
         self.assertNotIn("Not explicitly covered", result)
+
+
+class TestFocusedSolasExpansion(unittest.TestCase):
+    """A60 and fire-damper questions must not trigger broad unrelated SOLAS searches."""
+
+    def _get_queries(self, question):
+        from domain.compliance_engine import _get_expansion_queries
+        return _get_expansion_queries("SOLAS", question)
+
+    def test_a60_query_has_no_lifesaving_search(self):
+        queries = self._get_queries("what does SOLAS say about A60 bulkheads?")
+        bad_terms = ["lifesaving", "liferaft", "lifeboat", "navigation", "radio"]
+        for term in bad_terms:
+            for q in queries:
+                self.assertNotIn(term, q.lower(),
+                    f"A60 expansion should not include {term!r} but got: {q!r}")
+
+    def test_a60_query_has_no_navigation_search(self):
+        queries = self._get_queries("does SOLAS require A-60 structural fire protection?")
+        for q in queries:
+            self.assertNotIn("navigation", q.lower())
+            self.assertNotIn("radio", q.lower())
+
+    def test_fire_damper_query_has_no_lifesaving_search(self):
+        queries = self._get_queries("what are the regulations on fire dampers in SOLAS?")
+        bad_terms = ["lifesaving", "liferaft", "lifeboat", "navigation", "radio"]
+        for term in bad_terms:
+            for q in queries:
+                self.assertNotIn(term, q.lower(),
+                    f"Fire damper expansion should not include {term!r} but got: {q!r}")
+
+    def test_a60_query_stays_focused_on_fire_protection(self):
+        queries = self._get_queries("what does SOLAS say about A60 bulkheads?")
+        self.assertTrue(
+            any("A-60" in q or "structural fire protection" in q for q in queries),
+            "A60 query must route to structural fire protection — got: " + str(queries),
+        )
+
+    def test_fire_damper_query_stays_focused_on_ventilation(self):
+        queries = self._get_queries("fire dampers in SOLAS")
+        self.assertTrue(
+            any("damper" in q.lower() or "ventilation" in q.lower() for q in queries),
+            "Fire damper query must route to ventilation/damper topic — got: " + str(queries),
+        )
+
+    def test_unrecognised_solas_topic_uses_general_expansions(self):
+        """When no direct query matches, fall back to the full general list (includes lifesaving)."""
+        queries = self._get_queries("what does SOLAS say about liferafts?")
+        self.assertTrue(
+            any("lifesaving" in q for q in queries),
+            "Liferaft question should use general expansions including lifesaving",
+        )
+
+
+class TestOneAnthropicCallMaximum(unittest.TestCase):
+    """Routed compliance questions must use at most one Anthropic call in the expansion phase."""
+
+    def _run_compliance(self, question, retriever_mock, llm_mock):
+        from domain.compliance_engine import answer_compliance_query
+        return answer_compliance_query(question)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def _assert_one_llm_call(self, question, mock_llm, mock_retriever_getter):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.side_effect = lambda q, **kw: (
+            [] if kw.get("_call_number", 0) == 0
+            else [{"source_reference": "source", "content": "text", "score": 0.5}]
+        )
+        call_n = [0]
+
+        def search_side(q, **kw):
+            call_n[0] += 1
+            if call_n[0] == 1:
+                return []
+            return [{"source_reference": "src", "content": "content", "score": 0.5}]
+
+        mock_retriever.search_with_yacht.side_effect = search_side
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Answer.\nWHY: Reason.\nSOURCE: Source\nACTIONS: • Act"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        answer_compliance_query(question)
+        self.assertEqual(mock_llm.call_count, 1,
+            f"Expected 1 LLM call for {question!r}, got {mock_llm.call_count}")
+
+    def test_fuel_sulphur_one_llm_call(self):
+        self._assert_one_llm_call("what fuel sulphur limits apply?")
+
+    def test_nox_regulations_one_llm_call(self):
+        self._assert_one_llm_call("what are the NOx regulations?")
+
+    def test_tier_iii_one_llm_call(self):
+        self._assert_one_llm_call("when does Tier III apply?")
+
+    def test_eiapp_one_llm_call(self):
+        self._assert_one_llm_call("what is an EIAPP certificate?")
+
+    def test_a60_one_llm_call(self):
+        self._assert_one_llm_call("what does SOLAS say about A60 bulkheads?")
+
+    def test_fire_dampers_one_llm_call(self):
+        self._assert_one_llm_call("what are the regulations on fire dampers in SOLAS?")
+
+
+class TestComplianceCache(unittest.TestCase):
+    """Repeated identical questions must return cached answers without calling the retriever again."""
+
+    def setUp(self):
+        # Clear the cache before each test
+        from domain.compliance_engine import _compliance_cache
+        _compliance_cache.clear()
+
+    def tearDown(self):
+        from domain.compliance_engine import _compliance_cache
+        _compliance_cache.clear()
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_second_identical_call_hits_cache(self, mock_llm, mock_retriever_getter):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "MARPOL VI Reg 13", "content": "NOx.", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.return_value = (
+            "DECISION: Tier III applies in NECAs.\nWHY: MARPOL VI Reg 13.\n"
+            "SOURCE: MARPOL VI Reg 13\nACTIONS: • Verify engine date"
+        )
+
+        from domain.compliance_engine import answer_compliance_query
+        result1 = answer_compliance_query("when does Tier III apply?", yacht_id="test_yacht")
+        result2 = answer_compliance_query("when does Tier III apply?", yacht_id="test_yacht")
+
+        self.assertEqual(result1, result2)
+        # Retriever should only be called on the first request; second is from cache
+        first_call_count = mock_retriever.search_with_yacht.call_count
+        self.assertGreater(first_call_count, 0)
+        # LLM called once; second result comes from cache
+        self.assertEqual(mock_llm.call_count, 1)
+
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_question")
+    def test_different_questions_not_cached_together(self, mock_llm, mock_retriever_getter):
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = [
+            {"source_reference": "src", "content": "text", "score": 0.5}
+        ]
+        mock_retriever_getter.return_value = mock_retriever
+        mock_llm.side_effect = [
+            "DECISION: A.\nWHY: A.\nSOURCE: A\nACTIONS: • A",
+            "DECISION: B.\nWHY: B.\nSOURCE: B\nACTIONS: • B",
+        ]
+
+        from domain.compliance_engine import answer_compliance_query
+        r1 = answer_compliance_query("when does Tier III apply?", yacht_id="test_yacht")
+        r2 = answer_compliance_query("what fuel sulphur limits apply?", yacht_id="test_yacht")
+
+        self.assertNotEqual(r1, r2)
+        self.assertEqual(mock_llm.call_count, 2)
+
+    def test_reset_retriever_clears_cache(self):
+        from domain import compliance_engine
+        compliance_engine._compliance_cache["testkey"] = ("answer", 9999999999)
+        compliance_engine.reset_retriever()
+        self.assertEqual(len(compliance_engine._compliance_cache), 0)
+
+    def test_make_cache_key_normalises_whitespace(self):
+        from domain.compliance_engine import _make_cache_key
+        k1 = _make_cache_key("when  does Tier III apply?", "h3", "", [])
+        k2 = _make_cache_key("when does  Tier III apply?", "h3", "", [])
+        self.assertEqual(k1, k2)
+
+    def test_make_cache_key_differs_for_different_yacht(self):
+        from domain.compliance_engine import _make_cache_key
+        k1 = _make_cache_key("what are NOx limits?", "h3", "", [])
+        k2 = _make_cache_key("what are NOx limits?", "yacht2", "", [])
+        self.assertNotEqual(k1, k2)
 
 
 class TestSolasSourceSelection(unittest.TestCase):
