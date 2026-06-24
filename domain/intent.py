@@ -861,6 +861,7 @@ _COMPLIANCE_SUBSTRINGS = [
     "sulphur",
     "sulfur",
     "seca",
+    "neca",
     "emission control area",
     # ISM Code
     "ism code",

@@ -2677,5 +2677,149 @@ class TestConfidenceLabels(unittest.TestCase):
         self.assertFalse(kwargs.get("had_strong_hit"), "had_strong_hit must be False when no expansion scored above threshold")
 
 
+class TestSulphurLocationSource(unittest.TestCase):
+    """ASK-47: deterministic sulphur/ECA location answers must carry a non-empty SOURCE.
+
+    The LLM is instructed to copy SOURCE from the excerpt header but sometimes leaves
+    it blank; the engine must backfill it from the retrieved chunk's source_reference."""
+
+    # An answer with an EMPTY SOURCE field, mimicking the live WhatsApp regression.
+    EMPTY_SOURCE_ANSWER = (
+        "DECISION:\n"
+        "Sulphur limits apply globally and in designated Emission Control Areas (ECAs).\n\n"
+        "WHY:\n"
+        "Since 1 January 2020, a global cap of 0.50% m/m applies worldwide; in ECAs a "
+        "stricter 0.10% m/m limit applies.\n\n"
+        "SOURCE:\n\n"
+        "ACTIONS:\n"
+        "• Confirm bunkers meet the applicable limit before entering an ECA"
+    )
+
+    def _source_value(self, answer):
+        """Return the text of the SOURCE field (between 'SOURCE:' and the next section)."""
+        import re
+        m = re.search(
+            r'(?ims)^SOURCE:[ \t]*(.*?)(?=^(?:ACTIONS|GENERAL GUIDANCE|DECISION|WHY)\b|\Z)',
+            answer,
+        )
+        return m.group(1).strip() if m else ""
+
+    def _run(self, question, source_reference, llm_answer=None):
+        with patch("domain.compliance_engine._get_retriever") as mock_getter, \
+             patch("services.anthropic_service.answer_compliance_question") as mock_llm, \
+             patch("services.compliance_profile.get_selected_regulations", return_value=[]):
+            mock_retriever = MagicMock()
+            _chunks = [{
+                "source_reference": source_reference,
+                "content": "Sulphur cap 0.50% m/m global; 0.10% m/m in ECAs.",
+                "score": 0.5,
+            }]
+            mock_retriever.search_with_yacht.return_value = _chunks
+            mock_getter.return_value = mock_retriever
+            mock_llm.return_value = llm_answer or self.EMPTY_SOURCE_ANSWER
+            from domain.compliance_engine import answer_compliance_query
+            return answer_compliance_query(question)
+
+    def test_sulphur_location_source_backfilled(self):
+        result = self._run(
+            "where do sulphur limits apply?",
+            "MARPOL Annex VI — Regulation 14, Sulphur Emissions",
+        )
+        self.assertIn("SOURCE:", result)
+        source = self._source_value(result)
+        self.assertTrue(source, "SOURCE field must not be empty")
+        self.assertIn("MARPOL Annex VI", source)
+        self.assertIn("Regulation 14", source)
+
+    def test_seca_source_regression(self):
+        result = self._run(
+            "where are the SECAs?",
+            "MARPOL Annex VI — Regulation 14, Sulphur Emissions",
+        )
+        source = self._source_value(result)
+        self.assertIn("MARPOL Annex VI", source)
+        self.assertIn("Regulation 14", source)
+
+    def test_010_limit_source_regression(self):
+        result = self._run(
+            "where does the 0.10% sulphur limit apply?",
+            "MARPOL Annex VI — Regulation 14, Sulphur Emissions",
+        )
+        source = self._source_value(result)
+        self.assertIn("MARPOL Annex VI", source)
+        self.assertIn("Regulation 14", source)
+
+    def test_050_limit_source_regression(self):
+        result = self._run(
+            "where does the 0.50% sulphur limit apply?",
+            "MARPOL Annex VI — Regulation 14, Sulphur Emissions",
+        )
+        source = self._source_value(result)
+        self.assertIn("MARPOL Annex VI", source)
+        self.assertIn("Regulation 14", source)
+
+    def test_neca_routes_to_regulation_13(self):
+        # NECA location questions must reach compliance and carry the NOx (Reg 13) source.
+        self.assertEqual(classify_text("where are the NECAs?"), COMPLIANCE)
+        result = self._run(
+            "where are the NECAs?",
+            "MARPOL Annex VI — Regulation 13, NOx Emissions",
+        )
+        source = self._source_value(result)
+        self.assertIn("MARPOL Annex VI", source)
+        self.assertIn("Regulation 13", source)
+
+    def test_inventory_location_still_routes_to_stock(self):
+        # Inventory lookups must NOT be hijacked by the compliance routing change.
+        self.assertEqual(classify_text("where is AIK111571?"), "stock_query")
+
+    def test_populated_source_left_untouched(self):
+        populated = self.EMPTY_SOURCE_ANSWER.replace(
+            "SOURCE:\n\n", "SOURCE:\nExisting Source Ref\n\n"
+        )
+        result = self._run(
+            "where do sulphur limits apply?",
+            "MARPOL Annex VI — Regulation 14, Sulphur Emissions",
+            llm_answer=populated,
+        )
+        self.assertEqual(self._source_value(result), "Existing Source Ref")
+
+
+class TestBackfillSource(unittest.TestCase):
+    """Unit coverage for the deterministic SOURCE backfill helper."""
+
+    CHUNKS = [{"source_reference": "MARPOL Annex VI — Regulation 14, Sulphur Emissions"}]
+
+    def test_empty_source_filled(self):
+        from domain.compliance_engine import _backfill_source
+        answer = "DECISION:\nX\n\nWHY:\nY\n\nSOURCE:\n\nACTIONS:\n• do thing"
+        out = _backfill_source(answer, self.CHUNKS)
+        self.assertIn("SOURCE:\nMARPOL Annex VI — Regulation 14, Sulphur Emissions", out)
+        self.assertIn("ACTIONS:", out)
+
+    def test_empty_source_at_end_filled(self):
+        from domain.compliance_engine import _backfill_source
+        out = _backfill_source("DECISION:\nX\n\nWHY:\nY\n\nSOURCE:\n", self.CHUNKS)
+        self.assertTrue(out.rstrip().endswith("Sulphur Emissions"))
+
+    def test_populated_source_untouched(self):
+        from domain.compliance_engine import _backfill_source
+        answer = "DECISION:\nX\n\nWHY:\nY\n\nSOURCE:\nAlready here\n\nACTIONS:\n• do thing"
+        self.assertEqual(_backfill_source(answer, self.CHUNKS), answer)
+
+    def test_no_chunks_untouched(self):
+        from domain.compliance_engine import _backfill_source
+        answer = "DECISION:\nX\n\nSOURCE:\n\nACTIONS:\n• do thing"
+        self.assertEqual(_backfill_source(answer, []), answer)
+
+    def test_fallback_answer_untouched(self):
+        from domain.compliance_engine import _backfill_source
+        answer = (
+            "DECISION: Not explicitly covered in the loaded documents.\n"
+            "SOURCE: No matching loaded source\nACTIONS: • check"
+        )
+        self.assertEqual(_backfill_source(answer, self.CHUNKS), answer)
+
+
 if __name__ == "__main__":
     unittest.main()
