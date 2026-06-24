@@ -169,6 +169,33 @@ def _try_retrieval(question: str, yacht_id: str, selected):
     return chunks, top_score
 
 
+# Matches the SOURCE field of a compliance answer up to the next section header (or
+# end of text). Used to detect — and deterministically backfill — an empty SOURCE.
+_SOURCE_FIELD_RE = re.compile(
+    r'(?ims)^SOURCE:[ \t]*(?P<body>.*?)(?=^(?:ACTIONS|GENERAL GUIDANCE|DECISION|WHY)\b|\Z)'
+)
+
+
+def _backfill_source(answer: str, chunks: list) -> str:
+    """Populate an empty SOURCE field from the top retrieved chunk's source_reference.
+
+    The LLM is instructed to copy the source from the excerpt header but occasionally
+    leaves it blank (e.g. deterministic sulphur/ECA location answers). This guarantees
+    a grounded answer always cites the regulation it was drawn from."""
+    if not chunks:
+        return answer
+    source_ref = (chunks[0].get("source_reference") or "").strip()
+    if not source_ref:
+        return answer
+    match = _SOURCE_FIELD_RE.search(answer)
+    if not match or match.group("body").strip():
+        return answer  # no SOURCE field, or already populated — leave untouched
+    head = answer[:match.start()]
+    tail = answer[match.end():].lstrip("\n")
+    block = f"SOURCE:\n{source_ref}"
+    return f"{head}{block}\n\n{tail}" if tail else f"{head}{block}"
+
+
 def _cap_compliance_answer(text: str) -> str:
     if len(text) <= _WHATSAPP_ANSWER_LIMIT:
         return text
@@ -250,7 +277,7 @@ def answer_compliance_query(
             "compliance_engine: document answer — chunks=%d top_score=%.4f source=%r",
             len(chunks), top_score, chunks[0].get("source_reference", "")[:60],
         )
-        doc_answer = answer_compliance_question(_llm_q, chunks)
+        doc_answer = _backfill_source(answer_compliance_question(_llm_q, chunks), chunks)
         if not doc_answer.startswith("DECISION: Not explicitly covered"):
             return _done(_cap_compliance_answer(doc_answer))
         logger.debug(
@@ -278,7 +305,9 @@ def answer_compliance_query(
                 )
         # One final Anthropic call with the highest-scoring expansion chunks.
         if _best_exp_chunks:
-            doc_answer = answer_compliance_question(_llm_q, _best_exp_chunks)
+            doc_answer = _backfill_source(
+                answer_compliance_question(_llm_q, _best_exp_chunks), _best_exp_chunks
+            )
             if not doc_answer.startswith("DECISION: Not explicitly covered"):
                 return _done(_cap_compliance_answer(doc_answer))
 
@@ -299,7 +328,7 @@ def answer_compliance_query(
             "compliance_engine: low-confidence document answer — chunks=%d top_score=%.4f",
             len(chunks), top_score,
         )
-        doc_answer = answer_compliance_question(_llm_q, chunks)
+        doc_answer = _backfill_source(answer_compliance_question(_llm_q, chunks), chunks)
         if not doc_answer.startswith("DECISION: Not explicitly covered"):
             return _done(_cap_compliance_answer(doc_answer))
 
