@@ -2677,6 +2677,132 @@ class TestConfidenceLabels(unittest.TestCase):
         self.assertFalse(kwargs.get("had_strong_hit"), "had_strong_hit must be False when no expansion scored above threshold")
 
 
+class TestEcaLocationRouting(unittest.TestCase):
+    """ASK-46: NECA/SECA/ECA/sulphur location questions must route to MARPOL VI guidance."""
+
+    def _cls(self, text):
+        return classify_text(text)
+
+    # --- Intent routing ---
+    def test_neca_location_routes_to_compliance(self):
+        self.assertEqual(self._cls("where are the NECAs?"), COMPLIANCE)
+
+    def test_nox_eca_location_routes_to_compliance(self):
+        self.assertEqual(self._cls("where are the NOx ECAs?"), COMPLIANCE)
+
+    def test_seca_location_routes_to_compliance(self):
+        self.assertEqual(self._cls("where are the SECAs?"), COMPLIANCE)
+
+    def test_eca_generic_routes_to_compliance(self):
+        self.assertEqual(self._cls("where are the ECAs?"), COMPLIANCE)
+
+    def test_sulphur_limits_routes_to_compliance(self):
+        self.assertEqual(self._cls("where do sulphur limits apply?"), COMPLIANCE)
+
+    def test_fuel_sulphur_limits_routes_to_compliance(self):
+        self.assertEqual(self._cls("where do fuel sulphur limits apply?"), COMPLIANCE)
+
+    def test_sulphur_010_routes_to_compliance(self):
+        self.assertEqual(self._cls("where does the 0.10% sulphur limit apply?"), COMPLIANCE)
+
+    def test_sulphur_050_routes_to_compliance(self):
+        self.assertEqual(self._cls("where does the 0.50% sulphur limit apply?"), COMPLIANCE)
+
+    # --- Tier III and inventory regressions ---
+    def test_tier_iii_still_routes_to_compliance(self):
+        self.assertEqual(self._cls("where does Tier III apply?"), COMPLIANCE)
+
+    def test_ratchet_straps_still_inventory(self):
+        self.assertEqual(self._cls("where are the ratchet straps?"), "stock_query")
+
+    def test_part_number_still_inventory(self):
+        self.assertEqual(self._cls("where is AIK111571?"), "stock_query")
+
+    def test_show_stock_still_stock_query(self):
+        self.assertEqual(self._cls("show valve stock"), "stock_query")
+
+    # --- Compliance engine: NECA must not return NOT_COVERED ---
+    @patch("services.compliance_profile.get_selected_regulations", return_value=[])
+    @patch("services.compliance_ingest.list_sources", return_value=[])
+    @patch("domain.operational_playbook.lookup", return_value=None)
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    def test_neca_engine_calls_general_guidance(
+        self, mock_guidance, mock_retriever_getter, _pb, _src, _sel
+    ):
+        """'where are the NECAs?' must reach general guidance with MARPOL Annex VI."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI\n\n"
+            "WHY:\nNECAs are NOx Emission Control Areas — MARPOL Annex VI Regulation 13.\n\n"
+            "SOURCE:\nMARPOL Annex VI — Regulation 13 / NOx Emission Control Areas"
+        )
+        from domain.compliance_engine import answer_compliance_query
+        answer = answer_compliance_query("where are the NECAs?")
+        self.assertNotIn("Not explicitly covered", answer)
+        self.assertTrue(
+            any(t in answer for t in ["MARPOL Annex VI", "Regulation 13", "NOx Emission Control"]),
+            f"Expected MARPOL Annex VI / Regulation 13, got: {answer[:150]}"
+        )
+        self.assertTrue(mock_guidance.called, "answer_compliance_general_guidance must be called")
+        _, kwargs = mock_guidance.call_args
+        self.assertEqual(kwargs.get("regulation_name") or mock_guidance.call_args[0][1], "MARPOL Annex VI")
+
+    # --- Compliance engine: SECA must not return NOT_COVERED ---
+    @patch("services.compliance_profile.get_selected_regulations", return_value=[])
+    @patch("services.compliance_ingest.list_sources", return_value=[])
+    @patch("domain.operational_playbook.lookup", return_value=None)
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    def test_seca_engine_calls_general_guidance(
+        self, mock_guidance, mock_retriever_getter, _pb, _src, _sel
+    ):
+        """'where are the SECAs?' must reach general guidance mentioning 0.10%."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI\n\n"
+            "WHY:\n0.10% sulphur limit applies inside SECAs under MARPOL Annex VI Regulation 14.\n\n"
+            "SOURCE:\nMARPOL Annex VI — Regulation 14 / SOx"
+        )
+        from domain.compliance_engine import answer_compliance_query
+        answer = answer_compliance_query("where are the SECAs?")
+        self.assertNotIn("Not explicitly covered", answer)
+        self.assertTrue(
+            any(t in answer for t in ["MARPOL Annex VI", "Regulation 14", "0.10%"]),
+            f"Expected MARPOL Annex VI / Regulation 14 / 0.10%, got: {answer[:150]}"
+        )
+
+    # --- Compliance engine: sulphur limits must not return NOT_COVERED ---
+    @patch("services.compliance_profile.get_selected_regulations", return_value=[])
+    @patch("services.compliance_ingest.list_sources", return_value=[])
+    @patch("domain.operational_playbook.lookup", return_value=None)
+    @patch("domain.compliance_engine._get_retriever")
+    @patch("services.anthropic_service.answer_compliance_general_guidance")
+    def test_sulphur_limits_engine_calls_general_guidance(
+        self, mock_guidance, mock_retriever_getter, _pb, _src, _sel
+    ):
+        """'where do sulphur limits apply?' must reach general guidance with global cap."""
+        mock_retriever = MagicMock()
+        mock_retriever.search_with_yacht.return_value = []
+        mock_retriever_getter.return_value = mock_retriever
+        mock_guidance.return_value = (
+            "DECISION:\nGENERAL GUIDANCE — MARPOL ANNEX VI\n\n"
+            "WHY:\nGlobal 0.50% sulphur cap; 0.10% inside ECAs — MARPOL Annex VI Regulation 14.\n\n"
+            "SOURCE:\nMARPOL Annex VI — Regulation 14"
+        )
+        from domain.compliance_engine import answer_compliance_query
+        answer = answer_compliance_query("where do sulphur limits apply?")
+        self.assertNotIn("Not explicitly covered", answer)
+        self.assertTrue(
+            "0.50%" in answer or "0.10%" in answer,
+            f"Expected 0.50% or 0.10% reference, got: {answer[:150]}"
+        )
+
+
 class TestWhereIsComplianceRouting(unittest.TestCase):
     """ASK-45: 'where are/is' + compliance term must route to compliance, not stock_query."""
 
