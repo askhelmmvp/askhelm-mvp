@@ -50,9 +50,10 @@ _NAMED_REGULATIONS = [
     # Topic-inference entries — infer regulation from well-known terms when explicit name is absent.
     # Handles both American (sulfur) and British (sulphur) spellings via sul(?:f|ph)ur.
     ("MARPOL Annex VI", re.compile(
-        r'\b(?:tier\s+(?:i{1,3}|[123])|eiapp|nox|neca|fuel\s+sul(?:f|ph)ur|'
-        r'sul(?:f|ph)ur\s+(?:cap|limit|content|requirement)|emission\s+control\s+area|'
-        r'eca\s+(?:requirement|requirements|rule|rules|standard|limit|sul(?:f|ph)ur|fuel)|'
+        r'\b(?:tier\s+(?:i{1,3}|[123])|eiapp|nox|necas?|secas?|fuel\s+sul(?:f|ph)ur|'
+        r'sul(?:f|ph)ur\s+(?:caps?|limits?|content|requirement)|sul(?:f|ph)ur\s+ecas?|'
+        r'emission\s+control\s+areas?|ecas?|0\.\d+\s*%\s*sul(?:f|ph)ur|'
+        r'eca\s+(?:requirement|requirements|rule|rules|standard|limits?|sul(?:f|ph)ur|fuel)|'
         r'engine\s+air\s+pollution)\b', re.I,
     )),
 ]
@@ -111,13 +112,14 @@ _REGULATION_EXPANSIONS = {
 # Each entry: (pattern, regulation_name, retrieval_query).
 _TOPIC_DIRECT_QUERIES = [
     (re.compile(
-        r'\b(?:fuel\s+sul(?:f|ph)ur|sul(?:f|ph)ur\s+(?:limits?|caps?)|sox|'
+        r'\b(?:fuel\s+sul(?:f|ph)ur|sul(?:f|ph)ur\s+(?:limits?|caps?)|sox|secas?|'
+        r'sul(?:f|ph)ur\s+ecas?|0\.\d+\s*%\s*sul(?:f|ph)ur|'
         r'eca\s+fuel|emission\s+control\s+area\s+fuel|fuel\s+oil\s+sul(?:f|ph)ur)\b', re.I,
     ), "MARPOL Annex VI",
      "MARPOL Annex VI sulphur SOx ECA emission control area regulation 14 fuel oil"),
     (re.compile(
         r'\b(?:nox|tier\s+(?:i{1,3}|[123])|eiapp|iapp|nox\s+technical\s+code|'
-        r'diesel\s+engine\s+emission|neca)\b', re.I,
+        r'diesel\s+engine\s+emission|necas?)\b', re.I,
     ), "MARPOL Annex VI",
      "MARPOL Annex VI NOx Tier III EIAPP diesel engine regulation 13 NECA"),
     (re.compile(
